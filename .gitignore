@@ -55,9 +55,6 @@ htmlcov/
 .env
 .env.local
 
-# Docker
-.dockerignore
-
 # Terraform
 *.tfstate
 *.tfstate.*
