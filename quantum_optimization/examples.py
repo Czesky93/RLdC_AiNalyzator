@@ -3,9 +3,6 @@ Example: Custom Portfolio Optimization
 Demonstrates how to use the quantum optimizer with custom assets and parameters.
 """
 
-import sys
-sys.path.insert(0, '/home/runner/work/RLdC_AiNalyzator/RLdC_AiNalyzator/quantum_optimization')
-
 from data_service import fetch_market_data, validate_data
 from optimizer import QuantumPortfolioOptimizer
 

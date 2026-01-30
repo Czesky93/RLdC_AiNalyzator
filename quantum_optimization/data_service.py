@@ -77,8 +77,8 @@ def fetch_market_data(symbols, days=90, exchange_name='binance', use_demo_on_fai
         # Create combined DataFrame with all closing prices
         prices_df = pd.DataFrame(price_data)
         
-        # Handle missing data
-        prices_df = prices_df.fillna(method='ffill').fillna(method='bfill')
+        # Handle missing data using pandas 2.0+ API
+        prices_df = prices_df.ffill().bfill()
         
         # Calculate daily returns
         returns_df = prices_df.pct_change().dropna()
