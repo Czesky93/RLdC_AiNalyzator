@@ -4,6 +4,9 @@ This module contains all command handlers for the bot, including:
 - /start: Welcome message
 - /status: System status
 - /portfolio: Portfolio summary
+
+NOTE: The shared portfolio instance (_portfolio) is for single-user PoC only.
+For production multi-user support, implement per-user portfolio instances.
 """
 from telegram import Update
 from telegram.ext import ContextTypes
@@ -18,7 +21,8 @@ except ImportError:
     from portfolio_management.portfolio import PortfolioManager
 
 
-# Create a shared portfolio instance for PoC
+# Create a shared portfolio instance for single-user PoC
+# WARNING: In production, use per-user portfolio instances
 _portfolio = PortfolioManager(initial_cash=10000.0)
 
 

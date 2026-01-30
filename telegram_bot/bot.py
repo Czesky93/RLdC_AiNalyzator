@@ -2,6 +2,7 @@
 
 This module initializes and runs the Telegram bot application.
 """
+from telegram import Update
 from telegram.ext import Application, CommandHandler
 import logging
 
@@ -50,5 +51,4 @@ def run():
 
 
 if __name__ == '__main__':
-    from telegram import Update
     run()

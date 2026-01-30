@@ -3,6 +3,7 @@
 This module provides functionality to send alerts and notifications
 to users via Telegram. Can be used by Risk Engine or AI Trading module.
 """
+import asyncio
 import logging
 from telegram import Bot
 from telegram.error import TelegramError
@@ -15,6 +16,9 @@ logging.basicConfig(
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
+
+# Create a single bot instance to reuse across calls
+_bot = Bot(token=TELEGRAM_BOT_TOKEN)
 
 
 async def send_alert(chat_id: int, message: str) -> bool:
@@ -34,8 +38,7 @@ async def send_alert(chat_id: int, message: str) -> bool:
         >>> await send_alert(123456789, "⚠️ Risk Alert: Portfolio volatility high!")
     """
     try:
-        bot = Bot(token=TELEGRAM_BOT_TOKEN)
-        await bot.send_message(chat_id=chat_id, text=message, parse_mode='Markdown')
+        await _bot.send_message(chat_id=chat_id, text=message, parse_mode='Markdown')
         logger.info(f"Alert sent to chat_id {chat_id}: {message[:50]}...")
         return True
     except TelegramError as e:
@@ -47,7 +50,7 @@ async def send_alert(chat_id: int, message: str) -> bool:
 
 
 async def send_bulk_alert(chat_ids: list, message: str) -> dict:
-    """Send an alert to multiple chats.
+    """Send an alert to multiple chats concurrently.
     
     Args:
         chat_ids: List of Telegram chat IDs
@@ -62,9 +65,13 @@ async def send_bulk_alert(chat_ids: list, message: str) -> dict:
     """
     results = {'success': [], 'failed': []}
     
-    for chat_id in chat_ids:
-        success = await send_alert(chat_id, message)
-        if success:
+    # Send alerts concurrently using asyncio.gather
+    tasks = [send_alert(chat_id, message) for chat_id in chat_ids]
+    send_results = await asyncio.gather(*tasks, return_exceptions=True)
+    
+    # Process results
+    for chat_id, success in zip(chat_ids, send_results):
+        if success is True:
             results['success'].append(chat_id)
         else:
             results['failed'].append(chat_id)
