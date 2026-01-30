@@ -40,9 +40,9 @@ class PortfolioManager:
             amount: Amount to deposit (must be positive)
         
         Raises:
-            ValueError: If amount is negative
+            ValueError: If amount is not positive
         """
-        if amount < 0:
+        if amount <= 0:
             raise ValueError("Deposit amount must be positive")
         self.cash_balance += amount
     
@@ -54,10 +54,10 @@ class PortfolioManager:
             amount: Amount to withdraw (must be positive)
         
         Raises:
-            ValueError: If amount is negative
+            ValueError: If amount is not positive
             InsufficientFundsError: If withdrawal exceeds available cash
         """
-        if amount < 0:
+        if amount <= 0:
             raise ValueError("Withdrawal amount must be positive")
         if amount > self.cash_balance:
             raise InsufficientFundsError(
@@ -77,9 +77,18 @@ class PortfolioManager:
             transaction: The transaction to execute
         
         Raises:
+            ValueError: If transaction has invalid parameters
             InsufficientFundsError: If buying with insufficient cash
             InsufficientHoldingsError: If selling with insufficient holdings
         """
+        # Validate transaction parameters
+        if transaction.amount <= 0:
+            raise ValueError("Transaction amount must be positive")
+        if transaction.price <= 0:
+            raise ValueError("Transaction price must be positive")
+        if transaction.fee < 0:
+            raise ValueError("Transaction fee cannot be negative")
+        
         if transaction.side == 'buy':
             # For buy: total_cost = price * amount + fee
             if transaction.total_cost > self.cash_balance:
@@ -100,10 +109,12 @@ class PortfolioManager:
                     f"available {current_position}"
                 )
             self.positions[transaction.symbol] = current_position - transaction.amount
-            # Remove position if it becomes zero to keep dict clean
-            if self.positions[transaction.symbol] == 0:
+            # Remove position if it becomes effectively zero (within floating point precision)
+            if abs(self.positions[transaction.symbol]) < 1e-9:
                 del self.positions[transaction.symbol]
             self.cash_balance += transaction.total_cost
+        else:
+            raise ValueError(f"Invalid transaction side: {transaction.side}")
     
     def get_total_value(self, current_prices: Dict[str, float]) -> float:
         """

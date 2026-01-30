@@ -52,6 +52,11 @@ class TestPortfolioManager(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.portfolio.deposit(-100.0)
     
+    def test_deposit_zero_raises_error(self):
+        """Test that zero deposits raise an error."""
+        with self.assertRaises(ValueError):
+            self.portfolio.deposit(0.0)
+    
     def test_withdraw(self):
         """Test withdrawing funds."""
         self.portfolio.withdraw(3000.0)
@@ -61,6 +66,11 @@ class TestPortfolioManager(unittest.TestCase):
         """Test that negative withdrawals raise an error."""
         with self.assertRaises(ValueError):
             self.portfolio.withdraw(-100.0)
+    
+    def test_withdraw_zero_raises_error(self):
+        """Test that zero withdrawals raise an error."""
+        with self.assertRaises(ValueError):
+            self.portfolio.withdraw(0.0)
     
     def test_withdraw_insufficient_funds(self):
         """Test withdrawing more than available balance."""
@@ -206,6 +216,54 @@ class TestPortfolioManager(unittest.TestCase):
         with self.assertRaises(InsufficientHoldingsError):
             self.portfolio.execute_trade(sell_tx)
     
+    def test_execute_trade_invalid_amount(self):
+        """Test executing trade with invalid amount."""
+        tx = Transaction(
+            id="tx-001",
+            timestamp=datetime.now(),
+            symbol="BTC/USD",
+            side="buy",
+            amount=0.0,
+            price=50000.0,
+            fee=5.0,
+            total_cost=5.0
+        )
+        
+        with self.assertRaises(ValueError):
+            self.portfolio.execute_trade(tx)
+    
+    def test_execute_trade_invalid_price(self):
+        """Test executing trade with invalid price."""
+        tx = Transaction(
+            id="tx-001",
+            timestamp=datetime.now(),
+            symbol="BTC/USD",
+            side="buy",
+            amount=0.1,
+            price=0.0,
+            fee=5.0,
+            total_cost=5.0
+        )
+        
+        with self.assertRaises(ValueError):
+            self.portfolio.execute_trade(tx)
+    
+    def test_execute_trade_negative_fee(self):
+        """Test executing trade with negative fee."""
+        tx = Transaction(
+            id="tx-001",
+            timestamp=datetime.now(),
+            symbol="BTC/USD",
+            side="buy",
+            amount=0.1,
+            price=50000.0,
+            fee=-5.0,
+            total_cost=4995.0
+        )
+        
+        with self.assertRaises(ValueError):
+            self.portfolio.execute_trade(tx)
+    
     def test_get_total_value(self):
         """Test calculating total portfolio value."""
         # Buy some assets
@@ -308,10 +366,33 @@ class TestRiskEngine(unittest.TestCase):
         self.assertEqual(self.risk_engine.max_drawdown_pct, 0.20)
         self.assertEqual(self.risk_engine.initial_balance, 0.0)
     
+    def test_invalid_max_position_size(self):
+        """Test creating risk engine with invalid max position size."""
+        with self.assertRaises(ValueError):
+            RiskEngine(max_position_size_pct=0.0)
+        with self.assertRaises(ValueError):
+            RiskEngine(max_position_size_pct=-0.1)
+        with self.assertRaises(ValueError):
+            RiskEngine(max_position_size_pct=1.5)
+    
+    def test_invalid_max_drawdown(self):
+        """Test creating risk engine with invalid max drawdown."""
+        with self.assertRaises(ValueError):
+            RiskEngine(max_drawdown_pct=0.0)
+        with self.assertRaises(ValueError):
+            RiskEngine(max_drawdown_pct=-0.1)
+        with self.assertRaises(ValueError):
+            RiskEngine(max_drawdown_pct=1.5)
+    
     def test_set_initial_balance(self):
         """Test setting initial balance."""
         self.risk_engine.set_initial_balance(10000.0)
         self.assertEqual(self.risk_engine.initial_balance, 10000.0)
+    
+    def test_set_initial_balance_negative(self):
+        """Test setting negative initial balance."""
+        with self.assertRaises(ValueError):
+            self.risk_engine.set_initial_balance(-1000.0)
     
     def test_check_trade_risk_within_limits(self):
         """Test trade within position size limits."""

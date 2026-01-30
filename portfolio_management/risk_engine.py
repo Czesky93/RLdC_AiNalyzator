@@ -1,6 +1,6 @@
 """Risk Engine for validating trades against risk limits."""
 
-from typing import Dict, Literal
+from typing import Dict, Literal, Optional
 from .portfolio import PortfolioManager
 
 
@@ -23,7 +23,15 @@ class RiskEngine:
         Args:
             max_position_size_pct: Maximum percentage of portfolio value for a single trade (default 25%)
             max_drawdown_pct: Maximum drawdown percentage from initial balance (default 20%)
+        
+        Raises:
+            ValueError: If percentages are not between 0 and 1
         """
+        if not (0 < max_position_size_pct <= 1):
+            raise ValueError("max_position_size_pct must be between 0 and 1")
+        if not (0 < max_drawdown_pct <= 1):
+            raise ValueError("max_drawdown_pct must be between 0 and 1")
+        
         self.max_position_size_pct = max_position_size_pct
         self.max_drawdown_pct = max_drawdown_pct
         self.initial_balance: float = 0.0
@@ -34,7 +42,12 @@ class RiskEngine:
         
         Args:
             balance: Initial portfolio balance
+        
+        Raises:
+            ValueError: If balance is negative
         """
+        if balance < 0:
+            raise ValueError("Initial balance cannot be negative")
         self.initial_balance = balance
     
     def check_trade_risk(
@@ -44,7 +57,7 @@ class RiskEngine:
         side: Literal['buy', 'sell'],
         amount: float,
         price: float,
-        current_prices: Dict[str, float] = None
+        current_prices: Optional[Dict[str, float]] = None
     ) -> bool:
         """
         Check if a trade passes risk management rules.
@@ -94,7 +107,7 @@ class RiskEngine:
     def check_max_drawdown(
         self,
         portfolio: PortfolioManager,
-        current_prices: Dict[str, float] = None
+        current_prices: Optional[Dict[str, float]] = None
     ) -> bool:
         """
         Check if current drawdown exceeds maximum allowed.
