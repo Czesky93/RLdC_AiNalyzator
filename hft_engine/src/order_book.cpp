@@ -3,6 +3,11 @@
 namespace hft {
 
 void OrderBook::addOrder(const Order& order) {
+    // Check if order ID already exists
+    if (orderIndex_.find(order.id) != orderIndex_.end()) {
+        return; // Order already exists, do not add
+    }
+    
     if (order.side == Side::BUY) {
         bids_[order.price].emplace(order.id, order);
     } else {
