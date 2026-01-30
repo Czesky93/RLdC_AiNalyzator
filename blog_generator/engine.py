@@ -8,6 +8,10 @@ import os
 from typing import Dict, Any, Optional
 from datetime import datetime
 import json
+import logging
+
+# Configure logging
+logger = logging.getLogger(__name__)
 
 
 class BlogAuthor:
@@ -29,12 +33,17 @@ class BlogAuthor:
         self.api_key = api_key or os.getenv('OPENAI_API_KEY')
         self.use_mock = not self.api_key
         
+        # Validate API key is non-empty if provided
+        if self.api_key and not self.api_key.strip():
+            logger.warning("Empty API key provided, using mock mode")
+            self.use_mock = True
+        
         if not self.use_mock:
             try:
                 import openai
                 self.client = openai.OpenAI(api_key=self.api_key)
             except ImportError:
-                print("Warning: openai package not installed. Using mock mode.")
+                logger.warning("openai package not installed. Using mock mode.")
                 self.use_mock = True
     
     def _construct_prompt(self, context: Dict[str, Any]) -> str:
@@ -105,8 +114,8 @@ Keep it professional, informative, and around 300-400 words."""
             )
             return response.choices[0].message.content
         except Exception as e:
-            print(f"Error calling OpenAI API: {e}")
-            print("Falling back to mock content.")
+            logger.error(f"Error calling OpenAI API: {e}")
+            logger.info("Falling back to mock content.")
             return self._generate_mock_content()
     
     def _generate_mock_content(self) -> str:
