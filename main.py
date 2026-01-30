@@ -4,12 +4,17 @@ AI-powered trading analysis and monitoring system
 """
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, validator
 from typing import List, Optional
 import uvicorn
 import sqlite3
 from datetime import datetime
 import os
+import logging
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 app = FastAPI(
     title="RLdC AiNalyzator API",
@@ -17,10 +22,13 @@ app = FastAPI(
     version="1.0.0"
 )
 
+# Get allowed origins from environment variable, default to localhost for development
+ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", "http://localhost:3000,http://localhost").split(",")
+
 # CORS middleware for frontend communication
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # In production, specify exact origins
+    allow_origins=ALLOWED_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -32,52 +40,71 @@ DB_PATH = os.getenv("DB_PATH", "trading_history.db")
 
 def init_db():
     """Initialize the database with required tables"""
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS trades (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            timestamp TEXT NOT NULL,
-            symbol TEXT NOT NULL,
-            action TEXT NOT NULL,
-            quantity REAL NOT NULL,
-            price REAL NOT NULL,
-            total_value REAL NOT NULL,
-            status TEXT DEFAULT 'pending'
-        )
-    """)
-    
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS analysis (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            timestamp TEXT NOT NULL,
-            symbol TEXT NOT NULL,
-            analysis_type TEXT NOT NULL,
-            result TEXT NOT NULL,
-            confidence REAL
-        )
-    """)
-    
-    conn.commit()
-    conn.close()
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS trades (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TEXT NOT NULL,
+                symbol TEXT NOT NULL,
+                action TEXT NOT NULL,
+                quantity REAL NOT NULL,
+                price REAL NOT NULL,
+                total_value REAL NOT NULL,
+                status TEXT DEFAULT 'pending'
+            )
+        """)
+        
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS analysis (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TEXT NOT NULL,
+                symbol TEXT NOT NULL,
+                analysis_type TEXT NOT NULL,
+                result TEXT NOT NULL,
+                confidence REAL
+            )
+        """)
+        
+        conn.commit()
+        conn.close()
+        logger.info(f"Database initialized successfully at {DB_PATH}")
+    except Exception as e:
+        logger.error(f"Failed to initialize database: {e}")
+        raise
 
 
 # Models
 class Trade(BaseModel):
-    symbol: str
-    action: str
-    quantity: float
-    price: float
-    total_value: float
-    status: Optional[str] = "pending"
+    symbol: str = Field(..., min_length=1, max_length=10, description="Trading symbol")
+    action: str = Field(..., description="Trade action (BUY or SELL)")
+    quantity: float = Field(..., gt=0, description="Quantity must be positive")
+    price: float = Field(..., gt=0, description="Price must be positive")
+    total_value: float = Field(..., gt=0, description="Total value must be positive")
+    status: Optional[str] = Field(default="pending", description="Trade status")
+    
+    @validator('action')
+    def validate_action(cls, v):
+        if v.upper() not in ['BUY', 'SELL']:
+            raise ValueError('action must be either BUY or SELL')
+        return v.upper()
+    
+    @validator('symbol')
+    def validate_symbol(cls, v):
+        return v.upper()
 
 
 class Analysis(BaseModel):
-    symbol: str
-    analysis_type: str
-    result: str
-    confidence: Optional[float] = None
+    symbol: str = Field(..., min_length=1, max_length=10, description="Trading symbol")
+    analysis_type: str = Field(..., min_length=1, description="Type of analysis")
+    result: str = Field(..., min_length=1, description="Analysis result")
+    confidence: Optional[float] = Field(default=None, ge=0, le=1, description="Confidence level (0-1)")
+    
+    @validator('symbol')
+    def validate_symbol(cls, v):
+        return v.upper()
 
 
 class TradeResponse(BaseModel):
@@ -105,7 +132,6 @@ class AnalysisResponse(BaseModel):
 async def startup_event():
     """Initialize database on startup"""
     init_db()
-    print(f"Database initialized at {DB_PATH}")
 
 
 @app.get("/")
@@ -132,6 +158,10 @@ async def health_check():
 @app.get("/api/trades", response_model=List[TradeResponse])
 async def get_trades(limit: int = 100):
     """Get all trades with optional limit"""
+    # Validate limit parameter
+    if limit < 1 or limit > 1000:
+        raise HTTPException(status_code=400, detail="Limit must be between 1 and 1000")
+    
     try:
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
@@ -154,8 +184,12 @@ async def get_trades(limit: int = 100):
             ))
         conn.close()
         return trades
+    except sqlite3.Error as e:
+        logger.error(f"Database error while fetching trades: {e}")
+        raise HTTPException(status_code=500, detail="Failed to retrieve trades")
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"Unexpected error while fetching trades: {e}")
+        raise HTTPException(status_code=500, detail="An unexpected error occurred")
 
 
 @app.post("/api/trades", response_model=TradeResponse)
@@ -184,13 +218,21 @@ async def create_trade(trade: Trade):
             total_value=trade.total_value,
             status=trade.status
         )
+    except sqlite3.Error as e:
+        logger.error(f"Database error while creating trade: {e}")
+        raise HTTPException(status_code=500, detail="Failed to create trade")
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"Unexpected error while creating trade: {e}")
+        raise HTTPException(status_code=500, detail="An unexpected error occurred")
 
 
 @app.get("/api/analysis", response_model=List[AnalysisResponse])
 async def get_analysis(limit: int = 100):
     """Get all analysis records with optional limit"""
+    # Validate limit parameter
+    if limit < 1 or limit > 1000:
+        raise HTTPException(status_code=400, detail="Limit must be between 1 and 1000")
+    
     try:
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
@@ -211,8 +253,12 @@ async def get_analysis(limit: int = 100):
             ))
         conn.close()
         return analyses
+    except sqlite3.Error as e:
+        logger.error(f"Database error while fetching analysis: {e}")
+        raise HTTPException(status_code=500, detail="Failed to retrieve analysis")
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"Unexpected error while fetching analysis: {e}")
+        raise HTTPException(status_code=500, detail="An unexpected error occurred")
 
 
 @app.post("/api/analysis", response_model=AnalysisResponse)
@@ -239,8 +285,12 @@ async def create_analysis(analysis: Analysis):
             result=analysis.result,
             confidence=analysis.confidence
         )
+    except sqlite3.Error as e:
+        logger.error(f"Database error while creating analysis: {e}")
+        raise HTTPException(status_code=500, detail="Failed to create analysis")
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"Unexpected error while creating analysis: {e}")
+        raise HTTPException(status_code=500, detail="An unexpected error occurred")
 
 
 if __name__ == "__main__":
