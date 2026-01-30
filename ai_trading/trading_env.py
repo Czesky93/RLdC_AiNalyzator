@@ -50,6 +50,10 @@ class TradingEnv(gym.Env):
         if not all(col in self.df.columns for col in required_columns):
             raise ValueError(f"DataFrame must contain columns: {required_columns}")
         
+        # Validate sufficient data for window size
+        if len(self.df) <= window_size:
+            raise ValueError(f"DataFrame must have more than {window_size} rows (has {len(self.df)})")
+        
         # Action space: 0 = Hold, 1 = Buy, 2 = Sell
         self.action_space = spaces.Discrete(3)
         
@@ -135,7 +139,9 @@ class TradingEnv(gym.Env):
             self.max_net_worth = self.net_worth
         
         # Calculate reward (percentage change in net worth)
-        reward = (self.net_worth - prev_net_worth) / prev_net_worth
+        # Add small epsilon to prevent division by zero
+        epsilon = 1e-10
+        reward = (self.net_worth - prev_net_worth) / (prev_net_worth + epsilon)
         
         # Move to next step
         self.current_step += 1
@@ -245,12 +251,9 @@ class TradingEnv(gym.Env):
             'profit_percent': ((self.net_worth / self.initial_balance) - 1) * 100
         }
     
-    def render(self, mode: str = 'human'):
+    def render(self):
         """
         Render the environment state.
-        
-        Args:
-            mode: Render mode (only 'human' supported)
         """
         info = self._get_info()
         print(f"Step: {info['step']}, "

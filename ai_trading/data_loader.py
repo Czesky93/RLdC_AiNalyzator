@@ -126,7 +126,7 @@ class DataLoader:
         # Check for missing values
         if df.isnull().any().any():
             print("Warning: Found missing values, forward-filling...")
-            df = df.fillna(method='ffill').fillna(method='bfill')
+            df = df.ffill().bfill()
         
         # Ensure all price/volume columns are float
         for col in ['open', 'high', 'low', 'close', 'volume']:

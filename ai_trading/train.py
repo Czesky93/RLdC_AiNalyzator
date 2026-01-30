@@ -21,8 +21,6 @@ class TradingCallback(BaseCallback):
     
     def __init__(self, verbose: int = 1):
         super().__init__(verbose)
-        self.episode_rewards = []
-        self.episode_lengths = []
     
     def _on_step(self) -> bool:
         """
@@ -32,15 +30,19 @@ class TradingCallback(BaseCallback):
             True to continue training
         """
         # Check if episode is done
-        if self.locals.get('dones')[0]:
+        dones = self.locals.get('dones')
+        infos = self.locals.get('infos')
+        
+        if dones is not None and len(dones) > 0 and dones[0]:
             # Get episode info
-            info = self.locals.get('infos')[0]
-            
-            if self.verbose > 0:
-                print(f"\nEpisode finished:")
-                print(f"  Net Worth: ${info.get('net_worth', 0):.2f}")
-                print(f"  Profit: ${info.get('profit', 0):.2f} ({info.get('profit_percent', 0):.2f}%)")
-                print(f"  Total Trades: {info.get('total_trades', 0)}")
+            if infos is not None and len(infos) > 0:
+                info = infos[0]
+                
+                if self.verbose > 0:
+                    print(f"\nEpisode finished:")
+                    print(f"  Net Worth: ${info.get('net_worth', 0):.2f}")
+                    print(f"  Profit: ${info.get('profit', 0):.2f} ({info.get('profit_percent', 0):.2f}%)")
+                    print(f"  Total Trades: {info.get('total_trades', 0)}")
         
         return True
 
@@ -91,12 +93,15 @@ def train_agent(
     # Step 2: Initialize environment
     print(f"\n[2/4] Initializing trading environment...")
     try:
-        env = TradingEnv(df=df, initial_balance=initial_balance)
+        # Create environment
+        trading_env = TradingEnv(df=df, initial_balance=initial_balance)
+        
         # Wrap in DummyVecEnv for stable-baselines3
-        env = DummyVecEnv([lambda: env])
+        env = DummyVecEnv([lambda env=trading_env: env])
+        
         print(f"✓ Environment created")
-        print(f"  Action space: {env.envs[0].action_space}")
-        print(f"  Observation space: {env.envs[0].observation_space.shape}")
+        print(f"  Action space: {trading_env.action_space}")
+        print(f"  Observation space: {trading_env.observation_space.shape}")
         print(f"  Initial balance: ${initial_balance:.2f}")
     except Exception as e:
         print(f"✗ Error initializing environment: {str(e)}")
