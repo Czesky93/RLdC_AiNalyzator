@@ -26,6 +26,9 @@ def main():
     ]
     
     print(f"\nAssets for optimization: {assets}")
+    print("\nNOTE: This system attempts to fetch REAL market data from exchanges.")
+    print("If live data cannot be accessed, it falls back to realistic demo data")
+    print("based on historical cryptocurrency market patterns.")
     
     try:
         # Step 1: Fetch real market data
@@ -36,7 +39,8 @@ def main():
         expected_returns, covariance_matrix, symbol_names = fetch_market_data(
             symbols=assets,
             days=90,
-            exchange_name='binance'
+            exchange_name='binance',
+            use_demo_on_fail=True  # Use demo data if live fetch fails
         )
         
         # Validate data
@@ -82,9 +86,13 @@ def main():
         print("OPTIMIZATION COMPLETE")
         print("=" * 70)
         
-        print("\nNOTE: This allocation is based on real historical market data.")
-        print("Past performance does not guarantee future results.")
-        print("This is for educational and research purposes only.")
+        print("\nIMPORTANT NOTES:")
+        print("• This allocation uses quantum algorithms (VQE) for optimization")
+        print("• The system attempts to use REAL market data when available")
+        print("• Falls back to realistic demo data if exchanges are unreachable")
+        print("• Past performance does not guarantee future results")
+        print("• This is for educational and research purposes only")
+        print("• NOT financial advice - consult a financial advisor for investment decisions")
         
         return 0
         

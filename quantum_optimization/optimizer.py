@@ -4,11 +4,11 @@ Implements portfolio optimization using quantum algorithms (VQE/QAOA).
 """
 
 import numpy as np
-from qiskit_algorithms import VQE, QAOA
+from qiskit_algorithms.minimum_eigensolvers import SamplingVQE, QAOA
 from qiskit_algorithms.optimizers import SLSQP, COBYLA
 from qiskit.circuit.library import TwoLocal
-from qiskit.primitives import Sampler
-from qiskit_optimization.applications import PortfolioOptimization
+from qiskit.primitives import StatevectorSampler
+from qiskit_optimization import QuadraticProgram
 from qiskit_optimization.algorithms import MinimumEigenOptimizer
 from qiskit_optimization.converters import QuadraticProgramToQubo
 
@@ -50,16 +50,35 @@ class QuantumPortfolioOptimizer:
         print(f"Budget (max assets): {budget}")
         print(f"Risk factor: {risk_factor}")
         
-        # Create portfolio optimization problem
-        portfolio = PortfolioOptimization(
-            expected_returns=expected_returns,
-            covariances=covariance_matrix,
-            risk_factor=risk_factor,
-            budget=budget
-        )
+        # Create portfolio optimization quadratic program manually
+        qp = QuadraticProgram('portfolio')
         
-        # Convert to quadratic program
-        qp = portfolio.to_quadratic_program()
+        # Add binary variables for each asset (1 = selected, 0 = not selected)
+        for i in range(num_assets):
+            qp.binary_var(f'x_{i}')
+        
+        # Objective: Maximize return - risk_factor * risk
+        # We minimize the negative (i.e., maximize): -(returns) + risk_factor * (variance)
+        
+        # Linear coefficients (returns - we want to maximize these)
+        linear = {}
+        for i in range(num_assets):
+            linear[f'x_{i}'] = -expected_returns[i]  # Negative because we're minimizing
+        
+        # Quadratic coefficients (covariance - risk penalty)
+        quadratic = {}
+        for i in range(num_assets):
+            for j in range(num_assets):
+                if i <= j:  # Only upper triangle needed
+                    key = (f'x_{i}', f'x_{j}')
+                    quadratic[key] = risk_factor * covariance_matrix[i, j]
+        
+        qp.minimize(linear=linear, quadratic=quadratic)
+        
+        # Budget constraint: sum of selected assets <= budget
+        constraint_linear = {f'x_{i}': 1 for i in range(num_assets)}
+        qp.linear_constraint(constraint_linear, '<=', budget)
+        
         print(f"Quadratic program created with {qp.get_num_vars()} variables")
         
         # Convert to QUBO format
@@ -77,12 +96,12 @@ class QuantumPortfolioOptimizer:
                 reps=3
             )
             
-            # Create VQE instance
+            # Create SamplingVQE instance (for optimization problems)
             optimizer = SLSQP(maxiter=100)
-            vqe = VQE(
+            vqe = SamplingVQE(
+                sampler=StatevectorSampler(),
                 ansatz=ansatz,
-                optimizer=optimizer,
-                sampler=Sampler()
+                optimizer=optimizer
             )
             
             print("Using VQE (Variational Quantum Eigensolver)...")
@@ -92,20 +111,20 @@ class QuantumPortfolioOptimizer:
             # Create QAOA instance
             optimizer = COBYLA(maxiter=100)
             qaoa = QAOA(
+                sampler=StatevectorSampler(),
                 optimizer=optimizer,
-                reps=3,
-                sampler=Sampler()
+                reps=3
             )
             
             print("Using QAOA (Quantum Approximate Optimization Algorithm)...")
             quantum_instance = qaoa
         
-        # Solve using quantum algorithm
+        # Solve using quantum algorithm with sampling-based optimizer
         print("Running quantum optimization...")
-        optimizer = MinimumEigenOptimizer(quantum_instance)
+        meo = MinimumEigenOptimizer(quantum_instance)
         
         try:
-            result = optimizer.solve(qubo)
+            result = meo.solve(qubo)
             
             # Extract solution
             selection = np.array([int(result.x[i]) for i in range(num_assets)])
