@@ -59,4 +59,4 @@ The built files will be in the `dist/` directory.
 - Material UI 5
 - React Router 6
 - Axios
-- Vite
+- Vite 5

@@ -16,47 +16,41 @@ function AiBlog() {
 
   useEffect(() => {
     const fetchPosts = async () => {
+      setLoading(true);
+      setError(null);
+      
       try {
-        setLoading(true);
-        setError(null);
-        
         // Try to fetch from backend API
-        // If backend is not available, use mock data
-        try {
-          const response = await axios.get('/blog/latest');
-          setPosts(response.data);
-        } catch (apiError) {
-          console.warn('Backend API not available, using mock data:', apiError.message);
-          
-          // Mock data for demonstration
-          const mockPosts = [
-            {
-              id: 1,
-              title: 'Strong Bullish Momentum in Tech Sector',
-              content: 'The technology sector is showing remarkable strength today, with major indices pushing to new highs. Investor sentiment remains overwhelmingly positive as earnings reports continue to exceed expectations. The AI revolution is driving unprecedented growth across multiple verticals, from cloud computing to semiconductor manufacturing.',
-              sentiment: 'Bullish',
-              created_at: new Date().toISOString(),
-            },
-            {
-              id: 2,
-              title: 'Market Correction Signals Growing Concerns',
-              content: 'Recent market volatility suggests investors are becoming increasingly cautious about current valuations. Rising interest rates and inflation concerns are putting pressure on growth stocks. Technical indicators are showing overbought conditions across major indices, potentially signaling a near-term pullback.',
-              sentiment: 'Bearish',
-              created_at: new Date(Date.now() - 3600000).toISOString(),
-            },
-            {
-              id: 3,
-              title: 'Energy Sector Sees Renewed Interest',
-              content: 'Energy stocks are attracting significant capital flows as oil prices stabilize above key support levels. The sector is benefiting from improved fundamentals and attractive valuations relative to the broader market. Analysts are upgrading their price targets across major energy producers.',
-              sentiment: 'Bullish',
-              created_at: new Date(Date.now() - 7200000).toISOString(),
-            },
-          ];
-          setPosts(mockPosts);
-        }
-      } catch (err) {
-        console.error('Error fetching posts:', err);
-        setError('Failed to load blog posts. Please try again later.');
+        const response = await axios.get('/blog/latest');
+        setPosts(response.data);
+      } catch (apiError) {
+        console.warn('Backend API not available, using mock data:', apiError.message);
+        
+        // Mock data for demonstration when backend is unavailable
+        const mockPosts = [
+          {
+            id: 1,
+            title: 'Strong Bullish Momentum in Tech Sector',
+            content: 'The technology sector is showing remarkable strength today, with major indices pushing to new highs. Investor sentiment remains overwhelmingly positive as earnings reports continue to exceed expectations. The AI revolution is driving unprecedented growth across multiple verticals, from cloud computing to semiconductor manufacturing.',
+            sentiment: 'Bullish',
+            created_at: new Date().toISOString(),
+          },
+          {
+            id: 2,
+            title: 'Market Correction Signals Growing Concerns',
+            content: 'Recent market volatility suggests investors are becoming increasingly cautious about current valuations. Rising interest rates and inflation concerns are putting pressure on growth stocks. Technical indicators are showing overbought conditions across major indices, potentially signaling a near-term pullback.',
+            sentiment: 'Bearish',
+            created_at: new Date(Date.now() - 3600000).toISOString(),
+          },
+          {
+            id: 3,
+            title: 'Energy Sector Sees Renewed Interest',
+            content: 'Energy stocks are attracting significant capital flows as oil prices stabilize above key support levels. The sector is benefiting from improved fundamentals and attractive valuations relative to the broader market. Analysts are upgrading their price targets across major energy producers.',
+            sentiment: 'Bullish',
+            created_at: new Date(Date.now() - 7200000).toISOString(),
+          },
+        ];
+        setPosts(mockPosts);
       } finally {
         setLoading(false);
       }
