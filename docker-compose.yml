@@ -1,0 +1,56 @@
+version: '3.8'
+
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: rldc-ainalyzator-backend
+    ports:
+      - "8000:8000"
+    volumes:
+      # Persist database outside container
+      - trading_data:/data
+    environment:
+      - DB_PATH=/data/trading_history.db
+      - PORT=8000
+    networks:
+      - rldc-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+  frontend:
+    build:
+      context: ./web_portal/ui
+      dockerfile: Dockerfile
+    container_name: rldc-ainalyzator-frontend
+    ports:
+      - "3000:80"
+    environment:
+      - REACT_APP_API_URL=http://localhost:8000
+    depends_on:
+      backend:
+        condition: service_healthy
+    networks:
+      - rldc-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+networks:
+  rldc-network:
+    driver: bridge
+    name: rldc-network
+
+volumes:
+  trading_data:
+    name: rldc-trading-data
