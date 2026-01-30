@@ -249,4 +249,8 @@ def health_check():
 
 
 if __name__ == '__main__':
-    app.run(debug=True, host='0.0.0.0', port=5000)
+    # Only enable debug mode if explicitly set in environment
+    debug_mode = os.getenv('FLASK_DEBUG', 'False').lower() in ('true', '1', 'yes')
+    # Use localhost for development, not 0.0.0.0 in debug mode
+    host = '127.0.0.1' if debug_mode else '0.0.0.0'
+    app.run(debug=debug_mode, host=host, port=5000)
