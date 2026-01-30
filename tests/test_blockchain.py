@@ -153,9 +153,11 @@ class TestOnChainDataFetcher(unittest.TestCase):
         self.assertIn("Not connected", str(context.exception))
     
     @patch('blockchain_analysis.data_fetcher.Web3.from_wei')
-    def test_get_native_balance_success(self, mock_from_wei):
+    @patch('blockchain_analysis.data_fetcher.Web3.is_address')
+    def test_get_native_balance_success(self, mock_is_address, mock_from_wei):
         """Test getting native balance"""
         self.mock_connector.is_connected.return_value = True
+        mock_is_address.return_value = True
         
         test_address = '0x1234567890abcdef1234567890abcdef12345678'
         balance_wei = 1000000000000000000  # 1 ETH in Wei
@@ -168,6 +170,7 @@ class TestOnChainDataFetcher(unittest.TestCase):
         
         self.assertEqual(result['wei'], balance_wei)
         self.assertEqual(result['ether'], balance_ether)
+        mock_is_address.assert_called_once_with(test_address)
         self.mock_w3.eth.get_balance.assert_called_once_with(test_address)
         mock_from_wei.assert_called_once_with(balance_wei, 'ether')
     
@@ -179,6 +182,17 @@ class TestOnChainDataFetcher(unittest.TestCase):
             self.fetcher.get_native_balance('0x1234567890abcdef1234567890abcdef12345678')
         
         self.assertIn("Not connected", str(context.exception))
+    
+    @patch('blockchain_analysis.data_fetcher.Web3.is_address')
+    def test_get_native_balance_invalid_address(self, mock_is_address):
+        """Test getting balance with invalid address raises error"""
+        self.mock_connector.is_connected.return_value = True
+        mock_is_address.return_value = False
+        
+        with self.assertRaises(ValueError) as context:
+            self.fetcher.get_native_balance('invalid_address')
+        
+        self.assertIn("Invalid Ethereum address", str(context.exception))
     
     @patch('blockchain_analysis.data_fetcher.Web3.from_wei')
     def test_get_gas_price_success(self, mock_from_wei):

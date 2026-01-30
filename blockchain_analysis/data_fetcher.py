@@ -65,9 +65,13 @@ class OnChainDataFetcher:
                 
         Raises:
             RuntimeError: If not connected to blockchain
+            ValueError: If address is invalid
         """
         if not self.connector.is_connected():
             raise RuntimeError("Not connected to blockchain. Call connect() first.")
+        
+        if not Web3.is_address(address):
+            raise ValueError(f"Invalid Ethereum address: {address}")
         
         balance_wei = self.connector.w3.eth.get_balance(address)
         balance_ether = Web3.from_wei(balance_wei, 'ether')
