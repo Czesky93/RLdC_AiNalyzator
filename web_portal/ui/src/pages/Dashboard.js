@@ -60,6 +60,9 @@ const Dashboard = () => {
 
   // Format currency for Y-axis
   const formatYAxis = (value) => {
+    if (value < 1000) {
+      return formatCurrency(value);
+    }
     return `$${(value / 1000).toFixed(0)}k`;
   };
 
@@ -139,7 +142,7 @@ const Dashboard = () => {
       {/* Recent Trades Table Section */}
       <div className="trades-section">
         <h2>Recent Trades</h2>
-        <table className="trades-table">
+        <table className="trades-table" aria-label="Recent trading history">
           <thead>
             <tr>
               <th>Symbol</th>
@@ -151,10 +154,10 @@ const Dashboard = () => {
           <tbody>
             {trades.length > 0 ? (
               trades.map((trade, index) => (
-                <tr key={index}>
+                <tr key={`${trade.symbol}-${trade.price}-${index}`}>
                   <td>{trade.symbol}</td>
                   <td>
-                    <span className={`side ${trade.side.toLowerCase()}`}>
+                    <span className={`side ${trade.side?.toLowerCase() || ''}`}>
                       {trade.side}
                     </span>
                   </td>
