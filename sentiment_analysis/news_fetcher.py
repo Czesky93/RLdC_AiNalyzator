@@ -63,22 +63,25 @@ class NewsFetcher:
         """
         Fetch recent headlines as text-only list for sentiment analysis.
         
+        Combines title and summary for better context in analysis.
+        
         Args:
             max_items: Maximum number of headlines to return per feed
             
         Returns:
-            List of headline strings (title + summary)
+            List of headline strings (title + summary combined)
         """
         headlines = self.fetch_headlines(max_items)
         
         # Combine title and summary for better context
         text_list = []
         for h in headlines:
-            text = h['title']
-            if h.get('summary'):
-                # Add summary if different from title
-                if h['summary'].strip() != h['title'].strip():
-                    text += ' - ' + h['summary']
+            text = h.get('title', '')
+            summary = h.get('summary', '')
+            
+            if summary and summary.strip() and summary.strip() != text.strip():
+                # Add summary if it exists and is different from title
+                text += ' - ' + summary
             text_list.append(text)
             
         return text_list

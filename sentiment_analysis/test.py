@@ -53,13 +53,7 @@ def test_sentiment_engine():
         print("-" * 80)
         
         for i, result in enumerate(results, 1):
-            sentiment_emoji = {
-                'positive': '📈',
-                'negative': '📉',
-                'neutral': '➡️'
-            }
-            
-            emoji = sentiment_emoji.get(result['label'], '')
+            emoji = engine.get_sentiment_emoji(result['label'])
             label = result['label'].upper()
             score = result['score']
             text = result['text']
@@ -73,33 +67,22 @@ def test_sentiment_engine():
         
         print("SENTIMENT DISTRIBUTION:")
         print("-" * 80)
-        total = summary['total']
-        print(f"Positive: {summary['positive']:2d} ({summary['positive']/total*100:5.1f}%)")
-        print(f"Negative: {summary['negative']:2d} ({summary['negative']/total*100:5.1f}%)")
-        print(f"Neutral:  {summary['neutral']:2d} ({summary['neutral']/total*100:5.1f}%)")
-        print(f"Total:    {total:2d}")
+        if summary['total'] > 0:
+            total = summary['total']
+            print(f"Positive: {summary['positive']:2d} ({summary['positive']/total*100:5.1f}%)")
+            print(f"Negative: {summary['negative']:2d} ({summary['negative']/total*100:5.1f}%)")
+            print(f"Neutral:  {summary['neutral']:2d} ({summary['neutral']/total*100:5.1f}%)")
+            print(f"Total:    {total:2d}")
+        else:
+            print("No results to summarize")
         print()
         
         # Display overall market sentiment
         print("OVERALL MARKET SENTIMENT:")
         print("=" * 80)
         
-        # Interpret the sentiment score
-        if market_sentiment > 0.2:
-            sentiment_text = "BULLISH 🚀"
-            interpretation = "Strong positive sentiment in crypto news"
-        elif market_sentiment > 0.05:
-            sentiment_text = "SLIGHTLY BULLISH 📈"
-            interpretation = "Moderately positive sentiment"
-        elif market_sentiment < -0.2:
-            sentiment_text = "BEARISH 📉"
-            interpretation = "Strong negative sentiment in crypto news"
-        elif market_sentiment < -0.05:
-            sentiment_text = "SLIGHTLY BEARISH 📊"
-            interpretation = "Moderately negative sentiment"
-        else:
-            sentiment_text = "NEUTRAL ➡️"
-            interpretation = "Mixed or neutral sentiment"
+        # Use the new interpretation method
+        sentiment_text, interpretation = engine.interpret_market_sentiment(market_sentiment)
         
         print(f"\nMarket Sentiment Score: {market_sentiment:+.3f}")
         print(f"Range: -1.0 (very negative) to +1.0 (very positive)")

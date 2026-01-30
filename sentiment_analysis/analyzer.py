@@ -5,11 +5,8 @@ Uses FinBERT model to analyze sentiment of financial/crypto news headlines.
 """
 
 from transformers import pipeline
-from typing import List, Dict, Tuple
+from typing import List, Dict, Tuple, Any
 import warnings
-
-# Suppress transformers warnings
-warnings.filterwarnings('ignore')
 
 
 class SentimentEngine:
@@ -30,21 +27,24 @@ class SentimentEngine:
         print(f"Loading sentiment model: {model_name}...")
         
         try:
-            # Initialize the sentiment analysis pipeline
-            self.classifier = pipeline(
-                "sentiment-analysis",
-                model=model_name,
-                tokenizer=model_name,
-                max_length=512,
-                truncation=True
-            )
+            # Suppress only transformers-specific warnings during model loading
+            with warnings.catch_warnings():
+                warnings.filterwarnings('ignore', category=FutureWarning, module='transformers')
+                # Initialize the sentiment analysis pipeline
+                self.classifier = pipeline(
+                    "sentiment-analysis",
+                    model=model_name,
+                    tokenizer=model_name,
+                    max_length=512,
+                    truncation=True
+                )
             print("Model loaded successfully!")
             
         except Exception as e:
             print(f"Error loading model: {str(e)}")
             raise
     
-    def analyze_text(self, text: str) -> Dict[str, any]:
+    def analyze_text(self, text: str) -> Dict[str, Any]:
         """
         Analyze sentiment of a single text.
         
@@ -118,12 +118,52 @@ class SentimentEngine:
                 print(f"  Processed {i}/{len(headlines)} headlines...")
         
         # Calculate aggregate market sentiment
-        if sentiment_values:
+        if sentiment_values and len(sentiment_values) > 0:
             market_sentiment = sum(sentiment_values) / len(sentiment_values)
         else:
             market_sentiment = 0.0
             
         return results, market_sentiment
+    
+    @staticmethod
+    def interpret_market_sentiment(market_sentiment: float) -> Tuple[str, str]:
+        """
+        Interpret market sentiment score into human-readable text.
+        
+        Args:
+            market_sentiment: Score from -1.0 (very negative) to +1.0 (very positive)
+            
+        Returns:
+            Tuple of (sentiment_text, interpretation)
+        """
+        if market_sentiment > 0.2:
+            return "BULLISH 🚀", "Strong positive sentiment in crypto news"
+        elif market_sentiment > 0.05:
+            return "SLIGHTLY BULLISH 📈", "Moderately positive sentiment"
+        elif market_sentiment < -0.2:
+            return "BEARISH 📉", "Strong negative sentiment in crypto news"
+        elif market_sentiment < -0.05:
+            return "SLIGHTLY BEARISH 📊", "Moderately negative sentiment"
+        else:
+            return "NEUTRAL ➡️", "Mixed or neutral sentiment"
+    
+    @staticmethod
+    def get_sentiment_emoji(label: str) -> str:
+        """
+        Get emoji representation for sentiment label.
+        
+        Args:
+            label: Sentiment label (positive, negative, neutral)
+            
+        Returns:
+            Emoji string
+        """
+        emoji_map = {
+            'positive': '📈',
+            'negative': '📉',
+            'neutral': '➡️'
+        }
+        return emoji_map.get(label.lower(), '')
     
     def get_sentiment_summary(self, results: List[Dict]) -> Dict[str, int]:
         """
