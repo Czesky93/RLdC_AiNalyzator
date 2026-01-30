@@ -8,7 +8,7 @@ Moving Average crossover strategy.
 
 import pandas as pd
 from backtesting import HistoricalDataLoader, Backtester
-from backtesting.analytics import generate_report, print_report
+from backtesting import generate_report, print_report
 
 
 def simple_sma_strategy(short_window: int = 10, long_window: int = 30):
@@ -74,12 +74,14 @@ def main():
     print("\nFetching historical data...")
     data_loader = HistoricalDataLoader(exchange_id='binance')
     
+    # Define filename before try block
+    csv_filename = f"btc_usdt_{timeframe}_{days_back}d.csv"
+    
     try:
         data = data_loader.fetch_data(symbol, timeframe, days_back)
         print(f"Fetched {len(data)} candlesticks")
         
         # Save data for future use
-        csv_filename = f"btc_usdt_{timeframe}_{days_back}d.csv"
         data_loader.save_to_csv(csv_filename)
         print(f"Saved data to {csv_filename}")
         
@@ -89,7 +91,7 @@ def main():
         try:
             data = data_loader.load_from_csv(csv_filename)
             print(f"Loaded {len(data)} candlesticks from cache")
-        except:
+        except FileNotFoundError:
             print("No cached data available. Exiting.")
             return
     

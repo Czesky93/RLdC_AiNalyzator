@@ -166,23 +166,28 @@ def breakout_strategy(lookback=20, breakout_threshold=1.02):
     lows = []
     
     def strategy_logic(row):
-        highs.append(row['high'])
-        lows.append(row['low'])
-        
-        if len(highs) < lookback:
-            return 'HOLD'
-        
-        # Calculate recent high and low
-        recent_high = max(highs[-lookback:])
-        recent_low = min(lows[-lookback:])
-        
+        current_high = row['high']
+        current_low = row['low']
         current_price = row['close']
         
-        # Generate signals based on breakouts
-        if current_price > recent_high * breakout_threshold:
-            return 'BUY'
-        elif current_price < recent_low / breakout_threshold:
-            return 'SELL'
+        # Calculate recent high and low (excluding current candle)
+        if len(highs) >= lookback:
+            recent_high = max(highs[-lookback:])
+            recent_low = min(lows[-lookback:])
+            
+            # Generate signals based on breakouts
+            if current_price > recent_high * breakout_threshold:
+                highs.append(current_high)
+                lows.append(current_low)
+                return 'BUY'
+            elif current_price < recent_low / breakout_threshold:
+                highs.append(current_high)
+                lows.append(current_low)
+                return 'SELL'
+        
+        # Store current values for next iteration
+        highs.append(current_high)
+        lows.append(current_low)
         
         return 'HOLD'
     

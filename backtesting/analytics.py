@@ -90,7 +90,7 @@ def calculate_sharpe_ratio(equity_curve: pd.DataFrame, risk_free_rate: float = 0
     # Calculate returns
     returns = equity_curve['total_value'].pct_change().dropna()
     
-    if len(returns) == 0 or returns.std() == 0:
+    if len(returns) == 0 or returns.std() == 0 or pd.isna(returns.std()):
         return 0.0
     
     # Calculate excess returns
@@ -128,8 +128,15 @@ def generate_report(equity_curve: pd.DataFrame, trade_history: pd.DataFrame,
     num_trades = len(sell_trades)
     
     # Average profit/loss per trade
-    avg_pnl = sell_trades['pnl'].mean() if not sell_trades.empty else 0.0
-    avg_pnl_pct = sell_trades['pnl_pct'].mean() if not sell_trades.empty else 0.0
+    if not sell_trades.empty:
+        avg_pnl = sell_trades['pnl'].mean()
+        avg_pnl_pct = sell_trades['pnl_pct'].mean()
+        # Handle potential NaN values
+        avg_pnl = 0.0 if pd.isna(avg_pnl) else avg_pnl
+        avg_pnl_pct = 0.0 if pd.isna(avg_pnl_pct) else avg_pnl_pct
+    else:
+        avg_pnl = 0.0
+        avg_pnl_pct = 0.0
     
     report = {
         'initial_capital': initial_capital,

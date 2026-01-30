@@ -11,7 +11,8 @@ from .analytics import (
     calculate_max_drawdown,
     calculate_win_rate,
     calculate_sharpe_ratio,
-    generate_report
+    generate_report,
+    print_report
 )
 
 __all__ = [
@@ -21,5 +22,6 @@ __all__ = [
     'calculate_max_drawdown',
     'calculate_win_rate',
     'calculate_sharpe_ratio',
-    'generate_report'
+    'generate_report',
+    'print_report'
 ]

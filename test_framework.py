@@ -25,12 +25,13 @@ def create_test_data():
     base_price = 30000
     
     close_prices = base_price + np.cumsum(np.random.randn(100) * 100)
+    open_prices = close_prices - np.random.randn(100) * 50
     
     data = pd.DataFrame({
         'timestamp': dates,
-        'open': close_prices - np.random.rand(100) * 50,
-        'high': close_prices + np.random.rand(100) * 100,
-        'low': close_prices - np.random.rand(100) * 100,
+        'open': open_prices,
+        'high': np.maximum(open_prices, close_prices) + np.random.rand(100) * 100,
+        'low': np.minimum(open_prices, close_prices) - np.random.rand(100) * 100,
         'close': close_prices,
         'volume': np.random.rand(100) * 1000
     })

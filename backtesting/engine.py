@@ -29,6 +29,8 @@ class Backtester:
         self.cash = initial_capital
         self.asset_balance = 0.0
         self.position = None  # 'LONG' or None
+        self.last_buy_price = None
+        self.last_buy_cash = None
     
     def run(self, data: pd.DataFrame, strategy_logic: Callable) -> Dict:
         """
@@ -45,6 +47,8 @@ class Backtester:
         self.cash = self.initial_capital
         self.asset_balance = 0.0
         self.position = None
+        self.last_buy_price = None
+        self.last_buy_cash = None
         self.equity_curve = []
         self.trade_history = []
         
@@ -90,6 +94,10 @@ class Backtester:
             self.asset_balance = available_cash / price
             self.position = 'LONG'
             
+            # Store buy information for PnL calculation
+            self.last_buy_price = price
+            self.last_buy_cash = self.cash
+            
             self.trade_history.append({
                 'timestamp': row['timestamp'],
                 'type': 'BUY',
@@ -114,11 +122,10 @@ class Backtester:
         self.asset_balance = 0.0
         self.position = None
         
-        # Calculate profit/loss for this trade
-        if len(self.trade_history) > 0:
-            last_buy = [t for t in self.trade_history if t['type'] == 'BUY'][-1]
-            pnl = self.cash - last_buy['cash_before']
-            pnl_pct = (pnl / last_buy['cash_before']) * 100
+        # Calculate profit/loss using stored buy information
+        if self.last_buy_cash is not None:
+            pnl = self.cash - self.last_buy_cash
+            pnl_pct = (pnl / self.last_buy_cash) * 100
         else:
             pnl = 0
             pnl_pct = 0
@@ -133,3 +140,7 @@ class Backtester:
             'pnl': pnl,
             'pnl_pct': pnl_pct
         })
+        
+        # Clear buy tracking
+        self.last_buy_price = None
+        self.last_buy_cash = None

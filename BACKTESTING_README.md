@@ -74,8 +74,11 @@ A strategy is a function that takes a data row and returns a signal ('BUY', 'SEL
 def my_strategy():
     """Simple momentum strategy example."""
     prices = []
+    in_position = False
     
     def strategy_logic(row):
+        nonlocal in_position
+        
         prices.append(row['close'])
         
         if len(prices) < 20:
@@ -84,8 +87,10 @@ def my_strategy():
         # Buy if price is above 20-period average
         avg = sum(prices[-20:]) / 20
         if row['close'] > avg * 1.02 and not in_position:
+            in_position = True
             return 'BUY'
         elif row['close'] < avg * 0.98 and in_position:
+            in_position = False
             return 'SELL'
         
         return 'HOLD'

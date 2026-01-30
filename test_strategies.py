@@ -26,12 +26,13 @@ def create_trending_data(num_points=200):
     volatility = np.random.randn(num_points) * 300
     
     close_prices = base_price + trend + volatility
+    open_prices = close_prices - np.random.randn(num_points) * 50
     
     data = pd.DataFrame({
         'timestamp': dates,
-        'open': close_prices - np.random.rand(num_points) * 100,
-        'high': close_prices + np.random.rand(num_points) * 200,
-        'low': close_prices - np.random.rand(num_points) * 200,
+        'open': open_prices,
+        'high': np.maximum(open_prices, close_prices) + np.random.rand(num_points) * 200,
+        'low': np.minimum(open_prices, close_prices) - np.random.rand(num_points) * 200,
         'close': close_prices,
         'volume': np.random.rand(num_points) * 1000
     })

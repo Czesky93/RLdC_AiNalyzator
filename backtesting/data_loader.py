@@ -20,7 +20,14 @@ class HistoricalDataLoader:
         Args:
             exchange_id: The ccxt exchange ID (default: 'binance')
         """
-        self.exchange = getattr(ccxt, exchange_id)()
+        # Validate exchange_id against supported exchanges
+        if not hasattr(ccxt, exchange_id):
+            raise ValueError(f"Exchange '{exchange_id}' is not supported by ccxt")
+        
+        try:
+            self.exchange = getattr(ccxt, exchange_id)()
+        except Exception as e:
+            raise ValueError(f"Failed to initialize exchange '{exchange_id}': {e}")
         self.data = None
     
     def fetch_data(self, symbol: str, timeframe: str = '1h', days_back: int = 30) -> pd.DataFrame:
