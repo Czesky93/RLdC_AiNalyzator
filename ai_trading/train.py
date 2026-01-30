@@ -11,6 +11,7 @@ import numpy as np
 
 from data_loader import load_data
 from trading_env import TradingEnv
+from mock_data import generate_mock_ohlcv
 
 
 class TradingCallback(BaseCallback):
@@ -51,7 +52,8 @@ def train_agent(
     total_timesteps: int = 10000,
     initial_balance: float = 10000.0,
     model_save_path: str = 'models/ppo_trading_poc.zip',
-    verbose: int = 1
+    verbose: int = 1,
+    use_mock_data: bool = False
 ):
     """
     Train a PPO agent for cryptocurrency trading.
@@ -64,6 +66,7 @@ def train_agent(
         initial_balance: Starting balance for trading
         model_save_path: Path to save the trained model
         verbose: Verbosity level (0=none, 1=info, 2=debug)
+        use_mock_data: If True, use generated mock data instead of real API data
     """
     print("="*60)
     print("AI Trading PoC - Training PPO Agent")
@@ -72,8 +75,13 @@ def train_agent(
     # Step 1: Load data
     print(f"\n[1/4] Loading data for {symbol} ({timeframe})...")
     try:
-        df = load_data(symbol=symbol, timeframe=timeframe, limit=limit)
-        print(f"✓ Loaded {len(df)} candles")
+        if use_mock_data:
+            print(f"  Using mock data for testing...")
+            df = generate_mock_ohlcv(n_candles=limit)
+            print(f"✓ Generated {len(df)} mock candles")
+        else:
+            df = load_data(symbol=symbol, timeframe=timeframe, limit=limit)
+            print(f"✓ Loaded {len(df)} candles")
         print(f"  Date range: {df['timestamp'].min()} to {df['timestamp'].max()}")
         print(f"  Price range: ${df['close'].min():.2f} - ${df['close'].max():.2f}")
     except Exception as e:
@@ -109,7 +117,7 @@ def train_agent(
             gae_lambda=0.95,
             clip_range=0.2,
             ent_coef=0.01,
-            tensorboard_log="./tensorboard_logs/"
+            tensorboard_log=None  # Disable tensorboard logging
         )
         print(f"✓ PPO agent initialized")
         print(f"  Policy: MlpPolicy")
@@ -126,7 +134,7 @@ def train_agent(
         model.learn(
             total_timesteps=total_timesteps,
             callback=callback,
-            progress_bar=True
+            progress_bar=False  # Disable progress bar
         )
         print("-" * 60)
         print(f"✓ Training completed!")
@@ -163,6 +171,7 @@ if __name__ == "__main__":
     # Train with default parameters
     # Note: For a real PoC, you might want to use more timesteps (e.g., 50000-100000)
     # Using 10000 here for quick testing
+    # Set use_mock_data=True for testing without network access
     train_agent(
         symbol='BTC/USDT',
         timeframe='1h',
@@ -170,5 +179,6 @@ if __name__ == "__main__":
         total_timesteps=10000,
         initial_balance=10000.0,
         model_save_path='models/ppo_trading_poc.zip',
-        verbose=1
+        verbose=1,
+        use_mock_data=True  # Set to False to use real API data
     )
