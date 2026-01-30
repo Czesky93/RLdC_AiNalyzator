@@ -4,7 +4,7 @@ Simulates trading with virtual balance for testing strategies without real money
 """
 
 from datetime import datetime
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Any
 from dataclasses import dataclass, field
 from .aggregator import TradeSignal, Action
 
@@ -267,7 +267,7 @@ class PaperTrader:
         self.holdings = 0.0
         self.trade_history = []
     
-    def get_trade_summary(self) -> Dict[str, any]:
+    def get_trade_summary(self) -> Dict[str, Any]:
         """
         Get a summary of trading activity.
         

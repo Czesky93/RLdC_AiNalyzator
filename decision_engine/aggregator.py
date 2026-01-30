@@ -79,10 +79,14 @@ class SignalAggregator:
         """
         Normalize a value to the range [-1, 1].
         
+        Note: By default, assumes input is already in [-1, 1] range. If the input
+        is already normalized, this acts as a validation and clamping operation.
+        For inputs in a different range, provide the actual min_val and max_val.
+        
         Args:
             value: The value to normalize
-            min_val: Minimum expected value
-            max_val: Maximum expected value
+            min_val: Minimum expected value (default: -1.0)
+            max_val: Maximum expected value (default: 1.0)
         
         Returns:
             Normalized value between -1 and 1

@@ -5,8 +5,15 @@ Shows how to use the BotKernel with simulated data.
 """
 
 import random
+import logging
 from decision_engine import BotKernel, SignalAggregator, PaperTrader, TradeSignal
 from decision_engine.aggregator import Action
+
+# Configure logging for demo
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
 
 
 def demo_basic_signal_aggregation():

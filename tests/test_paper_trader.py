@@ -126,7 +126,7 @@ class TestPaperTrader:
         
         trade = trader.execute_order(signal, 100.0)
         
-        # Fee should be 0.1% of trade amount
+        # Fee should be 0.1% of the allocated balance (not the final asset purchase)
         expected_fee = 10000.0 * 0.001
         assert abs(trade.fee - expected_fee) < 0.01
     
@@ -173,18 +173,23 @@ class TestPaperTrader:
         trader = PaperTrader(virtual_balance=10000.0)
         
         # Execute various trades
+        # First buy uses all available balance
         trader.execute_order(TradeSignal(Action.BUY, 0.8), 100.0)
-        # Second buy will fail (no balance left), so it becomes a HOLD
+        # Second buy will fail due to insufficient balance and log as HOLD
         trader.execute_order(TradeSignal(Action.BUY, 0.8), 105.0)
+        # Sell the holdings
         trader.execute_order(TradeSignal(Action.SELL, 0.7), 110.0)
+        # Explicit hold
         trader.execute_order(TradeSignal(Action.HOLD, 0.5), 108.0)
         
         summary = trader.get_trade_summary()
         
         assert summary['total_trades'] == 4
-        assert summary['buy_count'] == 1  # Only first buy succeeds
+        # First BUY succeeds, second fails (insufficient funds) -> becomes HOLD
+        assert summary['buy_count'] == 1
         assert summary['sell_count'] == 1
-        assert summary['hold_count'] == 2  # Failed buy becomes HOLD + explicit HOLD
+        # Failed BUY + explicit HOLD = 2
+        assert summary['hold_count'] == 2
         assert summary['total_fees'] > 0
     
     def test_min_trade_amount(self):

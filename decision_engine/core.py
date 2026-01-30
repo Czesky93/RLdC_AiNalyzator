@@ -10,13 +10,6 @@ from .aggregator import SignalAggregator, TradeSignal
 from .paper_trader import PaperTrader, Trade
 
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
-
-
 class BotKernel:
     """
     Core bot kernel that orchestrates all trading subsystems.
