@@ -9,11 +9,11 @@ function App() {
   const [analysis, setAnalysis] = useState([]);
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState('dashboard');
-  const [apiStatus, setApiStatus] = useState('unknown');
+  const [apiStatus, setApiStatus] = useState('nieznany');
 
   useEffect(() => {
     fetchData();
-    const interval = setInterval(fetchData, 30000); // Refresh every 30 seconds
+    const interval = setInterval(fetchData, 30000); // Odświeżanie co 30 sekund
     return () => clearInterval(interval);
   }, []);
 
@@ -25,13 +25,13 @@ function App() {
         axios.get(`${API_URL}/api/analysis?limit=10`)
       ]);
       
-      setApiStatus('healthy');
+      setApiStatus('zdrowy');
       setTrades(tradesRes.data);
       setAnalysis(analysisRes.data);
       setLoading(false);
     } catch (error) {
-      console.error('Error fetching data:', error);
-      setApiStatus('error');
+      console.error('Błąd podczas pobierania danych:', error);
+      setApiStatus('błąd');
       setLoading(false);
     }
   };
@@ -40,16 +40,16 @@ function App() {
     try {
       const sampleTrade = {
         symbol: 'AAPL',
-        action: 'BUY',
+        action: 'KUP',
         quantity: 10,
         price: 150.50,
         total_value: 1505.00,
-        status: 'completed'
+        status: 'ukończone'
       };
       await axios.post(`${API_URL}/api/trades`, sampleTrade);
       fetchData();
     } catch (error) {
-      console.error('Error creating trade:', error);
+      console.error('Błąd podczas tworzenia transakcji:', error);
     }
   };
 
@@ -57,24 +57,43 @@ function App() {
     try {
       const sampleAnalysis = {
         symbol: 'AAPL',
-        analysis_type: 'Trend Analysis',
-        result: 'Bullish trend detected',
+        analysis_type: 'Analiza trendu',
+        result: 'Wykryto trend wzrostowy',
         confidence: 0.85
       };
       await axios.post(`${API_URL}/api/analysis`, sampleAnalysis);
       fetchData();
     } catch (error) {
-      console.error('Error creating analysis:', error);
+      console.error('Błąd podczas tworzenia analizy:', error);
     }
+  };
+
+  const translateAction = (action) => {
+    const translations = {
+      'BUY': 'KUP',
+      'SELL': 'SPRZEDAJ'
+    };
+    return translations[action] || action;
+  };
+
+  const translateStatus = (status) => {
+    const translations = {
+      'pending': 'oczekujące',
+      'completed': 'ukończone',
+      'cancelled': 'anulowane',
+      'oczekujące': 'oczekujące',
+      'ukończone': 'ukończone'
+    };
+    return translations[status] || status;
   };
 
   return (
     <div className="App">
       <header className="App-header">
         <h1>🤖 RLdC AiNalyzator</h1>
-        <p>AI-Powered Trading Analysis & Monitoring</p>
+        <p>Analiza i Monitorowanie Transakcji oparte na AI</p>
         <div className={`status-indicator ${apiStatus}`}>
-          API Status: {apiStatus}
+          Status API: {apiStatus}
         </div>
       </header>
 
@@ -83,52 +102,52 @@ function App() {
           className={activeTab === 'dashboard' ? 'active' : ''} 
           onClick={() => setActiveTab('dashboard')}
         >
-          Dashboard
+          Panel główny
         </button>
         <button 
           className={activeTab === 'trades' ? 'active' : ''} 
           onClick={() => setActiveTab('trades')}
         >
-          Trades
+          Transakcje
         </button>
         <button 
           className={activeTab === 'analysis' ? 'active' : ''} 
           onClick={() => setActiveTab('analysis')}
         >
-          Analysis
+          Analizy
         </button>
       </nav>
 
       <main className="content">
         {loading ? (
-          <div className="loading">Loading...</div>
+          <div className="loading">Ładowanie...</div>
         ) : (
           <>
             {activeTab === 'dashboard' && (
               <div className="dashboard">
                 <div className="stats-grid">
                   <div className="stat-card">
-                    <h3>Total Trades</h3>
+                    <h3>Łącznie transakcji</h3>
                     <div className="stat-value">{trades.length}</div>
                   </div>
                   <div className="stat-card">
-                    <h3>Total Analysis</h3>
+                    <h3>Łącznie analiz</h3>
                     <div className="stat-value">{analysis.length}</div>
                   </div>
                   <div className="stat-card">
-                    <h3>System Status</h3>
+                    <h3>Status systemu</h3>
                     <div className="stat-value">{apiStatus}</div>
                   </div>
                 </div>
                 <div className="actions">
                   <button onClick={createSampleTrade} className="action-btn">
-                    Add Sample Trade
+                    Dodaj przykładową transakcję
                   </button>
                   <button onClick={createSampleAnalysis} className="action-btn">
-                    Add Sample Analysis
+                    Dodaj przykładową analizę
                   </button>
                   <button onClick={fetchData} className="action-btn">
-                    Refresh Data
+                    Odśwież dane
                   </button>
                 </div>
               </div>
@@ -136,35 +155,35 @@ function App() {
 
             {activeTab === 'trades' && (
               <div className="trades-section">
-                <h2>Recent Trades</h2>
+                <h2>Ostatnie transakcje</h2>
                 {trades.length === 0 ? (
-                  <p>No trades found. Click "Add Sample Trade" to create one.</p>
+                  <p>Nie znaleziono transakcji. Kliknij "Dodaj przykładową transakcję" aby utworzyć jedną.</p>
                 ) : (
                   <div className="table-container">
                     <table>
                       <thead>
                         <tr>
-                          <th>Time</th>
+                          <th>Czas</th>
                           <th>Symbol</th>
-                          <th>Action</th>
-                          <th>Quantity</th>
-                          <th>Price</th>
-                          <th>Total Value</th>
+                          <th>Akcja</th>
+                          <th>Ilość</th>
+                          <th>Cena</th>
+                          <th>Wartość całkowita</th>
                           <th>Status</th>
                         </tr>
                       </thead>
                       <tbody>
                         {trades.map(trade => (
                           <tr key={trade.id}>
-                            <td>{new Date(trade.timestamp).toLocaleString()}</td>
+                            <td>{new Date(trade.timestamp).toLocaleString('pl-PL')}</td>
                             <td>{trade.symbol}</td>
                             <td className={`action ${trade.action.toLowerCase()}`}>
-                              {trade.action}
+                              {translateAction(trade.action)}
                             </td>
                             <td>{trade.quantity}</td>
                             <td>${trade.price.toFixed(2)}</td>
                             <td>${trade.total_value.toFixed(2)}</td>
-                            <td className={`status ${trade.status}`}>{trade.status}</td>
+                            <td className={`status ${trade.status}`}>{translateStatus(trade.status)}</td>
                           </tr>
                         ))}
                       </tbody>
@@ -176,9 +195,9 @@ function App() {
 
             {activeTab === 'analysis' && (
               <div className="analysis-section">
-                <h2>Recent Analysis</h2>
+                <h2>Ostatnie analizy</h2>
                 {analysis.length === 0 ? (
-                  <p>No analysis found. Click "Add Sample Analysis" to create one.</p>
+                  <p>Nie znaleziono analiz. Kliknij "Dodaj przykładową analizę" aby utworzyć jedną.</p>
                 ) : (
                   <div className="analysis-grid">
                     {analysis.map(item => (
@@ -190,11 +209,11 @@ function App() {
                         <div className="analysis-result">{item.result}</div>
                         {item.confidence && (
                           <div className="confidence">
-                            Confidence: {(item.confidence * 100).toFixed(0)}%
+                            Pewność: {(item.confidence * 100).toFixed(0)}%
                           </div>
                         )}
                         <div className="timestamp">
-                          {new Date(item.timestamp).toLocaleString()}
+                          {new Date(item.timestamp).toLocaleString('pl-PL')}
                         </div>
                       </div>
                     ))}
@@ -207,7 +226,7 @@ function App() {
       </main>
 
       <footer className="App-footer">
-        <p>© 2024 RLdC AiNalyzator - Trading Analysis System</p>
+        <p>© {new Date().getFullYear()} RLdC AiNalyzator - System Analizy Transakcji</p>
       </footer>
     </div>
   );

@@ -1,6 +1,6 @@
 """
-RLdC AiNalyzator - Main Backend Application
-AI-powered trading analysis and monitoring system
+RLdC AiNalyzator - Główna Aplikacja Backendowa
+System analizy i monitorowania transakcji oparty na AI
 """
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -12,20 +12,20 @@ from datetime import datetime
 import os
 import logging
 
-# Configure logging
+# Konfiguracja logowania
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 app = FastAPI(
     title="RLdC AiNalyzator API",
-    description="AI-powered trading analysis and monitoring system",
+    description="System analizy i monitorowania transakcji oparty na AI",
     version="1.0.0"
 )
 
-# Get allowed origins from environment variable, default to localhost for development
+# Pobierz dozwolone źródła z zmiennej środowiskowej, domyślnie localhost dla developmentu
 ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", "http://localhost:3000,http://localhost").split(",")
 
-# CORS middleware for frontend communication
+# Middleware CORS dla komunikacji z frontendem
 app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS,
@@ -34,12 +34,12 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Database setup
+# Konfiguracja bazy danych
 DB_PATH = os.getenv("DB_PATH", "trading_history.db")
 
 
 def init_db():
-    """Initialize the database with required tables"""
+    """Inicjalizacja bazy danych z wymaganymi tabelami"""
     try:
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
@@ -70,25 +70,30 @@ def init_db():
         
         conn.commit()
         conn.close()
-        logger.info(f"Database initialized successfully at {DB_PATH}")
+        logger.info(f"Baza danych zainicjalizowana pomyślnie: {DB_PATH}")
     except Exception as e:
-        logger.error(f"Failed to initialize database: {e}")
+        logger.error(f"Nie udało się zainicjalizować bazy danych: {e}")
         raise
 
 
-# Models
+# Modele
 class Trade(BaseModel):
-    symbol: str = Field(..., min_length=1, max_length=10, description="Trading symbol")
-    action: str = Field(..., description="Trade action (BUY or SELL)")
-    quantity: float = Field(..., gt=0, description="Quantity must be positive")
-    price: float = Field(..., gt=0, description="Price must be positive")
-    total_value: float = Field(..., gt=0, description="Total value must be positive")
-    status: Optional[str] = Field(default="pending", description="Trade status")
+    symbol: str = Field(..., min_length=1, max_length=10, description="Symbol transakcji")
+    action: str = Field(..., description="Akcja transakcji (KUP lub SPRZEDAJ)")
+    quantity: float = Field(..., gt=0, description="Ilość musi być dodatnia")
+    price: float = Field(..., gt=0, description="Cena musi być dodatnia")
+    total_value: float = Field(..., gt=0, description="Wartość całkowita musi być dodatnia")
+    status: Optional[str] = Field(default="oczekujące", description="Status transakcji")
     
     @validator('action')
     def validate_action(cls, v):
-        if v.upper() not in ['BUY', 'SELL']:
-            raise ValueError('action must be either BUY or SELL')
+        if v.upper() not in ['BUY', 'SELL', 'KUP', 'SPRZEDAJ']:
+            raise ValueError('Akcja musi być KUP lub SPRZEDAJ')
+        # Normalizuj do angielskich wartości dla spójności w bazie danych
+        if v.upper() in ['KUP']:
+            return 'BUY'
+        elif v.upper() in ['SPRZEDAJ']:
+            return 'SELL'
         return v.upper()
     
     @validator('symbol')
@@ -97,10 +102,10 @@ class Trade(BaseModel):
 
 
 class Analysis(BaseModel):
-    symbol: str = Field(..., min_length=1, max_length=10, description="Trading symbol")
-    analysis_type: str = Field(..., min_length=1, description="Type of analysis")
-    result: str = Field(..., min_length=1, description="Analysis result")
-    confidence: Optional[float] = Field(default=None, ge=0, le=1, description="Confidence level (0-1)")
+    symbol: str = Field(..., min_length=1, max_length=10, description="Symbol transakcji")
+    analysis_type: str = Field(..., min_length=1, description="Typ analizy")
+    result: str = Field(..., min_length=1, description="Wynik analizy")
+    confidence: Optional[float] = Field(default=None, ge=0, le=1, description="Poziom pewności (0-1)")
     
     @validator('symbol')
     def validate_symbol(cls, v):
@@ -127,40 +132,40 @@ class AnalysisResponse(BaseModel):
     confidence: Optional[float]
 
 
-# Routes
+# Endpointy
 @app.on_event("startup")
 async def startup_event():
-    """Initialize database on startup"""
+    """Inicjalizacja bazy danych podczas uruchamiania"""
     init_db()
 
 
 @app.get("/")
 async def root():
-    """Root endpoint with API information"""
+    """Główny endpoint z informacjami o API"""
     return {
-        "name": "RLdC AiNalyzator API",
-        "version": "1.0.0",
-        "status": "running",
-        "endpoints": {
-            "trades": "/api/trades",
-            "analysis": "/api/analysis",
-            "health": "/health"
+        "nazwa": "RLdC AiNalyzator API",
+        "wersja": "1.0.0",
+        "status": "działa",
+        "endpointy": {
+            "transakcje": "/api/trades",
+            "analizy": "/api/analysis",
+            "zdrowie": "/health"
         }
     }
 
 
 @app.get("/health")
 async def health_check():
-    """Health check endpoint"""
-    return {"status": "healthy", "timestamp": datetime.now().isoformat()}
+    """Endpoint sprawdzania stanu"""
+    return {"status": "zdrowy", "timestamp": datetime.now().isoformat()}
 
 
 @app.get("/api/trades", response_model=List[TradeResponse])
 async def get_trades(limit: int = 100):
-    """Get all trades with optional limit"""
-    # Validate limit parameter
+    """Pobierz wszystkie transakcje z opcjonalnym limitem"""
+    # Walidacja parametru limit
     if limit < 1 or limit > 1000:
-        raise HTTPException(status_code=400, detail="Limit must be between 1 and 1000")
+        raise HTTPException(status_code=400, detail="Limit musi być między 1 a 1000")
     
     try:
         conn = sqlite3.connect(DB_PATH)
@@ -185,16 +190,16 @@ async def get_trades(limit: int = 100):
         conn.close()
         return trades
     except sqlite3.Error as e:
-        logger.error(f"Database error while fetching trades: {e}")
-        raise HTTPException(status_code=500, detail="Failed to retrieve trades")
+        logger.error(f"Błąd bazy danych podczas pobierania transakcji: {e}")
+        raise HTTPException(status_code=500, detail="Nie udało się pobrać transakcji")
     except Exception as e:
-        logger.error(f"Unexpected error while fetching trades: {e}")
-        raise HTTPException(status_code=500, detail="An unexpected error occurred")
+        logger.error(f"Nieoczekiwany błąd podczas pobierania transakcji: {e}")
+        raise HTTPException(status_code=500, detail="Wystąpił nieoczekiwany błąd")
 
 
 @app.post("/api/trades", response_model=TradeResponse)
 async def create_trade(trade: Trade):
-    """Create a new trade record"""
+    """Utwórz nowy rekord transakcji"""
     try:
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
@@ -219,19 +224,19 @@ async def create_trade(trade: Trade):
             status=trade.status
         )
     except sqlite3.Error as e:
-        logger.error(f"Database error while creating trade: {e}")
-        raise HTTPException(status_code=500, detail="Failed to create trade")
+        logger.error(f"Błąd bazy danych podczas tworzenia transakcji: {e}")
+        raise HTTPException(status_code=500, detail="Nie udało się utworzyć transakcji")
     except Exception as e:
-        logger.error(f"Unexpected error while creating trade: {e}")
-        raise HTTPException(status_code=500, detail="An unexpected error occurred")
+        logger.error(f"Nieoczekiwany błąd podczas tworzenia transakcji: {e}")
+        raise HTTPException(status_code=500, detail="Wystąpił nieoczekiwany błąd")
 
 
 @app.get("/api/analysis", response_model=List[AnalysisResponse])
 async def get_analysis(limit: int = 100):
-    """Get all analysis records with optional limit"""
-    # Validate limit parameter
+    """Pobierz wszystkie analizy z opcjonalnym limitem"""
+    # Walidacja parametru limit
     if limit < 1 or limit > 1000:
-        raise HTTPException(status_code=400, detail="Limit must be between 1 and 1000")
+        raise HTTPException(status_code=400, detail="Limit musi być między 1 a 1000")
     
     try:
         conn = sqlite3.connect(DB_PATH)
@@ -254,16 +259,16 @@ async def get_analysis(limit: int = 100):
         conn.close()
         return analyses
     except sqlite3.Error as e:
-        logger.error(f"Database error while fetching analysis: {e}")
-        raise HTTPException(status_code=500, detail="Failed to retrieve analysis")
+        logger.error(f"Błąd bazy danych podczas pobierania analiz: {e}")
+        raise HTTPException(status_code=500, detail="Nie udało się pobrać analiz")
     except Exception as e:
-        logger.error(f"Unexpected error while fetching analysis: {e}")
-        raise HTTPException(status_code=500, detail="An unexpected error occurred")
+        logger.error(f"Nieoczekiwany błąd podczas pobierania analiz: {e}")
+        raise HTTPException(status_code=500, detail="Wystąpił nieoczekiwany błąd")
 
 
 @app.post("/api/analysis", response_model=AnalysisResponse)
 async def create_analysis(analysis: Analysis):
-    """Create a new analysis record"""
+    """Utwórz nowy rekord analizy"""
     try:
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
@@ -286,11 +291,11 @@ async def create_analysis(analysis: Analysis):
             confidence=analysis.confidence
         )
     except sqlite3.Error as e:
-        logger.error(f"Database error while creating analysis: {e}")
-        raise HTTPException(status_code=500, detail="Failed to create analysis")
+        logger.error(f"Błąd bazy danych podczas tworzenia analizy: {e}")
+        raise HTTPException(status_code=500, detail="Nie udało się utworzyć analizy")
     except Exception as e:
-        logger.error(f"Unexpected error while creating analysis: {e}")
-        raise HTTPException(status_code=500, detail="An unexpected error occurred")
+        logger.error(f"Nieoczekiwany błąd podczas tworzenia analizy: {e}")
+        raise HTTPException(status_code=500, detail="Wystąpił nieoczekiwany błąd")
 
 
 if __name__ == "__main__":
