@@ -1,0 +1,93 @@
+Jesteś głównym architektem i code-reviewerem projektu RLdC AiNalyzer / RLdC Trading Bot.
+Twoje zadanie: przeprowadzić pełny audyt repozytorium i doprowadzić je do stanu działającej, spójnej wersji v0.7 beta zgodnej z założeniami.
+
+WYMAGANIA OGÓLNE
+- Wszystko (UI, teksty, etykiety) w języku polskim.
+- Zasada minimalnej liczby plików: nie twórz nowych plików, jeśli nie jest to konieczne; jeśli dzielisz pliki, rób to tylko dla czytelności.
+- Nie usuwaj funkcji “na oko” – najpierw zidentyfikuj, potem decyzja: usuń/napraw/przenieś.
+- Dodaj logowanie i obsługę błędów w kluczowych miejscach (Binance, Telegram, DB, API).
+- Repo ma być uruchamialne “od zera” na Ubuntu: jasny README + komendy startowe.
+
+ETAP 1 — AUDYT I RAPORT (OBOWIĄZKOWO, zanim zaczniesz zmiany)
+1) Przeskanuj całe repo (drzewo plików, zależności, konfiguracje, .env.example, Docker/compose jeśli jest).
+2) Sprawdź spójność nazw, modułów i przepływów (WWW ↔ backend ↔ Binance ↔ Telegram ↔ blog).
+3) Sprawdź zgodność z założeniami projektu:
+   - WWW: panel typu trading-terminal (Dashboard/Markets/Trade Desk/Portfolio/Strategie/AI&Sygnały/Ryzyko/Backtest-Demo/Alerty/News&Sentyment/Raporty/Blog/Ustawienia/Logi)
+   - Telegram: sterowanie i alerty, log powiadomień, komendy administracyjne
+   - Binance: poprawne pobieranie danych (REST + WebSocket), obsługa błędów, rate limits, reconnect
+   - Zbieranie danych od startu: system ma od pierwszego uruchomienia gromadzić dane rynkowe i zapisywać do bazy (historia nie znika po restarcie)
+   - Pamięć: po restarcie WWW nie może być puste — ma czytać z DB i pokazywać ostatnie dane/raporty; cache tylko jako dodatek
+   - Analiza + blog: moduł analizy (techniczna + sentyment jeśli jest) generuje “Market Insights” i tworzy wpisy blogowe (po polsku) oraz publikuje zgodnie z obecnym flow (nie zmieniaj sposobu publikacji jeśli już istnieje)
+4) Wygeneruj raport w pliku: /log.txt (wymagane). Raport ma zawierać:
+   - Lista braków (funkcje/ekrany/moduły) vs założenia
+   - Lista błędów (runtime/testy/architektura)
+   - Lista niespójności (nazewnictwo, duplikaty, martwe pliki)
+   - Priorytety P0/P1/P2 (co blokuje działanie)
+   - Plan naprawy w krokach
+
+ETAP 2 — NAPRAWA I UZUPEŁNIENIE (PO RAPORCIE)
+Wprowadź zmiany tak, aby system działał end-to-end.
+
+A) BACKEND / DANE
+- Dodaj/napraw warstwę persystencji: SQLite lub Postgres (wybierz to, co już jest; jeśli nie ma nic, użyj SQLite jako minimum).
+- Zapisuj:
+  - tickery, klines (min 1m i 1h), orderbook snapshoty (opcjonalnie), sygnały AI, transakcje, alerty, logi systemowe, wpisy bloga.
+- Po uruchomieniu:
+  - automatycznie startuje collector Binance (REST + WS),
+  - dane zapisują się do DB,
+  - API WWW zwraca ostatnie znane wartości z DB (żeby UI nie było puste).
+
+B) BINANCE
+- Upewnij się, że pobieranie działa stabilnie:
+  - obsługa reconnect WebSocket,
+  - retry/backoff,
+  - walidacja danych,
+  - jawne logi błędów.
+- Udostępnij endpointy backendu dla WWW:
+  - /api/market/summary
+  - /api/market/kline?symbol=&tf=
+  - /api/portfolio
+  - /api/orders
+  - /api/positions
+  - /api/signals/top10, /api/signals/top5
+  (dostosuj do istniejącej architektury, ale zapewnij komplet funkcji)
+
+C) TELEGRAM
+- Napraw/uzupełnij bota Telegram:
+  - komendy: /status /start /stop /risk /top10 /top5 /portfolio /orders /positions /lastsignal /blog /logs
+  - alerty: sygnały, ryzyko (max DD/dzienna strata), whale/news jeśli istnieje
+  - loguj wszystkie wysyłki do DB (kiedy, co, komu, dlaczego).
+
+D) WWW (UI/UX)
+- Wszystko po polsku.
+- Wdroż layout trading-terminal:
+  - Topbar z trybem LIVE/DEMO/BACKTEST + przycisk STOP TRADING
+  - Sidebar z modułami
+  - Dashboard: KPI, wykres, panel “Decyzje & Ryzyko”, orderbook, pozycje, insights
+- UI ma używać danych z backendu i wyświetlać:
+  - aktualne wartości + ostatnia aktualizacja,
+  - dane historyczne z DB,
+  - logi i alerty.
+
+E) ANALIZA + BLOG
+- Dodaj moduł analizy:
+  - minimum: wskaźniki techniczne (EMA, RSI, MACD, Bollinger, Ichimoku jeśli możliwe) i proste wnioski “Market Insights”
+  - generuj wpis bloga (PL) na bazie analizy (np. co 1h lub manualnie) i zapisuj do DB
+  - publikacja: zachowaj istniejący sposób publikacji (jeśli jest Drupal/inna integracja), jeśli brak — przygotuj “draft” i endpoint do pobrania wpisu.
+
+ETAP 3 — TESTY I URUCHOMIENIE
+- Dodaj testy minimalne (smoke):
+  - start backendu,
+  - połączenie z Binance (mock jeśli brak kluczy),
+  - start Telegram bota (mock token),
+  - odczyt z DB,
+  - endpointy API zwracają dane.
+- Dodaj komendy uruchomienia w README:
+  - konfiguracja .env (bez ujawniania sekretów)
+  - start backend, start collector, start WWW, start telegram.
+
+ZASADA WYJŚCIA
+- Po zakończeniu: repo ma się uruchomić bez błędów.
+- /log.txt ma być aktualny i opisuje wykonane zmiany, nowe pliki, oraz co jeszcze opcjonalne do zrobienia.
+- Jeżeli brakuje jakichkolwiek plików lub funkcji: najpierw spróbuj je znaleźć w repo; dopiero potem twórz nowe.
+Działaj teraz.
