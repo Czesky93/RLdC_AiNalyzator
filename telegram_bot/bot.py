@@ -34,9 +34,20 @@ def main():
         logger.error("See .env.example for the required format.")
         return
     
+    # Check if token is still the placeholder value
+    if token == 'your_bot_token_here':
+        logger.error("TELEGRAM_BOT_TOKEN is still set to the placeholder value!")
+        logger.error("Please replace 'your_bot_token_here' in .env with your actual bot token.")
+        logger.error("Get your bot token from @BotFather on Telegram.")
+        return
+    
     if not owner_id:
         logger.warning("OWNER_ID not found in environment variables!")
         logger.warning("Bot security will not work properly without OWNER_ID.")
+    elif owner_id == 'your_telegram_user_id_here':
+        logger.warning("OWNER_ID is still set to the placeholder value!")
+        logger.warning("Please replace it in .env with your actual Telegram user ID.")
+        logger.warning("Get your user ID from @userinfobot on Telegram.")
     
     # Create application
     application = Application.builder().token(token).build()
