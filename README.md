@@ -111,8 +111,26 @@ Once the bot is running:
 
 ### Available Commands
 
+**Core Commands:**
 - `/start` - Show the main command center menu
-- `/help` - Display help information
+- `/help` - Display help information with all commands
+- `/status` - View system and trading status
+
+**Trading Commands:**
+- `/stop` - Stop trading operations
+- `/portfolio` - View portfolio overview with holdings
+- `/orders` - View active orders
+- `/positions` - View open positions
+- `/risk` - Risk management overview
+
+**Market Analysis:**
+- `/lastsignal` - View the last trading signal
+- `/top5` - Top 5 performing assets (24h)
+- `/top10` - Top 10 performing assets (24h)
+- `/blog` - Latest blog posts and analysis
+
+**System:**
+- `/logs` - View recent system logs
 
 ### Main Menu Options
 

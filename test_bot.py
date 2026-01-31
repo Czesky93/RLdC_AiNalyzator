@@ -127,10 +127,25 @@ def test_handlers():
     print("Testing handlers...")
     from telegram_bot import handlers
     
+    # Test core handlers
     assert hasattr(handlers, 'start'), "Handlers should have start function"
     assert hasattr(handlers, 'button_handler'), "Handlers should have button_handler function"
     assert hasattr(handlers, 'help_command'), "Handlers should have help_command function"
-    print("  ✓ All handler functions exist")
+    
+    # Test new trading commands
+    assert hasattr(handlers, 'status_command'), "Handlers should have status_command"
+    assert hasattr(handlers, 'stop_command'), "Handlers should have stop_command"
+    assert hasattr(handlers, 'risk_command'), "Handlers should have risk_command"
+    assert hasattr(handlers, 'portfolio_command'), "Handlers should have portfolio_command"
+    assert hasattr(handlers, 'orders_command'), "Handlers should have orders_command"
+    assert hasattr(handlers, 'positions_command'), "Handlers should have positions_command"
+    assert hasattr(handlers, 'lastsignal_command'), "Handlers should have lastsignal_command"
+    assert hasattr(handlers, 'top5_command'), "Handlers should have top5_command"
+    assert hasattr(handlers, 'top10_command'), "Handlers should have top10_command"
+    assert hasattr(handlers, 'blog_command'), "Handlers should have blog_command"
+    assert hasattr(handlers, 'logs_command'), "Handlers should have logs_command"
+    
+    print("  ✓ All handler functions exist (15 commands)")
     
     print("✅ Handler tests passed!\n")
 

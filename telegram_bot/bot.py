@@ -7,7 +7,13 @@ import logging
 from dotenv import load_dotenv
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler
 
-from .handlers import start, button_handler, help_command
+from .handlers import (
+    start, button_handler, help_command,
+    status_command, stop_command, risk_command,
+    portfolio_command, orders_command, positions_command,
+    lastsignal_command, top5_command, top10_command,
+    blog_command, logs_command
+)
 
 
 # Configure logging
@@ -55,6 +61,17 @@ def main():
     # Register command handlers
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_command))
+    application.add_handler(CommandHandler("status", status_command))
+    application.add_handler(CommandHandler("stop", stop_command))
+    application.add_handler(CommandHandler("risk", risk_command))
+    application.add_handler(CommandHandler("portfolio", portfolio_command))
+    application.add_handler(CommandHandler("orders", orders_command))
+    application.add_handler(CommandHandler("positions", positions_command))
+    application.add_handler(CommandHandler("lastsignal", lastsignal_command))
+    application.add_handler(CommandHandler("top5", top5_command))
+    application.add_handler(CommandHandler("top10", top10_command))
+    application.add_handler(CommandHandler("blog", blog_command))
+    application.add_handler(CommandHandler("logs", logs_command))
     
     # Register callback query handler for button interactions
     application.add_handler(CallbackQueryHandler(button_handler))
