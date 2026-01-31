@@ -5,13 +5,16 @@ services:
       dockerfile: Dockerfile
     container_name: rldc-ainalyzator-backend
     ports:
-      - "8000:8000"
+      - "${PORT:-8000}:8000"
     volumes:
       # Persist database outside container
       - trading_data:/data
+    env_file:
+      - .env
     environment:
-      - DB_PATH=/data/trading_history.db
-      - PORT=8000
+      - DB_PATH=${DB_PATH:-/data/trading_history.db}
+      - PORT=${PORT:-8000}
+      - ALLOWED_ORIGINS=${ALLOWED_ORIGINS:-http://localhost:3000,http://localhost}
     networks:
       - rldc-network
     restart: unless-stopped
@@ -29,8 +32,10 @@ services:
     container_name: rldc-ainalyzator-frontend
     ports:
       - "3000:80"
+    env_file:
+      - .env
     environment:
-      - REACT_APP_API_URL=http://localhost:8000
+      - REACT_APP_API_URL=${REACT_APP_API_URL:-http://localhost:8000}
     depends_on:
       backend:
         condition: service_healthy
