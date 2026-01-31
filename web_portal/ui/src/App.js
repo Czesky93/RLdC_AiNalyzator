@@ -44,7 +44,7 @@ function App() {
         quantity: 10,
         price: 150.50,
         total_value: 1505.00,
-        status: 'ukończone'
+        status: 'completed'
       };
       await axios.post(`${API_URL}/api/trades`, sampleTrade);
       fetchData();
@@ -80,9 +80,7 @@ function App() {
     const translations = {
       'pending': 'oczekujące',
       'completed': 'ukończone',
-      'cancelled': 'anulowane',
-      'oczekujące': 'oczekujące',
-      'ukończone': 'ukończone'
+      'cancelled': 'anulowane'
     };
     return translations[status] || status;
   };

@@ -83,7 +83,7 @@ class Trade(BaseModel):
     quantity: float = Field(..., gt=0, description="Ilość musi być dodatnia")
     price: float = Field(..., gt=0, description="Cena musi być dodatnia")
     total_value: float = Field(..., gt=0, description="Wartość całkowita musi być dodatnia")
-    status: Optional[str] = Field(default="oczekujące", description="Status transakcji")
+    status: Optional[str] = Field(default="pending", description="Status transakcji")
     
     @validator('action')
     def validate_action(cls, v):
@@ -95,6 +95,21 @@ class Trade(BaseModel):
         elif v.upper() in ['SPRZEDAJ']:
             return 'SELL'
         return v.upper()
+    
+    @validator('status')
+    def validate_status(cls, v):
+        # Normalizuj statusy do angielskich wartości dla spójności w bazie danych
+        status_map = {
+            'OCZEKUJĄCE': 'pending',
+            'OCZEKUJACE': 'pending',
+            'UKOŃCZONE': 'completed',
+            'UKONCZONE': 'completed',
+            'ANULOWANE': 'cancelled'
+        }
+        normalized = status_map.get(v.upper(), v)
+        if normalized.lower() not in ['pending', 'completed', 'cancelled']:
+            raise ValueError('Status musi być: pending, completed lub cancelled (lub po polsku: oczekujące, ukończone, anulowane)')
+        return normalized.lower()
     
     @validator('symbol')
     def validate_symbol(cls, v):
