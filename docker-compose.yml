@@ -1,0 +1,41 @@
+version: "3.9"
+
+services:
+  backend:
+    build: .
+    container_name: rldc-backend
+    env_file: .env
+    ports:
+      - "8000:8000"
+    volumes:
+      - rldc-trading-data:/data
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  telegram_bot:
+    build: .
+    container_name: rldc-telegram-bot
+    env_file: .env
+    environment:
+      - API_URL=http://backend:8000
+    command: ["python", "-m", "telegram_bot.bot"]
+    depends_on:
+      - backend
+
+  frontend:
+    build:
+      context: ./web_portal/ui
+      args:
+        - VITE_API_URL=${REACT_APP_API_URL}
+    container_name: rldc-frontend
+    ports:
+      - "3000:80"
+    depends_on:
+      - backend
+
+volumes:
+  rldc-trading-data:
+    name: rldc-trading-data
