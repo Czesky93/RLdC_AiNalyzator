@@ -25,19 +25,19 @@ interface SidebarProps {
 
 const menuItems = [
   { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard },
-  { id: 'galeries', label: 'Galeries', icon: TrendingUp },
+  { id: 'markets', label: 'Markets', icon: TrendingUp },
   { id: 'trade-desk', label: 'Trade Desk', icon: Target },
   { id: 'portfolio', label: 'Portfolio', icon: Wallet },
   { id: 'strategies', label: 'Strategie', icon: Layers },
   { id: 'ai-signals', label: 'AI & Sygnały', icon: Activity },
   { id: 'decisions', label: 'Decyzje / Ryzyko', icon: BarChart3 },
   { id: 'backtest', label: 'Backtest / Demo', icon: TestTube },
-  { id: 'economics', label: 'Economices', icon: BarChart2 },
-  { id: 'alertes', label: 'Alertes', icon: Bell },
-  { id: 'newsbiance', label: 'Newsbiance', icon: Newspaper },
+  { id: 'economics', label: 'Economics', icon: BarChart2 },
+  { id: 'alerts', label: 'Alerty', icon: Bell },
+  { id: 'news', label: 'News & Sentyment', icon: Newspaper },
   { id: 'blog', label: 'Blog', icon: FileText },
-  { id: 'usertrimes', label: 'Usertrimes', icon: Settings },
-  { id: 'repositories', label: 'Repositories', icon: Terminal },
+  { id: 'settings', label: 'Ustawienia', icon: Settings },
+  { id: 'logs', label: 'Logi', icon: Terminal },
 ]
 
 export default function Sidebar({ activeView, setActiveView }: SidebarProps) {

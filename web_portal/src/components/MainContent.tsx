@@ -31,7 +31,7 @@ export default function MainContent({ activeView, tradingMode }: MainContentProp
     <div className="flex-1 p-6 overflow-auto">
       {/* Mode Indicator */}
       <div className="mb-4 flex items-center justify-between">
-        <h1 className="text-2xl font-bold">RLDC Ain Alyzer</h1>
+        <h1 className="text-2xl font-bold">RLDC AiNalyzer</h1>
         <div className="px-3 py-1 bg-rldc-teal-primary/20 text-rldc-teal-primary rounded text-sm font-medium">
           Tryb: {tradingMode.toUpperCase()}
         </div>
