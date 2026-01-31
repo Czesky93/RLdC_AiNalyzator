@@ -29,7 +29,35 @@ Interactive Telegram Bot for managing and monitoring your AI-powered trading pla
 - Telegram Bot Token (from [@BotFather](https://t.me/botfather))
 - Your Telegram User ID
 
-### Installation
+### Quick Setup (Automated) ⚡
+
+The easiest way to set up the bot is using the automated setup script:
+
+**On Linux/Mac:**
+```bash
+./setup.sh
+```
+
+**On Windows:**
+```bash
+setup.bat
+```
+
+**Or directly with Python:**
+```bash
+python setup.py
+```
+
+The automated setup will:
+- ✅ Check Python version
+- ✅ Install all dependencies
+- ✅ Create and configure .env file
+- ✅ Run tests to verify installation
+- ✅ Optionally run a demo
+
+### Manual Installation
+
+If you prefer manual setup:
 
 1. Clone the repository:
 ```bash
