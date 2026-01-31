@@ -1,0 +1,678 @@
+================================================================================
+RAPORT AUDYTU REPOZYTORIUM RLdC AiNalyzator v0.7 beta
+================================================================================
+Data: 2026-01-31
+Audytor: GitHub Copilot Workspace Agent
+Status: ETAP 1 - AUDYT ZAKOŃCZONY
+
+================================================================================
+1. STRUKTURA REPOZYTORIUM - OBECNY STAN
+================================================================================
+
+KATALOGI GŁÓWNE:
+├── ai_trading/               [ZARYS] tylko __init__.py
+├── blockchain_analysis/      [ZARYS] tylko __init__.py  
+├── hft_engine/              [PUSTY] tylko .gitkeep
+├── infrastructure/          [PUSTY] tylko .gitkeep
+├── portfolio_management/    [ZARYS] tylko __init__.py
+├── quantum_optimization/    [PUSTY] tylko .gitkeep
+├── recommendation_engine/   [ZARYS] tylko __init__.py
+├── telegram_bot/            [ZARYS] tylko __init__.py
+├── tests/                   [PUSTY] tylko .gitkeep
+├── web_portal/              [ZAIMPLEMENTOWANY] Next.js 16 + React 19
+├── docs/                    [OK] dokumentacja projektowa
+└── webportalinfo           [??] nieznany katalog
+
+PLIKI GŁÓWNE:
+✅ README.md                  - podstawowy opis
+✅ instrukcje.txt            - szczegółowe wymagania (identyczne z zadaniem)
+✅ .gitignore                - standardowy Python/Node
+❌ .env.example              - BRAK
+❌ requirements.txt          - BRAK
+❌ docker-compose.yml        - BRAK
+❌ Dockerfile                - BRAK
+❌ main.py / app.py          - BRAK punktu wejścia backendu
+
+================================================================================
+2. ANALIZA KOMPONENTÓW - ZGODNOŚĆ Z ZAŁOŻENIAMI
+================================================================================
+
+2.1. WWW (Web Portal) - IMPLEMENTACJA: 90%
+------------------------------------------
+STATUS: ✅ ZAIMPLEMENTOWANY (Next.js 16, React 19, TypeScript 5.9, Tailwind 4.1)
+
+ZREALIZOWANE:
+✅ Layout trading-terminal z Topbar + Sidebar
+✅ Topbar: Logo, nawigacja, tryb DEMO/LIVE/BACKTEST
+✅ Przycisk "STOP TRADING"
+✅ Sidebar: 14 pozycji menu (wszystkie po polsku):
+   - Dashboard, Markets, Trade Desk, Portfolio
+   - Strategie, AI & Sygnały, Decyzje/Ryzyko
+   - Backtest/Demo, Economics, Alerty
+   - News & Sentyment, Blog, Ustawienia, Logi
+✅ Dashboard z widgetami:
+   - Market Overview (4 pary BTC/ETH/SOL/MATIC)
+   - Trading View (wykresy Area Chart)
+   - Open Orders (lista zleceń)
+   - Market Insights
+✅ Wszystko w języku polskim
+✅ Design system: dark theme (#0a1219, teal #14b8a6)
+✅ Responsywny layout
+
+BRAKI UI:
+❌ Brak "Account Summary" (equity/free margin) - WYMÓG ZADANIA
+❌ Brak KPI dashboard z danymi demo
+❌ Brak trybu LIVE (read-only) z Binance
+❌ Brak historii zleceń demo
+❌ Brak eksportu CSV
+❌ UI używa MOCK DATA - nie łączy się z backendem
+❌ Brak ostatniej aktualizacji czasu danych
+❌ Brak obsługi błędów (error boundaries)
+❌ Brak loading states
+
+PLIKI FRONTEND:
+- web_portal/src/app/page.tsx
+- web_portal/src/app/layout.tsx
+- web_portal/src/components/Dashboard.tsx
+- web_portal/src/components/Topbar.tsx
+- web_portal/src/components/Sidebar.tsx
+- web_portal/src/components/MainContent.tsx
+- web_portal/src/components/widgets/TradingView.tsx
+- web_portal/src/components/widgets/OpenOrders.tsx
+- web_portal/src/components/widgets/MarketOverview.tsx
+- web_portal/src/components/widgets/MarketInsights.tsx
+
+ZALEŻNOŚCI:
+{
+  "next": "^16.1.6",
+  "react": "^19.2.4", 
+  "typescript": "^5.9.3",
+  "tailwindcss": "^4.1.18",
+  "recharts": "^3.7.0",
+  "lucide-react": "^0.563.0"
+}
+
+2.2. BACKEND / API - IMPLEMENTACJA: 0%
+---------------------------------------
+STATUS: ❌ CAŁKOWITY BRAK
+
+WYMAGANE (zgodnie z założeniami):
+❌ Główny punkt wejścia (app.py / server.py)
+❌ Framework (Flask / FastAPI / Django)
+❌ REST API endpoints:
+   - /api/market/summary
+   - /api/market/kline?symbol=&tf=
+   - /api/portfolio
+   - /api/orders
+   - /api/positions  
+   - /api/signals/top10
+   - /api/signals/top5
+   - /api/account/summary (equity, free margin) - NOWY WYMÓG
+   - /api/account/history (demo orders + CSV export) - NOWY WYMÓG
+❌ Logowanie (logging module)
+❌ Obsługa błędów (try/except, error handlers)
+❌ CORS dla WWW
+❌ Rate limiting
+❌ Autentykacja/autoryzacja
+
+PRIORYTET: P0 - BLOKUJE DZIAŁANIE
+
+2.3. BAZA DANYCH - IMPLEMENTACJA: 0%
+-------------------------------------
+STATUS: ❌ CAŁKOWITY BRAK
+
+WYMAGANE:
+❌ SQLite lub PostgreSQL (zalecam SQLite dla prostoty)
+❌ Schemat tabel:
+   - market_data (tickery, cena, volume, timestamp)
+   - klines (OHLCV, symbol, timeframe, timestamp)
+   - orderbook (snapshots - opcjonalne)
+   - signals (AI sygnały: symbol, type, confidence, timestamp)
+   - orders (demo/live: symbol, side, price, quantity, status, timestamp)
+   - positions (otwarte pozycje)
+   - alerts (alerty systemowe)
+   - logs (logi systemowe)
+   - blog_posts (wpisy blogowe)
+   - telegram_messages (historia wysyłek)
+   - account_snapshots (equity, margin, P&L - NOWY WYMÓG)
+❌ ORM (SQLAlchemy / Peewee / Django ORM)
+❌ Migracje (Alembic / Django migrations)
+❌ Seed data (dane demo do testów)
+
+ZASADA: "Zbieranie danych od startu" - dane muszą się zapisywać od pierwszego 
+uruchomienia i przetrwać restart. WWW NIE MOŻE być puste po restarcie!
+
+PRIORYTET: P0 - BLOKUJE DZIAŁANIE
+
+2.4. BINANCE INTEGRATION - IMPLEMENTACJA: 0%
+---------------------------------------------
+STATUS: ❌ CAŁKOWITY BRAK (tylko pusty katalog blockchain_analysis/)
+
+WYMAGANE:
+❌ REST API client:
+   - Pobieranie ticker prices
+   - Pobieranie klines (candlesticks)
+   - Pobieranie orderbook
+   - Account info (dla trybu LIVE) - NOWY WYMÓG
+   - Balance, positions (LIVE read-only) - NOWY WYMÓG
+❌ WebSocket client:
+   - Real-time ticker stream
+   - Kline stream (1m, 1h)
+   - Orderbook depth stream (opcjonalnie)
+   - Reconnect logic (exponential backoff)
+❌ Error handling:
+   - Rate limiting (1200 requests/min REST)
+   - HTTP errors (400, 429, 500, 503)
+   - Network timeouts
+   - Invalid responses
+❌ Logging:
+   - Request/response logs
+   - Error logs
+   - Reconnect attempts
+❌ Data validation:
+   - Schema validation (pydantic)
+   - Timestamp checks
+   - Price sanity checks
+
+BIBLIOTEKI:
+- python-binance lub ccxt
+- websockets / asyncio
+
+PRIORYTET: P0 - BLOKUJE DZIAŁANIE
+
+2.5. TELEGRAM BOT - IMPLEMENTACJA: 0%
+--------------------------------------
+STATUS: ❌ CAŁKOWITY BRAK (tylko pusty __init__.py)
+
+WYMAGANE KOMENDY:
+❌ /start - powitalny message, instrukcje
+❌ /status - status bota (uptime, tryb, ostatni signal)
+❌ /stop - zatrzymanie tradingu
+❌ /risk - podsumowanie ryzyka (max DD, daily loss)
+❌ /top10 - top 10 sygnałów
+❌ /top5 - top 5 sygnałów
+❌ /portfolio - obecny portfel
+❌ /orders - lista zleceń
+❌ /positions - otwarte pozycje
+❌ /lastsignal - ostatni wygenerowany sygnał
+❌ /blog - ostatni post na blogu
+❌ /logs - ostatnie logi systemowe
+
+ALERTY (automatyczne):
+❌ Sygnał AI (wysokiej pewności)
+❌ Ryzyko: max DD przekroczony
+❌ Ryzyko: dzienna strata > limit
+❌ Whale alerts (opcjonalne)
+❌ Breaking news (opcjonalne)
+
+FUNKCJE:
+❌ Logowanie wszystkich wysyłek do DB (timestamp, user, command, message)
+❌ Error handling (invalid token, network errors)
+❌ Rate limiting (Telegram API limits)
+
+BIBLIOTEKA:
+- python-telegram-bot
+
+PRIORYTET: P1 - WYSOKI
+
+2.6. ANALIZA TECHNICZNA + AI - IMPLEMENTACJA: 0%
+-------------------------------------------------
+STATUS: ❌ CAŁKOWITY BRAK (tylko pusty __init__.py w ai_trading/)
+
+WYMAGANE MINIMUM:
+❌ Wskaźniki techniczne:
+   - EMA (Exponential Moving Average)
+   - RSI (Relative Strength Index)
+   - MACD (Moving Average Convergence Divergence)
+   - Bollinger Bands
+   - Ichimoku (opcjonalnie)
+❌ Analiza:
+   - Trendy (bullish/bearish)
+   - Support/Resistance levels
+   - Volume analysis
+❌ Generowanie sygnałów:
+   - BUY/SELL signals z confidence score
+   - Entry/exit points
+❌ "Market Insights":
+   - Tekstowy opis sytuacji rynkowej
+   - Wnioski z analizy (po polsku!)
+   - Zalecenia działań
+
+BIBLIOTEKI:
+- pandas_ta / ta-lib
+- numpy, pandas
+
+PRIORYTET: P1 - WYSOKI
+
+2.7. BLOG / PUBLIKACJE - IMPLEMENTACJA: 0%
+-------------------------------------------
+STATUS: ❌ CAŁKOWITY BRAK
+
+WYMAGANE:
+❌ Moduł generacji postów blogowych:
+   - Generator tekstów (OpenAI GPT / własne szablony)
+   - Wejście: Market Insights, dane techniczne
+   - Wyjście: post w markdown/HTML (PO POLSKU)
+❌ Publikacja:
+   - Zapis do DB (blog_posts table)
+   - Endpoint /api/blog/latest
+   - Integracja z CMS (jeśli istnieje Drupal/WordPress)
+   - Fallback: draft w DB + endpoint do pobrania
+❌ Harmonogram:
+   - Co 1h automatycznie (opcjonalne)
+   - Manualnie przez komendę
+
+PRIORYTET: P2 - ŚREDNI
+
+2.8. COLLECTOR (Data Collection) - IMPLEMENTACJA: 0%
+-----------------------------------------------------
+STATUS: ❌ CAŁKOWITY BRAK
+
+WYMAGANE:
+❌ Automatyczny start po uruchomieniu systemu
+❌ Zbieranie danych z Binance:
+   - REST: co 1 min ticker prices dla watchlist
+   - WebSocket: real-time updates
+   - Klines: 1m i 1h dla top par
+❌ Zapis do bazy danych:
+   - market_data table (ticker updates)
+   - klines table (OHLCV)
+❌ Logowanie:
+   - Liczba zebranych rekordów
+   - Błędy połączenia
+❌ Graceful shutdown (SIGTERM/SIGINT)
+
+URUCHOMIENIE:
+- python collector.py &
+- lub przez supervisord/systemd
+
+PRIORYTET: P0 - BLOKUJE DZIAŁANIE
+
+================================================================================
+3. LISTA BŁĘDÓW I NIESPÓJNOŚCI
+================================================================================
+
+3.1. BŁĘDY ARCHITEKTONICZNE
+----------------------------
+❌ Brak punktu wejścia backendu - nie można uruchomić systemu
+❌ Brak bazy danych - brak persystencji
+❌ Brak integracji WWW ↔ Backend - frontend używa mock data
+❌ Brak collectora danych - brak źródła danych rynkowych
+❌ Brak modułu Binance - nie można pobrać danych
+❌ Brak Telegram bota - brak interfejsu sterowania
+❌ Brak modułu analizy - brak sygnałów AI
+
+3.2. NIESPÓJNOŚCI NAZEWNICTWA
+------------------------------
+⚠️ Katalog "blockchain_analysis" sugeruje analizę blockchain, ale powinien być 
+   "binance_integration" lub "market_data"
+⚠️ Brak spójności: niektóre katalogi puste (.gitkeep), inne z __init__.py
+⚠️ webportalinfo - niejasny cel (do sprawdzenia co zawiera)
+
+3.3. BRAKI W DOKUMENTACJI
+--------------------------
+⚠️ README.md ma sekcję "Getting Started" z "(Coming soon)"
+⚠️ Brak instrukcji instalacji zależności
+⚠️ Brak instrukcji konfiguracji .env
+⚠️ Brak instrukcji uruchomienia poszczególnych modułów
+⚠️ Brak przykładowego .env.example
+
+3.4. BRAKI W INFRASTRUKTURZE
+-----------------------------
+❌ Brak requirements.txt - nie można zainstalować zależności Python
+❌ Brak Dockerfile - brak containerizacji
+❌ Brak docker-compose.yml - brak łatwego uruchomienia
+❌ Brak .env.example - nie wiadomo jakie zmienne są potrzebne
+❌ Brak CI/CD (GitHub Actions, GitLab CI)
+
+3.5. BRAKI W TESTACH
+--------------------
+❌ Folder tests/ jest pusty
+❌ Brak pytest.ini
+❌ Brak unit testów
+❌ Brak integration testów
+❌ Brak smoke testów
+
+================================================================================
+4. NOWE WYMAGANIA Z ZADANIA
+================================================================================
+
+4.1. Account Summary (equity/free margin)
+------------------------------------------
+WYMÓG: Dodać demo "account summary" i podpiąć pod KPI
+STATUS: ❌ BRAK
+
+DO ZROBIENIA:
+- [ ] Tabela account_snapshots w DB (equity, free_margin, timestamp)
+- [ ] Generator demo account data (symulacja equity/margin)
+- [ ] Endpoint /api/account/summary
+- [ ] Widget "Account Summary" w Dashboard
+- [ ] KPI: Equity, Free Margin, Used Margin, Margin Level
+- [ ] Wykres equity w czasie
+
+4.2. Tryb LIVE (read-only) z Binance
+-------------------------------------
+WYMÓG: Tryb LIVE z danymi konta z Binance po kluczach API
+STATUS: ❌ BRAK
+
+DO ZROBIENIA:
+- [ ] Obsługa kluczy API Binance (API_KEY, API_SECRET w .env)
+- [ ] Endpoint Binance: GET /api/v3/account
+- [ ] Funkcja fetch_account_info() - pobieranie balance, positions
+- [ ] Tryb LIVE w UI (przełącznik DEMO/LIVE)
+- [ ] Wyświetlanie rzeczywistych danych z Binance w trybie LIVE
+- [ ] Read-only: NIE wykonywać zleceń w trybie LIVE (tylko odczyt)
+- [ ] Error handling: invalid keys, insufficient permissions
+
+4.3. Historia zleceń DEMO + eksport CSV
+----------------------------------------
+WYMÓG: Historia zleceń demo + eksport CSV
+STATUS: ❌ BRAK
+
+DO ZROBIENIA:
+- [ ] Tabela orders w DB (symbol, side, type, price, quantity, status, timestamp)
+- [ ] Generator demo orders (symulacja historii zleceń)
+- [ ] Endpoint /api/orders (GET - lista, POST - nowe zlecenie demo)
+- [ ] Widget "Order History" w UI
+- [ ] Funkcja eksportu CSV (backend: /api/orders/export.csv)
+- [ ] Przycisk "Export CSV" w UI
+- [ ] Format CSV: Symbol,Side,Type,Price,Quantity,Status,Timestamp
+
+================================================================================
+5. PRIORYTETY NAPRAWY (P0/P1/P2)
+================================================================================
+
+PRIORYTET P0 - BLOKUJĄCE (bez tego system nie działa)
+------------------------------------------------------
+1. [P0] Utworzyć backend/app.py (FastAPI)
+2. [P0] Utworzyć backend/database.py (SQLAlchemy + SQLite)
+3. [P0] Utworzyć schemat bazy danych (10 tabel minimum)
+4. [P0] Utworzyć backend/binance_client.py (REST API)
+5. [P0] Utworzyć backend/collector.py (data collection)
+6. [P0] Utworzyć requirements.txt z zależnościami
+7. [P0] Utworzyć .env.example z wymaganymi zmiennymi
+8. [P0] Połączyć WWW z backendem (fetch z localhost:8000)
+
+PRIORYTET P1 - WYSOKI (kluczowe funkcje)
+-----------------------------------------
+9. [P1] Dodać WebSocket Binance do collectora
+10. [P1] Dodać wskaźniki techniczne (EMA, RSI, MACD, Bollinger)
+11. [P1] Dodać generator sygnałów AI
+12. [P1] Dodać Telegram bot z podstawowymi komendami
+13. [P1] Dodać Account Summary (equity/margin) + KPI
+14. [P1] Dodać tryb LIVE (read-only) z Binance keys
+15. [P1] Dodać historię zleceń DEMO + CSV export
+16. [P1] Dodać obsługę błędów i logging
+
+PRIORYTET P2 - ŚREDNI (nice to have)
+-------------------------------------
+17. [P2] Dodać moduł blog (generacja postów)
+18. [P2] Dodać testy (smoke tests minimum)
+19. [P2] Dodać Dockerfile + docker-compose
+20. [P2] Zaktualizować README z instrukcjami start
+21. [P2] Dodać CI/CD (GitHub Actions)
+22. [P2] Dodać advanced features (HFT, Quantum, ML models)
+
+================================================================================
+6. PLAN NAPRAWY - ETAP 2 (KROK PO KROKU)
+================================================================================
+
+KROK 1: BACKEND FOUNDATION (4-6h)
+----------------------------------
+1.1. Utworzyć backend/ directory
+1.2. Utworzyć requirements.txt:
+     - fastapi
+     - uvicorn[standard]
+     - sqlalchemy
+     - pydantic
+     - python-binance
+     - python-telegram-bot
+     - pandas
+     - pandas-ta
+     - python-dotenv
+     - requests
+     - websockets
+
+1.3. Utworzyć .env.example:
+     BINANCE_API_KEY=your_key_here
+     BINANCE_API_SECRET=your_secret_here
+     TELEGRAM_BOT_TOKEN=your_token_here
+     DATABASE_URL=sqlite:///./trading_bot.db
+     LOG_LEVEL=INFO
+
+1.4. Utworzyć backend/app.py (FastAPI server):
+     - Inicjalizacja FastAPI
+     - CORS middleware
+     - Router registration
+     - Health check endpoint
+
+1.5. Utworzyć backend/database.py:
+     - SQLAlchemy setup
+     - Database models (10 tabel)
+     - Create tables function
+     - Session management
+
+KROK 2: BINANCE INTEGRATION (3-4h)
+-----------------------------------
+2.1. Utworzyć backend/binance_client.py:
+     - BinanceClient class
+     - REST methods: get_ticker, get_klines, get_account
+     - Error handling + retry logic
+     - Rate limiting
+
+2.2. Utworzyć backend/binance_websocket.py:
+     - WebSocket connection
+     - Stream handlers (ticker, kline)
+     - Reconnect logic
+     - Data validation
+
+2.3. Utworzyć backend/collector.py:
+     - Main collection loop
+     - Zapis do DB
+     - Logging
+     - Graceful shutdown
+
+KROK 3: API ENDPOINTS (2-3h)
+-----------------------------
+3.1. Utworzyć backend/routers/market.py:
+     - GET /api/market/summary
+     - GET /api/market/kline
+
+3.2. Utworzyć backend/routers/portfolio.py:
+     - GET /api/portfolio
+     - GET /api/positions
+
+3.3. Utworzyć backend/routers/orders.py:
+     - GET /api/orders
+     - POST /api/orders (demo)
+     - GET /api/orders/export.csv
+
+3.4. Utworzyć backend/routers/signals.py:
+     - GET /api/signals/top10
+     - GET /api/signals/top5
+
+3.5. Utworzyć backend/routers/account.py:
+     - GET /api/account/summary (equity, margin)
+
+KROK 4: ANALIZA TECHNICZNA (2-3h)
+----------------------------------
+4.1. Utworzyć backend/analysis/indicators.py:
+     - Funkcje: calculate_ema, calculate_rsi, calculate_macd, calculate_bollinger
+     - Input: DataFrame (OHLCV)
+     - Output: DataFrame z wskaźnikami
+
+4.2. Utworzyć backend/analysis/signals.py:
+     - Funkcja generate_signals()
+     - Logika sygnałów BUY/SELL
+     - Confidence score
+
+4.3. Utworzyć backend/analysis/insights.py:
+     - Funkcja generate_market_insights()
+     - Analiza trendów
+     - Generacja tekstu po polsku
+
+KROK 5: TELEGRAM BOT (2-3h)
+----------------------------
+5.1. Utworzyć backend/telegram_bot.py:
+     - TelegramBot class
+     - Command handlers (/start, /status, /top10, etc.)
+     - Alert functions
+     - Logging do DB
+
+KROK 6: DEMO ACCOUNT + LIVE MODE (2h)
+--------------------------------------
+6.1. Utworzyć backend/demo_account.py:
+     - DemoAccount class
+     - Symulacja equity, margin
+     - Historia zleceń demo
+     - CSV export function
+
+6.2. Dodać tryb LIVE:
+     - Funkcja fetch_live_account (Binance API)
+     - Read-only mode (no trading)
+     - Display w UI
+
+KROK 7: UI UPDATES (1-2h)
+--------------------------
+7.1. Dodać fetch do backendu w web_portal:
+     - Zmienić mock data na fetch('http://localhost:8000/api/...')
+     - Dodać loading states
+     - Dodać error handling
+
+7.2. Dodać Account Summary widget
+7.3. Dodać Order History widget + CSV export button
+7.4. Dodać LIVE/DEMO mode toggle logic
+
+KROK 8: LOGGING & ERROR HANDLING (1h)
+--------------------------------------
+8.1. Konfiguracja loggera:
+     - Format: timestamp, level, module, message
+     - Zapis do pliku + console
+     - Rotacja logów
+
+8.2. Try/except w kluczowych miejscach:
+     - Binance calls
+     - DB operations
+     - API endpoints
+     - Telegram sends
+
+KROK 9: TESTY (2h)
+------------------
+9.1. Utworzyć tests/test_backend.py:
+     - Test: start backendu
+     - Test: health check endpoint
+     - Test: DB connection
+
+9.2. Utworzyć tests/test_binance.py:
+     - Test: mock Binance client
+     - Test: data validation
+
+9.3. Utworzyć tests/test_api.py:
+     - Test: wszystkie endpointy zwracają 200
+     - Test: response schema
+
+KROK 10: DOKUMENTACJA (1h)
+---------------------------
+10.1. Zaktualizować README.md:
+      - Sekcja "Installation"
+      - Sekcja "Configuration (.env)"
+      - Sekcja "Running the Bot"
+      - Sekcja "Running Web Portal"
+      - Przykładowe komendy
+
+10.2. Utworzyć CHANGELOG.md:
+      - v0.7 beta changes
+
+================================================================================
+7. SZACOWANY CZAS REALIZACJI
+================================================================================
+
+ETAP 2 (Naprawa i uzupełnienie):
+- Backend Foundation:        4-6h
+- Binance Integration:        3-4h
+- API Endpoints:              2-3h
+- Analiza Techniczna:         2-3h
+- Telegram Bot:               2-3h
+- Demo Account + LIVE:        2h
+- UI Updates:                 1-2h
+- Logging & Errors:           1h
+- Testy:                      2h
+- Dokumentacja:               1h
+--------------------------------
+RAZEM:                        20-27h (2.5-3.5 dni pracy)
+
+ETAP 3 (Testy i uruchomienie): ~2-3h
+
+CAŁKOWITY CZAS: 25-30h (3-4 dni pracy)
+
+================================================================================
+8. STACK TECHNOLOGICZNY (ZALECANY)
+================================================================================
+
+BACKEND:
+- Python 3.10+
+- FastAPI (async API framework)
+- SQLAlchemy (ORM)
+- SQLite (baza danych - prostsza do startu)
+- Uvicorn (ASGI server)
+
+DATA & TRADING:
+- python-binance (Binance API wrapper)
+- pandas (data processing)
+- pandas-ta (technical analysis)
+- websockets (WebSocket client)
+
+TELEGRAM:
+- python-telegram-bot (bot framework)
+
+FRONTEND:
+- Next.js 16 (już zaimplementowany)
+- React 19
+- TypeScript 5.9
+- Tailwind CSS 4.1
+- Recharts (wykresy)
+
+UTILITIES:
+- python-dotenv (environment variables)
+- pydantic (data validation)
+- requests (HTTP client)
+- pytest (testing)
+
+================================================================================
+9. PODSUMOWANIE I REKOMENDACJE
+================================================================================
+
+OBECNY STAN:
+✅ Web Portal (UI) - dobrze zaimplementowany (90%)
+❌ Backend - całkowity brak (0%)
+❌ Baza danych - brak (0%)
+❌ Binance - brak (0%)
+❌ Telegram - brak (0%)
+❌ Analiza - brak (0%)
+❌ Blog - brak (0%)
+❌ Testy - brak (0%)
+
+CAŁKOWITY POSTĘP: ~18%
+
+KLUCZOWE REKOMENDACJE:
+1. Zacząć od P0 (backend + DB + Binance) - to fundament
+2. Użyć FastAPI + SQLite jako szybkie rozwiązanie
+3. Minimum Viable Product (MVP) najpierw, potem advanced features
+4. Testy smoke przed finalnym commitem
+5. Dokumentacja startowa w README
+6. Nie rozbudowywać Quantum/HFT/ML na tym etapie - focus na v0.7 beta
+
+NAJBLIŻSZE DZIAŁANIA (ETAP 2):
+→ Utworzyć backend/ z app.py, database.py
+→ Utworzyć requirements.txt + .env.example
+→ Zaimplementować Binance client + collector
+→ Dodać API endpoints
+→ Połączyć frontend z backendem
+→ Dodać Account Summary + LIVE mode + CSV export
+→ Dodać Telegram bot
+→ Dodać testy smoke
+→ Zaktualizować README
+
+================================================================================
+KONIEC RAPORTU ETAP 1
+================================================================================
