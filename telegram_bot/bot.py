@@ -38,11 +38,6 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "Witaj! Bot RLdC AiNalyzer jest aktywny. /status aby sprawdzić system."
     )
 
-    async def cmd_stop(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        await update.message.reply_text(
-            "Bot został zatrzymany po stronie użytkownika. Aby wrócić: /start."
-        )
-
 
 async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     try:
