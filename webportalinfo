@@ -1,3 +1,153 @@
+Masz rację — tamto wyglądało jak „ładny obrazek”, a nie przemyślany panel tradingowy. Robimy to od nowa: funkcje → układ → dane → akcje → kontrola ryzyka → testy. Poniżej masz gotowy, spójny projekt RLdC AiNalyzer (WWW + mobile) tak, żeby dało się to od razu wdrożyć w repo.
+
+1) Rdzeń produktu (co to ma robić)
+
+RLdC AiNalyzer = centrum dowodzenia dla:
+	• Live dane z Binance (REST + WebSocket)
+	• Portfel / saldo / PnL / pozycje / zlecenia
+	• Sygnały i decyzje (AI/strategie)
+	• Risk management (SL/TP, dźwignia, limity, cooldown, max DD)
+	• Backtest + Demo (paper trading)
+	• Alerty (Telegram + web push)
+	• Raporty + blog (automatyczne wpisy z analizy sentymentu + rynku)
+	• Konfiguracja systemu (bez kluczy API na logowaniu; klucze dopiero po wejściu)
+
+⸻
+
+2) Układ WEB (zgodny z ideą profesjonalnego „trading terminal”)
+
+Topbar (zawsze widoczny)
+	• Logo RLdC + status systemu: LIVE / DEMO / BACKTEST
+	• Wybór konta: Spot / Futures / Demo
+	• Wybór pary: szybkie wyszukiwanie + ulubione
+	• „Panic button”: STOP TRADING (natychmiast cancel + blokada strategii)
+	• Ikony: Telegram, powiadomienia, ustawienia, użytkownik
+
+Lewy sidebar (nawigacja)
+	1. Dashboard
+	2. Markets (Live)
+	3. Trade Desk
+	4. Portfolio
+	5. Strategies
+	6. AI & Signals
+	7. Risk
+	8. Backtest / Demo
+	9. Alerts
+	10. News & Sentiment
+	11. Reports
+	12. Blog (auto)
+	13. Settings
+	14. System Logs
+
+⸻
+
+3) Dashboard (pierwszy ekran ma mieć sens, nie ozdobniki)
+
+Układ 3-kolumnowy (desktop), na mobile w sekcjach.
+
+A) Górny pasek KPI (8 kafli)
+	• Equity / Balance (EUR)
+	• Free Margin / Used Margin
+	• Unrealized PnL / Realized PnL
+	• Winrate (7d/30d)
+	• Max Drawdown (7d/30d)
+	• Fees (24h/7d)
+	• Risk Score (0–100)
+	• AI Confidence (0–100)
+
+B) Centrum: „Trading Canvas”
+	• Wykres TradingView/Lightweight Charts (1m/15m/1h/6h/12h/1w/1M)
+	• Nakładki: EMA, RSI, MACD, Bollinger, Ichimoku
+	• Overlays: strefy popytu/podaży, poziomy SL/TP, wejścia/wyjścia
+	• Znaczniki: BUY / SELL / WAIT (zmieniają się live)
+	• Tryb „Explain”: po kliknięciu sygnału pokazuje dlaczego (konkretne warunki)
+
+C) Prawa kolumna: „Decyzje & Ryzyko”
+	• Aktualny sygnał AI: BUY/SELL/WAIT + confidence
+	• Plan transakcji: entry, SL, TP1/TP2, RR, dźwignia
+	• Suwaki: Minimum ryzyka ↔ Maksimum korzyści
+	• Ograniczenia: max strata dzienna, max liczba pozycji, cooldown
+	• Przyciski: Execute (jeśli manual), Auto ON/OFF
+
+D) Dolny rząd (3 panele)
+	1. Order Book + Spread + Depth
+	2. Open Orders / Positions (edytuj SL/TP inline)
+	3. Market Insights: wolumen, zmienność, funding, OI (futures)
+
+⸻
+
+4) Trade Desk (to ma być „kokpit” do wykonywania zleceń)
+	• Szybkie zlecenia: Market/Limit/Stop/Trailing
+	• Pozycjonowanie: wielkość w EUR + % portfela
+	• Kalkulator: RR, przewidywany czas do celu (na podstawie zmienności + history)
+	• „One-click protect”: natychmiast SL/TP po wejściu
+	• Historia akcji: kto/co/ kiedy (manual/AI)
+
+⸻
+
+5) Portfolio (prawdziwy podgląd, nie ozdoby)
+	• Lista aktywów (domyślne): WLFI, SHIB, BTC, USDC, ETH, SOL
+	• Ekspozycja % + korelacje + dywersyfikacja
+	• PnL per asset / per strategy / per timeframe
+	• Podział: Spot vs Futures
+	• Eksport CSV + raport dzienny/tygodniowy
+
+⸻
+
+6) Strategies (konfiguracja jak w profesjonalnym systemie)
+
+Każda strategia jako „karta”:
+	• Nazwa / tryb / status / ostatni sygnał
+	• Parametry (edytowalne): TF, progi RSI, EMA periods, MACD, BB, Ichimoku itd.
+	• Risk profile: Conservative / Balanced / Aggressive
+	• Whitelist/Blacklist par
+	• Limit transakcji dziennie, max DD, max dźwignia
+	• „Testuj na DEMO” (1 klik)
+
+⸻
+
+7) AI & Signals (konkret)
+	• TOP 10 par do zarobku (aktualizacja co godzinę)
+	• Z TOP 10 wybór TOP 5 do tradingu
+	• Dla każdej pary:
+	• sygnał: BUY/SELL/WAIT
+	• confidence
+	• warunki wejścia/wyjścia
+	• ryzyko (volatility, spread, liquidity)
+	• alternatywa: „lepsza para teraz” (z uzasadnieniem)
+
+⸻
+
+8) News & Sentiment + Blog
+	• Źródła newsów + scoring sentymentu (market-wide i per asset)
+	• Oś czasu wydarzeń + wpływ na cenę
+	• „Wpis bloga” generowany automatycznie:
+	• wniosek dnia
+	• wskazówki dla początkujących
+	• co obserwować jutro
+	• Publikacja do Drupala bez zmiany Twojego flow (zachowujemy obecny mechanizm)
+
+⸻
+
+9) Alerts (Telegram + WWW)
+	• Alerty: cena, wolumen, RSI crossing, funding spike, whale transfer, pump/dump
+	• Konfiguracja prosta: checkboxy + progi
+	• Log powiadomień (co wysłano, kiedy, dlaczego)
+
+⸻
+
+10) Minimalne „Definition of Done” (żeby to nie było udawane)
+
+✅ Binance WebSocket działa (ticker, kline, depth)
+✅ Portfolio pokazuje realne dane i PnL
+✅ Strategies mają parametry, zapis, włącz/wyłącz
+✅ Risk ma twarde blokady (max DD / panic stop)
+✅ AI & Signals ma TOP10/TOP5 + uzasadnienie
+✅ Telegram alerty działają i mają log
+✅ Blog generuje wpis i publikuje w Twoim trybie
+✅ Brak kluczy API na logowaniu; klucze dopiero po wejściu, w .env jak ustaliłeś
+
+
 Jasne. Poniżej masz szczegółowy opis wyglądu i funkcjonalności tego, co wygenerowałem (to podwójny mockup: wariant A po lewej i wariant B po prawej). Wszystko opisuję po polsku i tak, jakby to miało wejść 1:1 do wdrożenia.
 
 ⸻
