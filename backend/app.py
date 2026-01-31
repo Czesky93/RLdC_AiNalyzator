@@ -10,8 +10,8 @@ from dotenv import load_dotenv
 # Import database
 from backend.database import init_db
 
-# Import routers (będą dodane później)
-# from backend.routers import market, portfolio, orders, signals, account
+# Import routers
+from backend.routers import market, portfolio, orders, signals, account
 
 load_dotenv()
 
@@ -72,12 +72,12 @@ async def health_check():
     }
 
 
-# Register routers (będą dodane w kolejnych krokach)
-# app.include_router(market.router, prefix="/api/market", tags=["Market"])
-# app.include_router(portfolio.router, prefix="/api/portfolio", tags=["Portfolio"])
-# app.include_router(orders.router, prefix="/api/orders", tags=["Orders"])
-# app.include_router(signals.router, prefix="/api/signals", tags=["Signals"])
-# app.include_router(account.router, prefix="/api/account", tags=["Account"])
+# Register routers
+app.include_router(market.router, prefix="/api/market", tags=["Market"])
+app.include_router(portfolio.router, prefix="/api/portfolio", tags=["Portfolio"])
+app.include_router(orders.router, prefix="/api/orders", tags=["Orders"])
+app.include_router(signals.router, prefix="/api/signals", tags=["Signals"])
+app.include_router(account.router, prefix="/api/account", tags=["Account"])
 
 
 if __name__ == "__main__":
