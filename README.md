@@ -28,7 +28,19 @@ RLdC Trading Bot combines cutting-edge technologies to create a powerful autonom
 
 ## Documentation
 
-See [Project Plan](docs/PROJECT_PLAN.md) for full details.
+- [Project Plan](docs/PROJECT_PLAN.md) - Full project architecture and implementation plan
+- [Design System](docs/DESIGN_SYSTEM.md) - Complete design system and UI guidelines
+
+## Design System
+
+The project uses a professional dark-themed design inspired by modern trading terminals:
+
+- **Dark Background**: `#0a1219` with card backgrounds `#111c26`
+- **Teal/Green Accents**: Primary color `#14b8a6` for actions and highlights
+- **Polish Interface**: All UI elements in Polish language
+- **Responsive Layout**: Mobile-first approach with breakpoints
+
+See [Design System Documentation](docs/DESIGN_SYSTEM.md) for complete guidelines.
 
 ## Getting Started
 
