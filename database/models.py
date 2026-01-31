@@ -1,7 +1,7 @@
 """SQLAlchemy models for trading data."""
-from datetime import datetime
+from datetime import datetime, timezone
 from sqlalchemy import Column, Integer, String, Float, DateTime, Enum
-from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import declarative_base
 import enum
 
 Base = declarative_base()
@@ -22,7 +22,7 @@ class Trade(Base):
     side = Column(Enum(TradeSide), nullable=False)
     amount = Column(Float, nullable=False)
     price = Column(Float, nullable=False)
-    timestamp = Column(DateTime, nullable=False, default=datetime.utcnow, index=True)
+    timestamp = Column(DateTime, nullable=False, default=lambda: datetime.now(timezone.utc), index=True)
     profit_loss = Column(Float, nullable=True)
 
     def __repr__(self):
@@ -34,7 +34,7 @@ class PortfolioSnapshot(Base):
     __tablename__ = "portfolio_snapshots"
 
     id = Column(Integer, primary_key=True, index=True, autoincrement=True)
-    timestamp = Column(DateTime, nullable=False, default=datetime.utcnow, index=True)
+    timestamp = Column(DateTime, nullable=False, default=lambda: datetime.now(timezone.utc), index=True)
     total_equity_usdt = Column(Float, nullable=False)
     cash_balance = Column(Float, nullable=False)
 

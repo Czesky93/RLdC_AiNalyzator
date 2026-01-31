@@ -6,7 +6,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from database.models import Base, Trade, PortfolioSnapshot, TradeSide
 from database.session import get_db
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 # Set testing mode before importing app
 os.environ["TESTING"] = "1"
@@ -22,7 +22,7 @@ def sample_trades(db_session):
             side=TradeSide.BUY,
             amount=0.1,
             price=50000.0,
-            timestamp=datetime.utcnow() - timedelta(hours=2),
+            timestamp=datetime.now(timezone.utc) - timedelta(hours=2),
             profit_loss=None
         ),
         Trade(
@@ -30,7 +30,7 @@ def sample_trades(db_session):
             side=TradeSide.SELL,
             amount=0.1,
             price=51000.0,
-            timestamp=datetime.utcnow() - timedelta(hours=1),
+            timestamp=datetime.now(timezone.utc) - timedelta(hours=1),
             profit_loss=100.0
         ),
         Trade(
@@ -38,7 +38,7 @@ def sample_trades(db_session):
             side=TradeSide.BUY,
             amount=1.0,
             price=3000.0,
-            timestamp=datetime.utcnow(),
+            timestamp=datetime.now(timezone.utc),
             profit_loss=None
         ),
     ]
@@ -53,17 +53,17 @@ def sample_snapshots(db_session):
     """Create sample portfolio snapshots."""
     snapshots = [
         PortfolioSnapshot(
-            timestamp=datetime.utcnow() - timedelta(hours=3),
+            timestamp=datetime.now(timezone.utc) - timedelta(hours=3),
             total_equity_usdt=10000.0,
             cash_balance=10000.0
         ),
         PortfolioSnapshot(
-            timestamp=datetime.utcnow() - timedelta(hours=2),
+            timestamp=datetime.now(timezone.utc) - timedelta(hours=2),
             total_equity_usdt=10500.0,
             cash_balance=5000.0
         ),
         PortfolioSnapshot(
-            timestamp=datetime.utcnow() - timedelta(hours=1),
+            timestamp=datetime.now(timezone.utc) - timedelta(hours=1),
             total_equity_usdt=10100.0,
             cash_balance=10100.0
         ),

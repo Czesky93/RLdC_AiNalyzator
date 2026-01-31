@@ -1,5 +1,5 @@
 """Paper trading engine with database persistence."""
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Dict, Optional
 from sqlalchemy.orm import Session
 from database.models import Trade, PortfolioSnapshot, TradeSide
@@ -74,7 +74,7 @@ class PaperTrader:
             side=trade_side,
             amount=amount,
             price=price,
-            timestamp=datetime.utcnow(),
+            timestamp=datetime.now(timezone.utc),
             profit_loss=profit_loss
         )
         
@@ -113,7 +113,7 @@ class PaperTrader:
                     total_equity += amount * current_prices[symbol]
         
         snapshot = PortfolioSnapshot(
-            timestamp=datetime.utcnow(),
+            timestamp=datetime.now(timezone.utc),
             total_equity_usdt=total_equity,
             cash_balance=self.cash_balance
         )

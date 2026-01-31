@@ -2,7 +2,7 @@
 from typing import List, Optional
 from datetime import datetime
 from fastapi import APIRouter, Depends, Query
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 from sqlalchemy.orm import Session
 from sqlalchemy import func, case
 from database.session import get_db
@@ -14,6 +14,8 @@ router = APIRouter(prefix="/trading", tags=["trading"])
 # Pydantic models for API responses
 class TradeResponse(BaseModel):
     """Response model for trade data."""
+    model_config = ConfigDict(from_attributes=True)
+    
     id: int
     symbol: str
     side: str
@@ -22,19 +24,15 @@ class TradeResponse(BaseModel):
     timestamp: datetime
     profit_loss: Optional[float]
 
-    class Config:
-        from_attributes = True
-
 
 class PortfolioSnapshotResponse(BaseModel):
     """Response model for portfolio snapshot data."""
+    model_config = ConfigDict(from_attributes=True)
+    
     id: int
     timestamp: datetime
     total_equity_usdt: float
     cash_balance: float
-
-    class Config:
-        from_attributes = True
 
 
 class TradingStatsResponse(BaseModel):
