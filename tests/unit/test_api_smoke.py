@@ -14,7 +14,12 @@ def test_api_smoke():
         init_db()
 
         client = TestClient(app)
-        assert client.get("/health").status_code == 200
+        health_resp = client.get("/health")
+        assert health_resp.status_code == 200
+        health_data = health_resp.json()
+        assert health_data["status"] == "ok"
+        assert "version" in health_data
+        
         assert client.get("/api/summary").status_code == 200
         market = client.get("/api/market/summary")
         assert market.status_code == 200

@@ -289,8 +289,27 @@ def root() -> Dict[str, Any]:
 
 
 @app.get("/health")
-def health() -> Dict[str, str]:
-    return {"status": "ok"}
+def health() -> Dict[str, Any]:
+    """Endpoint zdrowia systemu z informacjami o statusie komponentów."""
+    db_status = "ok"
+    try:
+        conn = get_db()
+        conn.close()
+    except Exception:
+        db_status = "error"
+    
+    binance_status = "offline" if OFFLINE_MODE else ("configured" if BINANCE_API_KEY else "not_configured")
+    telegram_status = "configured" if TELEGRAM_BOT_TOKEN else "not_configured"
+    
+    return {
+        "status": "ok",
+        "version": APP_VERSION,
+        "database": db_status,
+        "binance": binance_status,
+        "telegram": telegram_status,
+        "market_symbols": len(MARKET_SYMBOLS),
+        "offline_mode": OFFLINE_MODE
+    }
 
 
 @app.get("/api/logs")
