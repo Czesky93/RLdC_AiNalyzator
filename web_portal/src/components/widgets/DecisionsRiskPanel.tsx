@@ -167,8 +167,9 @@ export default function DecisionsRiskPanel({
       </div>
     ) : null
 
-  const actPending = async (id: number, action: 'confirm' | 'reject') => {
-    setPendingAction(`${action === 'confirm' ? 'Confirm' : 'Reject'} #${id}...`)
+  const actPending = async (id: number, action: 'confirm' | 'reject' | 'cancel') => {
+    const label = action === 'confirm' ? 'Confirm' : action === 'reject' ? 'Reject' : 'Cancel'
+    setPendingAction(`${label} #${id}...`)
     try {
       const headers: Record<string, string> = withAdminToken()
       const res = await fetch(`${API_BASE}/api/orders/pending/${id}/${action}`, { method: 'POST', headers })
@@ -331,6 +332,12 @@ export default function DecisionsRiskPanel({
                         className="px-2 py-1 text-[10px] rounded bg-rldc-red-primary/20 text-rldc-red-primary hover:bg-rldc-red-primary/30 transition"
                       >
                         Reject
+                      </button>
+                      <button
+                        onClick={() => actPending(Number(p.id), 'cancel')}
+                        className="px-2 py-1 text-[10px] rounded bg-slate-500/10 text-slate-200 hover:bg-slate-500/20 transition border border-rldc-dark-border"
+                      >
+                        Cancel
                       </button>
                     </div>
                   </div>
