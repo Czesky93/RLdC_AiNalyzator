@@ -138,12 +138,14 @@ async def get_pending_orders(
     mode: str = Query("demo", description="Tryb: demo lub live"),
     status: Optional[str] = Query(None, description="PENDING/CONFIRMED/REJECTED/EXECUTED"),
     limit: int = Query(100, ge=1, le=500, description="Limit"),
+    include_total: bool = Query(False, description="Jeśli true: zwróć total (count bez limit)"),
     db: Session = Depends(get_db)
 ):
     try:
         query = db.query(PendingOrder).filter(PendingOrder.mode == mode)
         if status:
             query = query.filter(PendingOrder.status == status)
+        total = query.count() if include_total else None
         items = query.order_by(desc(PendingOrder.created_at)).limit(limit).all()
         data = []
         for p in items:
@@ -159,7 +161,10 @@ async def get_pending_orders(
                 "created_at": p.created_at.isoformat() if p.created_at else None,
                 "confirmed_at": p.confirmed_at.isoformat() if p.confirmed_at else None,
             })
-        return {"success": True, "mode": mode, "data": data, "count": len(data)}
+        payload = {"success": True, "mode": mode, "data": data, "count": len(data)}
+        if include_total:
+            payload["total"] = int(total or 0)
+        return payload
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error getting pending orders: {str(e)}")
 

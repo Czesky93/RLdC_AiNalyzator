@@ -139,6 +139,7 @@ API (na start: tylko `mode=demo`, status musi byc `PENDING`, inaczej 409):
 ```bash
 curl -X POST "http://localhost:8000/api/orders/pending/123/confirm"
 curl -X POST "http://localhost:8000/api/orders/pending/123/reject"
+curl -X POST "http://localhost:8000/api/orders/pending/123/cancel"
 ```
 
 Jesli ustawisz `ADMIN_TOKEN`, dodaj naglowek:
@@ -146,6 +147,35 @@ Jesli ustawisz `ADMIN_TOKEN`, dodaj naglowek:
 ```bash
 curl -X POST "http://localhost:8000/api/orders/pending/123/confirm" -H "X-Admin-Token: $ADMIN_TOKEN"
 ```
+
+## Web create pending order (DEMO)
+
+Mozesz tez tworzyc pending ordery z web UI (Trade ticket) lub przez API:
+
+```bash
+curl -X POST "http://localhost:8000/api/orders/pending?mode=demo" \
+  -H "Content-Type: application/json" \
+  -d '{"symbol":"BTC/EUR","side":"BUY","quantity":0.01,"price":100.0,"reason":"manual"}'
+```
+
+Jesli ustawisz `ADMIN_TOKEN`, dodaj naglowek `X-Admin-Token`.
+
+## Zamkniecie pozycji (DEMO -> pending SELL)
+
+Zamykanie pozycji robi pending SELL (trzeba potwierdzic).
+
+```bash
+# 100%
+curl -X POST "http://localhost:8000/api/positions/1/close?mode=demo"
+
+# czesciowe (np. 25%)
+curl -X POST "http://localhost:8000/api/positions/1/close?mode=demo&quantity=0.25"
+
+# wszystkie pozycje
+curl -X POST "http://localhost:8000/api/positions/close-all?mode=demo"
+```
+
+Jesli ustawisz `ADMIN_TOKEN`, dodaj naglowek `X-Admin-Token`.
 
 ## Control Plane (STOP TRADING)
 

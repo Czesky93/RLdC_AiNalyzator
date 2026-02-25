@@ -80,10 +80,28 @@ export default function DecisionsRiskPanel({
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [pendingAction, setPendingAction] = useState<string | null>(null)
+  const [pendingRefreshing, setPendingRefreshing] = useState(false)
   const [ticketSide, setTicketSide] = useState<'BUY' | 'SELL'>('BUY')
   const [ticketQty, setTicketQty] = useState<string>('0.01')
   const [ticketReason, setTicketReason] = useState<string>('')
   const [ticketStatus, setTicketStatus] = useState<string | null>(null)
+
+  const reloadPending = async () => {
+    if (mode !== 'demo') return
+    setPendingRefreshing(true)
+    try {
+      const res = await fetch(`${API_BASE}/api/orders/pending?mode=demo&status=PENDING&limit=5&include_total=true`)
+      if (!res.ok) throw new Error('Błąd pobierania pending')
+      const json = await res.json()
+      setPending((json?.data || []) as PendingRow[])
+      const total = typeof json?.total === 'number' ? json.total : typeof json?.count === 'number' ? json.count : null
+      setPendingCount(total)
+    } catch (e: any) {
+      setPendingAction(String(e?.message || 'Błąd odświeżenia pending'))
+    } finally {
+      setPendingRefreshing(false)
+    }
+  }
 
   useEffect(() => {
     let cancelled = false
@@ -98,7 +116,7 @@ export default function DecisionsRiskPanel({
         if (mode === 'demo') {
           tasks.push(fetch(`${API_BASE}/api/control/state`))
           tasks.push(fetch(`${API_BASE}/api/orders/pending?mode=demo&status=PENDING&limit=5`))
-          tasks.push(fetch(`${API_BASE}/api/orders/pending?mode=demo&status=PENDING&limit=200`))
+          tasks.push(fetch(`${API_BASE}/api/orders/pending?mode=demo&status=PENDING&limit=1&include_total=true`))
         }
         tasks.push(fetch(`${API_BASE}/api/market/ticker/${sym}`))
         const res = await Promise.all(tasks)
@@ -131,7 +149,7 @@ export default function DecisionsRiskPanel({
           setRisk(riskJson.data || null)
           setControl(controlJson?.data || null)
           setPending((pendingJson?.data || []) as PendingRow[])
-          setPendingCount(typeof pendingCountJson?.count === 'number' ? pendingCountJson.count : null)
+          setPendingCount(typeof pendingCountJson?.total === 'number' ? pendingCountJson.total : typeof pendingCountJson?.count === 'number' ? pendingCountJson.count : null)
           setTickerPrice(toNum(tickerJson?.price))
         }
       } catch (e: any) {
@@ -178,9 +196,28 @@ export default function DecisionsRiskPanel({
       // optimistic refresh: remove from list
       setPending((items) => items.filter((p) => Number(p.id) !== Number(id)))
       setPendingCount((c) => (typeof c === 'number' ? Math.max(0, c - 1) : c))
+      await reloadPending()
     } catch (e: any) {
       setPendingAction(String(e?.message || 'Błąd akcji'))
     }
+  }
+
+  const bulkAct = async (action: 'confirm' | 'reject' | 'cancel') => {
+    if (!pending.length) return
+    setPendingAction(`${action.toUpperCase()} all (${pending.length})...`)
+    for (const row of pending) {
+      try {
+        const headers: Record<string, string> = withAdminToken()
+        const res = await fetch(`${API_BASE}/api/orders/pending/${Number(row.id)}/${action}`, { method: 'POST', headers })
+        if (!res.ok) throw new Error(res.status === 401 ? '401 Unauthorized (ADMIN_TOKEN?)' : 'Błąd akcji')
+      } catch (e: any) {
+        setPendingAction(String(e?.message || 'Błąd akcji'))
+        await reloadPending()
+        return
+      }
+    }
+    setPendingAction('OK')
+    await reloadPending()
   }
 
   const submitTicket = async () => {
@@ -212,6 +249,7 @@ export default function DecisionsRiskPanel({
       }
       setTicketStatus('OK')
       setTicketReason('')
+      await reloadPending()
     } catch (e: any) {
       setTicketStatus(String(e?.message || 'Błąd tworzenia pending'))
     }
@@ -310,7 +348,38 @@ export default function DecisionsRiskPanel({
           <div className="rounded-lg border border-rldc-dark-border bg-rldc-dark-bg p-3">
             <div className="flex items-center justify-between">
               <div className="text-[10px] uppercase tracking-widest text-slate-500">Pending (DEMO)</div>
-              {pendingAction && <div className="text-[10px] text-slate-500">{pendingAction}</div>}
+              <div className="flex items-center gap-2">
+                {pendingRefreshing && <div className="text-[10px] text-slate-500">refresh...</div>}
+                <button
+                  onClick={() => reloadPending()}
+                  className="px-2 py-1 text-[10px] rounded border border-rldc-dark-border bg-slate-500/10 text-slate-200 hover:bg-slate-500/20 transition"
+                >
+                  Refresh
+                </button>
+                {pending.length > 0 && (
+                  <>
+                    <button
+                      onClick={() => bulkAct('confirm')}
+                      className="px-2 py-1 text-[10px] rounded bg-rldc-green-primary/15 text-rldc-green-primary border border-rldc-green-primary/20 hover:bg-rldc-green-primary hover:text-white transition"
+                    >
+                      Confirm all
+                    </button>
+                    <button
+                      onClick={() => bulkAct('cancel')}
+                      className="px-2 py-1 text-[10px] rounded bg-slate-500/10 text-slate-200 border border-rldc-dark-border hover:bg-slate-600 hover:text-white transition"
+                    >
+                      Cancel all
+                    </button>
+                    <button
+                      onClick={() => bulkAct('reject')}
+                      className="px-2 py-1 text-[10px] rounded bg-rldc-red-primary/15 text-rldc-red-primary border border-rldc-red-primary/20 hover:bg-rldc-red-primary hover:text-white transition"
+                    >
+                      Reject all
+                    </button>
+                  </>
+                )}
+                {pendingAction && <div className="text-[10px] text-slate-500">{pendingAction}</div>}
+              </div>
             </div>
             <div className="mt-3 space-y-2">
               {!pending.length && <div className="text-xs text-slate-500">Brak pending.</div>}
