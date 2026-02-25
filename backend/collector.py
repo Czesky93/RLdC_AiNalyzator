@@ -21,10 +21,11 @@ from backend.binance_client import get_binance_client
 from backend.system_logger import log_to_db, log_exception
 from backend.analysis import maybe_generate_insights_and_blog, get_live_context
 from backend.accounting import compute_demo_account_state, get_demo_quote_ccy
+from backend.runtime_settings import effective_bool, watchlist_override
 import requests
 
 _ENV_PATH = os.path.join(os.path.dirname(__file__), "..", ".env")
-load_dotenv(dotenv_path=_ENV_PATH, override=True)
+load_dotenv(dotenv_path=_ENV_PATH, override=False)
 
 # Python 3.12+ może emitować DeprecationWarning dla datetime.utcnow().
 # W runtime (dev) to tylko szum w logach — wyciszamy, żeby nie wyglądało jak błąd.
@@ -178,8 +179,7 @@ class DataCollector:
             # Restart WS, aby odświeżyć streamy
             if self.ws_running:
                 self.stop_ws()
-                ws_enabled = os.getenv("WS_ENABLED", "true").lower() == "true"
-                if ws_enabled:
+                if effective_bool(db, "ws_enabled", "WS_ENABLED", True):
                     self.start_ws()
         else:
             self.watchlist = new_list
@@ -351,20 +351,146 @@ class DataCollector:
         if executed_count:
             logger.info(f"✅ Wykonano potwierdzone transakcje DEMO: {executed_count}")
 
+    def _mark_to_market_positions(self, db: Session, mode: str = "demo") -> None:
+        """
+        Aktualizuj `current_price` i `unrealized_pnl` dla otwartych pozycji na bazie ostatnich MarketData.
+        """
+        try:
+            positions = db.query(Position).filter(Position.mode == mode).all()
+            if not positions:
+                return
+
+            price_cache: dict[str, float] = {}
+            updated = 0
+            for p in positions:
+                sym = (p.symbol or "").strip().upper()
+                if not sym:
+                    continue
+
+                price = price_cache.get(sym)
+                if price is None:
+                    latest = (
+                        db.query(MarketData)
+                        .filter(MarketData.symbol == sym)
+                        .order_by(MarketData.timestamp.desc())
+                        .first()
+                    )
+                    if latest and latest.price is not None:
+                        try:
+                            price = float(latest.price)
+                        except Exception:
+                            price = None
+                    if price is None:
+                        ticker = self.binance.get_ticker_price(sym)
+                        if ticker and ticker.get("price"):
+                            try:
+                                price = float(ticker["price"])
+                            except Exception:
+                                price = None
+                    if price is not None:
+                        price_cache[sym] = price
+
+                if price is None:
+                    continue
+
+                p.current_price = price
+                if p.entry_price is not None and p.quantity is not None:
+                    entry = float(p.entry_price)
+                    qty = float(p.quantity)
+                    if (p.side or "").upper() == "SHORT":
+                        p.unrealized_pnl = (entry - price) * qty
+                    else:
+                        p.unrealized_pnl = (price - entry) * qty
+                updated += 1
+
+            if updated:
+                db.commit()
+        except Exception as exc:
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            log_exception("collector", "Błąd mark-to-market pozycji", exc, db=db)
+
+    def _persist_demo_snapshot_if_due(self, db: Session, force: bool = False) -> None:
+        """
+        Zapisz snapshot equity do wykresów co `ACCOUNT_SNAPSHOT_INTERVAL_SECONDS`.
+        """
+        try:
+            interval_s = int(os.getenv("ACCOUNT_SNAPSHOT_INTERVAL_SECONDS", "60"))
+        except Exception:
+            interval_s = 60
+
+        now = datetime.utcnow()
+        if not force and self.last_snapshot_ts:
+            if (now - self.last_snapshot_ts).total_seconds() < float(interval_s):
+                return
+
+        try:
+            quote_ccy = get_demo_quote_ccy()
+            state = compute_demo_account_state(db, quote_ccy=quote_ccy, now=now)
+            snap = AccountSnapshot(
+                mode="demo",
+                equity=float(state.get("equity") or 0.0),
+                free_margin=float(state.get("cash") or 0.0),
+                used_margin=0.0,
+                margin_level=0.0,
+                balance=float(state.get("cash") or 0.0),
+                unrealized_pnl=float(state.get("unrealized_pnl") or 0.0),
+                timestamp=now,
+            )
+            db.add(snap)
+            db.commit()
+            self.last_snapshot_ts = now
+        except Exception as exc:
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            log_exception("collector", "Błąd zapisu AccountSnapshot (DEMO)", exc, db=db)
+
     def _demo_trading(self, db: Session):
-        enabled = os.getenv("DEMO_TRADING_ENABLED", "true").lower() == "true"
+        enabled = effective_bool(db, "demo_trading_enabled", "DEMO_TRADING_ENABLED", True)
         if not enabled:
             return
-
-        max_certainty_mode = os.getenv("MAX_CERTAINTY_MODE", "false").lower() == "true"
 
         trading_mode = os.getenv("TRADING_MODE", "demo").lower()
         if trading_mode != "demo":
             log_to_db("WARNING", "demo_trading", "TRADING_MODE != demo — demo trading wyłączony", db=db)
             return
 
+        now = datetime.utcnow()
+        demo_quote_ccy = get_demo_quote_ccy()
+        account_state = compute_demo_account_state(db, quote_ccy=demo_quote_ccy, now=now)
+        initial_balance = float(account_state.get("initial_balance") or float(os.getenv("DEMO_INITIAL_BALANCE", "10000")))
+        cash = float(account_state.get("cash") or initial_balance)
+        equity = float(account_state.get("equity") or cash)
+        reserved_cash = 0.0
+        try:
+            active_pending = (
+                db.query(PendingOrder)
+                .filter(
+                    PendingOrder.mode == "demo",
+                    PendingOrder.side == "BUY",
+                    PendingOrder.status.in_(["PENDING", "CONFIRMED"]),
+                )
+                .all()
+            )
+            for p in active_pending:
+                sym = (p.symbol or "").strip().upper().replace("/", "").replace("-", "")
+                if not sym.endswith(demo_quote_ccy):
+                    continue
+                try:
+                    reserved_cash += float(p.price or 0.0) * float(p.quantity or 0.0)
+                except Exception:
+                    continue
+        except Exception:
+            reserved_cash = 0.0
+        available_cash = max(0.0, cash - reserved_cash)
+
+        max_certainty_mode = effective_bool(db, "max_certainty_mode", "MAX_CERTAINTY_MODE", False)
+
         # Ustawienia (konserwatywne)
-        balance = float(os.getenv("DEMO_INITIAL_BALANCE", "10000"))
         max_daily_loss_pct = float(os.getenv("MAX_DAILY_LOSS_PERCENT", "5.0"))
         max_drawdown_pct = float(os.getenv("MAX_DRAWDOWN_PERCENT", "10.0"))
         base_qty = float(os.getenv("DEMO_ORDER_QTY", "0.01"))
@@ -460,10 +586,16 @@ class DataCollector:
 
         # Ryzyko (dzienny limit + drawdown)
         since = now - timedelta(hours=24)
-        positions = db.query(Position).filter(Position.mode == "demo").all()
-        unrealized_pnl = sum((p.unrealized_pnl or 0.0) for p in positions)
-        daily_loss_limit = -(balance * max_daily_loss_pct / 100)
-        daily_loss_triggered = unrealized_pnl <= daily_loss_limit
+        positions_all = db.query(Position).filter(Position.mode == "demo").all()
+        positions = [
+            p
+            for p in positions_all
+            if (p.symbol or "").strip().upper().replace("/", "").replace("-", "").endswith(demo_quote_ccy)
+        ]
+        unrealized_pnl = float(account_state.get("unrealized_pnl") or 0.0)
+        realized_pnl_24h = float(account_state.get("realized_pnl_24h") or 0.0)
+        daily_loss_limit = -(initial_balance * max_daily_loss_pct / 100)
+        daily_loss_triggered = (realized_pnl_24h + unrealized_pnl) <= daily_loss_limit
 
         for p in positions:
             if p.entry_price and p.current_price and p.entry_price > 0:
@@ -563,6 +695,9 @@ class DataCollector:
         # 2) Nowe decyzje (entry/exit) — TYLKO w skrajnych momentach + TYLKO po potwierdzeniu (pending)
         for symbol in self.watchlist:
             if not symbol:
+                continue
+            sym_norm = (symbol or "").strip().upper().replace("/", "").replace("-", "")
+            if not sym_norm.endswith(demo_quote_ccy):
                 continue
             if _has_active_pending(symbol) or _pending_in_cooldown(symbol):
                 continue
@@ -689,7 +824,7 @@ class DataCollector:
             loss_streak = int(state.get("loss_streak", 0))
             win_streak = int(state.get("win_streak", 0))
             risk_scale = float(params.get("risk_scale", 1.0))
-            risk_amount = balance * base_risk_per_trade * risk_scale
+            risk_amount = equity * base_risk_per_trade * risk_scale
             stop_distance = float(atr) * atr_stop_mult
             atr_qty = risk_amount / stop_distance if stop_distance > 0 else base_qty
             qty = max(min_qty, min(max_qty, atr_qty))
@@ -698,6 +833,13 @@ class DataCollector:
                 qty = max(base_qty * 0.1, qty * 0.25)
             if side == "SELL" and position is not None:
                 qty = min(float(position.quantity), qty)
+            if side == "BUY":
+                # DEMO: nie twórz BUY, jeśli nie stać — clamp po cash.
+                if price > 0:
+                    max_affordable = available_cash / float(price)
+                    qty = min(qty, max_affordable)
+                if qty < min_qty:
+                    continue
 
             # Rating decyzji 1–5
             rating = 1
@@ -745,6 +887,11 @@ class DataCollector:
                 mode="demo",
                 reason=f"{why}. Pewność {int(float(sig.confidence)*100)}%, rating {rating}/5.",
             )
+            if side == "BUY":
+                try:
+                    available_cash = max(0.0, float(available_cash) - (float(price) * float(qty)))
+                except Exception:
+                    pass
 
             buy_rng = f"{r.get('buy_low')} – {r.get('buy_high')}"
             sell_rng = f"{r.get('sell_low')} – {r.get('sell_high')}"
@@ -776,6 +923,9 @@ class DataCollector:
         # Globalny hamulec (bez wyłączania): wydłuż cooldown dla wszystkich symboli
         if daily_loss_triggered:
             for sym in self.watchlist:
+                sym_norm = (sym or "").strip().upper().replace("/", "").replace("-", "")
+                if not sym_norm.endswith(demo_quote_ccy):
+                    continue
                 state = self.demo_state.get(sym, {"loss_streak": 0, "cooldown": base_cooldown})
                 state["loss_streak"] = min(int(state.get("loss_streak", 0)) + 1, 5)
                 state["cooldown"] = min(base_cooldown * (1 + int(state["loss_streak"])), 3600)
@@ -952,14 +1102,36 @@ class DataCollector:
             except Exception as exc:
                 log_exception("collector", "Błąd wykonania potwierdzonych transakcji", exc, db=db)
 
-            # Aktualizuj watchlist z portfela tylko co N sekund (lub częściej jeśli pusta).
-            self._refresh_watchlist_if_due(db, force=(not self.watchlist))
+            ws_enabled = effective_bool(db, "ws_enabled", "WS_ENABLED", True)
+
+            # Control Plane: watchlist override z DB (jeśli ustawiona) ma pierwszeństwo.
+            wl_override = None
+            try:
+                wl_override = watchlist_override(db)
+            except Exception:
+                wl_override = None
+
+            if wl_override is not None:
+                if wl_override != self.watchlist:
+                    old = ", ".join(self.watchlist) if self.watchlist else "(pusto)"
+                    new = ", ".join(wl_override) if wl_override else "(pusto)"
+                    logger.info(f"🛠️ Watchlista (override): {old} -> {new}")
+                    log_to_db("INFO", "collector", f"Watchlist override: {old} -> {new}", db=db)
+                    self.watchlist = wl_override
+                    if self.ws_running:
+                        self.stop_ws()
+                        if ws_enabled and self.watchlist:
+                            self.start_ws()
+                else:
+                    self.watchlist = wl_override
+            else:
+                # Aktualizuj watchlist z portfela tylko co N sekund (lub częściej jeśli pusta).
+                self._refresh_watchlist_if_due(db, force=(not self.watchlist))
             if not self.watchlist:
                 self._log_no_watchlist(db)
                 return
 
             # Start/stop WS zależnie od ustawień i dostępnej watchlisty
-            ws_enabled = os.getenv("WS_ENABLED", "true").lower() == "true"
             if ws_enabled and not self.ws_running:
                 self.start_ws()
             if (not ws_enabled) and self.ws_running:
@@ -973,6 +1145,10 @@ class DataCollector:
 
             # Zbierz dane rynkowe
             self.collect_market_data(db)
+
+            # Mark-to-market pozycji + snapshoty KPI (DEMO)
+            self._mark_to_market_positions(db, mode="demo")
+            self._persist_demo_snapshot_if_due(db)
             
             # Zbierz świece
             self.collect_klines(db)

@@ -9,7 +9,7 @@ import os
 from dotenv import load_dotenv
 
 _ENV_PATH = os.path.join(os.path.dirname(__file__), "..", ".env")
-load_dotenv(dotenv_path=_ENV_PATH, override=True)
+load_dotenv(dotenv_path=_ENV_PATH, override=False)
 
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./trading_bot.db")
 
@@ -190,6 +190,17 @@ class PendingOrder(Base):
     confirmed_at = Column(DateTime)
 
 
+class RuntimeSetting(Base):
+    """Ustawienia runtime (control plane) - override ENV, persist w DB."""
+
+    __tablename__ = "runtime_settings"
+
+    id = Column(Integer, primary_key=True, index=True)
+    key = Column(String(50), unique=True, index=True, nullable=False)
+    value = Column(Text)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, index=True)
+
+
 # Database initialization
 def init_db():
     """Inicjalizacja bazy danych - tworzenie tabel"""
@@ -243,6 +254,7 @@ def reset_database(scope: str = "full"):
         "system_logs",
         "telegram_messages",
         "pending_orders",
+        "runtime_settings",
     ]
     tables_demo = [
         "signals",

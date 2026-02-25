@@ -13,6 +13,7 @@ import io
 import csv
 
 from backend.database import get_db, Order, Alert, PendingOrder
+from backend.auth import require_admin
 
 router = APIRouter()
 
@@ -153,6 +154,54 @@ async def get_pending_orders(
         return {"success": True, "mode": mode, "data": data, "count": len(data)}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error getting pending orders: {str(e)}")
+
+
+@router.post("/pending/{pending_id}/confirm")
+async def confirm_pending_order(
+    pending_id: int,
+    db: Session = Depends(get_db),
+    admin: None = Depends(require_admin),
+):
+    """
+    Potwierdź pending order (web/admin). Na start: tylko DEMO.
+    """
+    p = db.query(PendingOrder).filter(PendingOrder.id == pending_id).first()
+    if not p:
+        raise HTTPException(status_code=404, detail="Pending order not found")
+    if (p.mode or "").lower() != "demo":
+        raise HTTPException(status_code=403, detail="Only demo pending orders can be confirmed")
+    if (p.status or "").upper() != "PENDING":
+        raise HTTPException(status_code=409, detail="Pending order is not in PENDING status")
+
+    p.status = "CONFIRMED"
+    p.confirmed_at = datetime.utcnow()
+    db.commit()
+    db.refresh(p)
+    return {"success": True, "data": {"id": p.id, "status": p.status, "confirmed_at": p.confirmed_at.isoformat()}}
+
+
+@router.post("/pending/{pending_id}/reject")
+async def reject_pending_order(
+    pending_id: int,
+    db: Session = Depends(get_db),
+    admin: None = Depends(require_admin),
+):
+    """
+    Odrzuć pending order (web/admin). Na start: tylko DEMO.
+    """
+    p = db.query(PendingOrder).filter(PendingOrder.id == pending_id).first()
+    if not p:
+        raise HTTPException(status_code=404, detail="Pending order not found")
+    if (p.mode or "").lower() != "demo":
+        raise HTTPException(status_code=403, detail="Only demo pending orders can be rejected")
+    if (p.status or "").upper() != "PENDING":
+        raise HTTPException(status_code=409, detail="Pending order is not in PENDING status")
+
+    p.status = "REJECTED"
+    p.confirmed_at = datetime.utcnow()
+    db.commit()
+    db.refresh(p)
+    return {"success": True, "data": {"id": p.id, "status": p.status, "confirmed_at": p.confirmed_at.isoformat()}}
 
 
 @router.post("/")

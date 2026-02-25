@@ -15,7 +15,7 @@ import logging
 from functools import lru_cache
 
 _ENV_PATH = os.path.join(os.path.dirname(__file__), "..", ".env")
-load_dotenv(dotenv_path=_ENV_PATH, override=True)
+load_dotenv(dotenv_path=_ENV_PATH, override=False)
 
 logger = logging.getLogger(__name__)
 

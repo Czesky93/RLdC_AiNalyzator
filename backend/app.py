@@ -17,11 +17,11 @@ from dotenv import load_dotenv
 from backend.database import init_db
 
 # Import routers
-from backend.routers import market, portfolio, orders, signals, account, positions, blog
+from backend.routers import market, portfolio, orders, signals, account, positions, blog, control
 from backend.collector import DataCollector
 
 _ENV_PATH = os.path.join(os.path.dirname(__file__), "..", ".env")
-load_dotenv(dotenv_path=_ENV_PATH, override=True)
+load_dotenv(dotenv_path=_ENV_PATH, override=False)
 
 
 @asynccontextmanager
@@ -101,6 +101,7 @@ app.include_router(signals.router, prefix="/api/signals", tags=["Signals"])
 app.include_router(account.router, prefix="/api/account", tags=["Account"])
 app.include_router(positions.router, prefix="/api/positions", tags=["Positions"])
 app.include_router(blog.router, prefix="/api/blog", tags=["Blog"])
+app.include_router(control.router, prefix="/api/control", tags=["Control"])
 
 
 if __name__ == "__main__":

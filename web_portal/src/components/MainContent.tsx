@@ -12,6 +12,12 @@ interface MainContentProps {
 }
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
+const ADMIN_TOKEN_STORAGE_KEY = 'rldc_admin_token'
+
+function getAdminToken(): string {
+  if (typeof window === 'undefined') return ''
+  return localStorage.getItem(ADMIN_TOKEN_STORAGE_KEY) || ''
+}
 
 function useFetch<T>(url: string, refreshMs: number = 0) {
   const [data, setData] = useState<T | null>(null)
@@ -59,7 +65,7 @@ function useFetch<T>(url: string, refreshMs: number = 0) {
   return { data, loading, error }
 }
 
-function SimpleTable({ title, headers, rows }: { title: string, headers: string[], rows: (string | number)[][] }) {
+function SimpleTable({ title, headers, rows }: { title: string, headers: string[], rows: React.ReactNode[][] }) {
   return (
     <div className="terminal-card rounded-lg p-4 border border-rldc-dark-border neon-card">
       <div className="flex items-center justify-between mb-3">
@@ -289,24 +295,65 @@ function DecisionReasonsWidget() {
 }
 
 function PendingOrdersWidget({ mode }: { mode: 'demo' | 'live' }) {
-  const { data, loading, error } = useFetch<any>(`${API_BASE}/api/orders/pending?mode=${mode}&limit=50`, 60000)
-  const rows = (data?.data || []).map((p: any) => [
-    p.id,
-    p.symbol,
-    p.side,
-    p.quantity,
-    p.price ?? '--',
-    p.status,
-    p.created_at || '--',
-  ])
+  const [refreshKey, setRefreshKey] = useState(0)
+  const [actionStatus, setActionStatus] = useState<string | null>(null)
+  const { data, loading, error } = useFetch<any>(`${API_BASE}/api/orders/pending?mode=${mode}&limit=50&rk=${refreshKey}`, 60000)
+  const items = data?.data || []
+
+  const act = async (id: number, action: 'confirm' | 'reject') => {
+    setActionStatus(`${action === 'confirm' ? 'Potwierdzam' : 'Odrzucam'} #${id}...`)
+    try {
+      const token = getAdminToken().trim()
+      const headers: Record<string, string> = {}
+      if (token) headers['X-Admin-Token'] = token
+      const res = await fetch(`${API_BASE}/api/orders/pending/${id}/${action}`, { method: 'POST', headers })
+      if (!res.ok) throw new Error('Błąd akcji')
+      setRefreshKey((k) => k + 1)
+      setActionStatus('OK')
+    } catch {
+      setActionStatus('Akcja nieudana (sprawdź ADMIN_TOKEN)')
+    }
+  }
+
+  const rows = items.map((p: any) => {
+    const canAct = mode === 'demo' && String(p.status || '').toUpperCase() === 'PENDING'
+    return [
+      p.id,
+      p.symbol,
+      p.side,
+      p.quantity,
+      p.price ?? '--',
+      p.status,
+      p.created_at || '--',
+      canAct ? (
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => act(Number(p.id), 'confirm')}
+            className="px-2 py-1 text-[10px] rounded bg-rldc-green-primary/20 text-rldc-green-primary hover:bg-rldc-green-primary/30 transition"
+          >
+            Potwierdź
+          </button>
+          <button
+            onClick={() => act(Number(p.id), 'reject')}
+            className="px-2 py-1 text-[10px] rounded bg-rldc-red-primary/20 text-rldc-red-primary hover:bg-rldc-red-primary/30 transition"
+          >
+            Odrzuć
+          </button>
+        </div>
+      ) : (
+        '--'
+      ),
+    ]
+  })
   return (
     <div className="bg-rldc-dark-card rounded-lg p-6 border border-rldc-dark-border neon-card mt-4">
       <h2 className="text-lg font-semibold mb-4 text-slate-200">Potwierdzenia (Telegram)</h2>
       {loading && <div className="text-sm text-slate-400 mb-4">Ładowanie...</div>}
       {error && <div className="text-sm text-rldc-red-primary mb-4">{error}</div>}
+      {actionStatus && <div className="text-xs text-slate-500 mb-3">{actionStatus}</div>}
       <SimpleTable
         title="Pending Orders"
-        headers={['ID', 'Symbol', 'Side', 'Qty', 'Price', 'Status', 'Czas']}
+        headers={['ID', 'Symbol', 'Side', 'Qty', 'Price', 'Status', 'Czas', 'Akcje']}
         rows={rows}
       />
     </div>
@@ -768,6 +815,12 @@ function SettingsView({ activeView, mode }: { activeView: string, mode: 'demo' |
     isLogs ? 60000 : 0
   )
   const [resetStatus, setResetStatus] = useState<string | null>(null)
+  const [adminToken, setAdminToken] = useState<string>('')
+
+  useEffect(() => {
+    setAdminToken(getAdminToken())
+  }, [])
+
   return (
     <div className="flex-1 p-6 overflow-auto">
       <ViewHeader title={title} />
@@ -778,12 +831,31 @@ function SettingsView({ activeView, mode }: { activeView: string, mode: 'demo' |
         <div className="text-sm text-slate-400">
           Equity: {data?.data?.equity?.toFixed(2) || '--'} | Balance: {data?.data?.balance?.toFixed(2) || '--'}
         </div>
+        <div className="mt-4">
+          <div className="text-xs text-slate-500 mb-2">Admin token (opcjonalny, localStorage)</div>
+          <input
+            value={adminToken}
+            onChange={(e) => {
+              const v = e.target.value
+              setAdminToken(v)
+              if (typeof window !== 'undefined') {
+                if (v.trim()) localStorage.setItem(ADMIN_TOKEN_STORAGE_KEY, v.trim())
+                else localStorage.removeItem(ADMIN_TOKEN_STORAGE_KEY)
+              }
+            }}
+            placeholder="X-Admin-Token"
+            className="w-full max-w-md px-3 py-2 text-xs rounded bg-rldc-dark-bg border border-rldc-dark-border text-slate-200"
+          />
+        </div>
         <div className="mt-4 flex items-center gap-3">
           <button
             onClick={async () => {
               setResetStatus('Resetuję bazę...')
               try {
-                const res = await fetch(`${API_BASE}/api/account/reset?scope=full`, { method: 'POST' })
+                const token = (adminToken || '').trim()
+                const headers: Record<string, string> = {}
+                if (token) headers['X-Admin-Token'] = token
+                const res = await fetch(`${API_BASE}/api/account/reset?scope=full`, { method: 'POST', headers })
                 if (!res.ok) throw new Error('Błąd resetu')
                 setResetStatus('Reset zakończony')
               } catch {

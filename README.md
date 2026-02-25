@@ -130,6 +130,45 @@ Jeśli ustawisz `ADMIN_TOKEN` w `.env`, dodaj nagłówek:
 curl -X POST "http://localhost:8000/api/account/reset?scope=full" -H "X-Admin-Token: $ADMIN_TOKEN"
 ```
 
+## Web confirm/reject pending orders (DEMO)
+
+Poza Telegramem, pending orders da sie obsluzyc z web UI (przyciski Potwierdz/Odrzuc).
+
+API (na start: tylko `mode=demo`, status musi byc `PENDING`, inaczej 409):
+
+```bash
+curl -X POST "http://localhost:8000/api/orders/pending/123/confirm"
+curl -X POST "http://localhost:8000/api/orders/pending/123/reject"
+```
+
+Jesli ustawisz `ADMIN_TOKEN`, dodaj naglowek:
+
+```bash
+curl -X POST "http://localhost:8000/api/orders/pending/123/confirm" -H "X-Admin-Token: $ADMIN_TOKEN"
+```
+
+## Control Plane (STOP TRADING)
+
+Stan runtime (z ENV + override z DB):
+
+```bash
+curl "http://localhost:8000/api/control/state"
+```
+
+Wylaczenie DEMO trading (persist do DB):
+
+```bash
+curl -X POST "http://localhost:8000/api/control/state" \
+  -H "Content-Type: application/json" \
+  -d '{"demo_trading_enabled": false}'
+```
+
+Jesli ustawisz `ADMIN_TOKEN`, dodaj naglowek `X-Admin-Token`.
+
+## ENV vs .env
+
+Backend laduje `.env` z `override=false`, wiec zmienne srodowiskowe procesu maja pierwszenstwo przed wartosciami z `.env`.
+
 ## Diagnostyka (ważne)
 
 ### Szybki test OpenAI (czy klucz jest poprawny)
