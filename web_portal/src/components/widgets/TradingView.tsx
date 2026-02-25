@@ -14,6 +14,7 @@ interface TradingViewProps {
   allowSymbolSelect?: boolean
   titleOverride?: string
   refreshMs?: number
+  onSymbolChange?: (symbol: string) => void
 }
 
 export default function TradingView({
@@ -21,6 +22,7 @@ export default function TradingView({
   allowSymbolSelect = true,
   titleOverride: titleOverrideProp,
   refreshMs: refreshMsProp = 60000,
+  onSymbolChange,
 }: TradingViewProps) {
   const [mounted, setMounted] = useState(false)
   const [timeframe, setTimeframe] = useState('1h')
@@ -176,7 +178,13 @@ export default function TradingView({
           {allowSelect && (
             <select
               value={symbol}
-              onChange={(e) => setSymbol(e.target.value)}
+              onChange={(e) => {
+                const next = e.target.value
+                setSymbol(next)
+                if (onSymbolChange) {
+                  onSymbolChange(normalizeSymbol(next))
+                }
+              }}
               className="bg-rldc-dark-bg border border-rldc-dark-border text-slate-200 text-xs rounded px-2 py-1"
             >
               {symbols.map((s) => (

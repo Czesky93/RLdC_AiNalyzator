@@ -7,6 +7,7 @@ import MarketInsights from './widgets/MarketInsights'
 import DecisionRisk from './widgets/DecisionRisk'
 import { ADMIN_TOKEN_STORAGE_KEY, API_BASE, getAdminToken, withAdminToken } from '../lib/api'
 import EquityCurve from './widgets/EquityCurve'
+import DecisionsRiskPanel from './widgets/DecisionsRiskPanel'
 
 interface MainContentProps {
   activeView: string
@@ -154,6 +155,16 @@ function DashboardV2View({ tradingMode }: { tradingMode: 'live' | 'demo' | 'back
   const { data: summary } = useFetch<any>(`${API_BASE}/api/account/summary?mode=${mode}`, 15000)
   const { data: control } = useFetch<any>(`${API_BASE}/api/control/state`, 15000)
   const { data: positions } = useFetch<any>(`${API_BASE}/api/positions?mode=${mode}`, 60000)
+  const [selectedSymbol, setSelectedSymbol] = useState<string>('BTCEUR')
+
+  useEffect(() => {
+    const wl = control?.data?.watchlist
+    if (!Array.isArray(wl) || !wl.length) return
+    if (!selectedSymbol) {
+      setSelectedSymbol(String(wl[0]))
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [control?.data?.watchlist])
 
   const quoteCcy = summary?.data?.quote_ccy ? String(summary.data.quote_ccy) : null
   const equity = toNum(summary?.data?.equity)
@@ -216,14 +227,20 @@ function DashboardV2View({ tradingMode }: { tradingMode: 'live' | 'demo' | 'back
           ))}
         </div>
 
-        <div className="grid grid-cols-12 gap-4">
-          <div className="col-span-12 lg:col-span-8 space-y-4">
-            <TradingView allowSymbolSelect={true} refreshMs={60000} titleOverride="Market" />
-            <EquityCurve mode={mode} hours={24} quoteCcy={quoteCcy || undefined} refreshMs={60000} />
-            <div className="grid grid-cols-12 gap-4">
-              <div className="col-span-12 xl:col-span-7">
-                <OpenOrders />
-              </div>
+	        <div className="grid grid-cols-12 gap-4">
+	          <div className="col-span-12 lg:col-span-8 space-y-4">
+	            <TradingView
+	              symbol={selectedSymbol}
+	              onSymbolChange={(s) => setSelectedSymbol(s)}
+	              allowSymbolSelect={true}
+	              refreshMs={60000}
+	              titleOverride="Market"
+	            />
+	            <EquityCurve mode={mode} hours={24} quoteCcy={quoteCcy || undefined} refreshMs={60000} />
+	            <div className="grid grid-cols-12 gap-4">
+	              <div className="col-span-12 xl:col-span-7">
+	                <OpenOrders />
+	              </div>
               <div className="col-span-12 xl:col-span-5">
                 <SimpleTable
                   title="Positions"
@@ -232,14 +249,13 @@ function DashboardV2View({ tradingMode }: { tradingMode: 'live' | 'demo' | 'back
                 />
               </div>
             </div>
-            <OpenAIRangesWidget />
-          </div>
-          <div className="col-span-12 lg:col-span-4 space-y-4">
-            <DecisionRisk />
-            <PendingOrdersWidget mode={mode} />
-            <MarketInsights />
-          </div>
-        </div>
+	            <OpenAIRangesWidget />
+	          </div>
+	          <div className="col-span-12 lg:col-span-4 space-y-4">
+	            <DecisionsRiskPanel mode={mode} symbol={selectedSymbol} />
+	            <MarketInsights />
+	          </div>
+	        </div>
       </div>
     </div>
   )
