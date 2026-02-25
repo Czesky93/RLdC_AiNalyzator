@@ -129,3 +129,21 @@ def test_control_state_no_admin_token(client):
     assert payload.get("success") is True
     data = payload.get("data") or {}
     assert "demo_trading_enabled" in data
+
+
+def test_control_state_setters(client):
+    resp = client.post("/api/control/state", json={"demo_trading_enabled": False})
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload.get("success") is True
+    assert (payload.get("data") or {}).get("demo_trading_enabled") is False
+
+    resp = client.post("/api/control/state", json={"watchlist": ["BTC/EUR", "WLFI/EUR"]})
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload.get("success") is True
+    data = payload.get("data") or {}
+    assert data.get("watchlist_source") == "override"
+    assert isinstance(data.get("watchlist_override"), list)
+    # normalized: strip "/" and "-" and upper
+    assert "BTCEUR" in data.get("watchlist_override")

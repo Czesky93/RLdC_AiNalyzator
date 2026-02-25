@@ -2,18 +2,11 @@
 
 import { useEffect, useState } from 'react'
 import { Bell, Power, Search, Twitter, User2 } from 'lucide-react'
+import { API_BASE, withAdminToken } from '../lib/api'
 
 interface TopbarProps {
   tradingMode: 'live' | 'demo' | 'backtest'
   setTradingMode: (mode: 'live' | 'demo' | 'backtest') => void
-}
-
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
-const ADMIN_TOKEN_STORAGE_KEY = 'rldc_admin_token'
-
-function getAdminToken(): string {
-  if (typeof window === 'undefined') return ''
-  return localStorage.getItem(ADMIN_TOKEN_STORAGE_KEY) || ''
 }
 
 export default function Topbar({ tradingMode, setTradingMode }: TopbarProps) {
@@ -117,9 +110,7 @@ export default function Topbar({ tradingMode, setTradingMode }: TopbarProps) {
             if (stopping) return
             setStopping(true)
             try {
-              const token = getAdminToken().trim()
-              const headers: Record<string, string> = { 'Content-Type': 'application/json' }
-              if (token) headers['X-Admin-Token'] = token
+              const headers: Record<string, string> = withAdminToken({ 'Content-Type': 'application/json' })
               const res = await fetch(`${API_BASE}/api/control/state`, {
                 method: 'POST',
                 headers,

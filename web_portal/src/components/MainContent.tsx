@@ -5,18 +5,11 @@ import TradingView from './widgets/TradingView'
 import OpenOrders from './widgets/OpenOrders'
 import MarketInsights from './widgets/MarketInsights'
 import DecisionRisk from './widgets/DecisionRisk'
+import { ADMIN_TOKEN_STORAGE_KEY, API_BASE, getAdminToken, withAdminToken } from '../lib/api'
 
 interface MainContentProps {
   activeView: string
   tradingMode: 'live' | 'demo' | 'backtest'
-}
-
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
-const ADMIN_TOKEN_STORAGE_KEY = 'rldc_admin_token'
-
-function getAdminToken(): string {
-  if (typeof window === 'undefined') return ''
-  return localStorage.getItem(ADMIN_TOKEN_STORAGE_KEY) || ''
 }
 
 function useFetch<T>(url: string, refreshMs: number = 0) {
@@ -303,9 +296,7 @@ function PendingOrdersWidget({ mode }: { mode: 'demo' | 'live' }) {
   const act = async (id: number, action: 'confirm' | 'reject') => {
     setActionStatus(`${action === 'confirm' ? 'Potwierdzam' : 'Odrzucam'} #${id}...`)
     try {
-      const token = getAdminToken().trim()
-      const headers: Record<string, string> = {}
-      if (token) headers['X-Admin-Token'] = token
+      const headers: Record<string, string> = withAdminToken()
       const res = await fetch(`${API_BASE}/api/orders/pending/${id}/${action}`, { method: 'POST', headers })
       if (!res.ok) throw new Error('Błąd akcji')
       setRefreshKey((k) => k + 1)
@@ -810,16 +801,62 @@ function SettingsView({ activeView, mode }: { activeView: string, mode: 'demo' |
   const isLogs = activeView === 'logs'
   const title = isLogs ? 'Logi' : 'Ustawienia'
   const { data, loading, error } = useFetch<any>(`${API_BASE}/api/account/summary?mode=${mode}`, isLogs ? 60000 : 0)
+  const [controlRefreshKey, setControlRefreshKey] = useState(0)
+  const { data: controlState } = useFetch<any>(
+    `${API_BASE}/api/control/state?rk=${controlRefreshKey}`,
+    isLogs ? 0 : 15000
+  )
   const { data: logsData, loading: logsLoading, error: logsError } = useFetch<any>(
     isLogs ? `${API_BASE}/api/account/system-logs?limit=80` : '',
     isLogs ? 60000 : 0
   )
   const [resetStatus, setResetStatus] = useState<string | null>(null)
   const [adminToken, setAdminToken] = useState<string>('')
+  const [controlStatus, setControlStatus] = useState<string | null>(null)
+  const [watchlistOverrideInput, setWatchlistOverrideInput] = useState<string>('')
 
   useEffect(() => {
     setAdminToken(getAdminToken())
   }, [])
+
+  useEffect(() => {
+    const s = controlState?.data
+    if (!s) return
+    const override = Array.isArray(s.watchlist_override) ? s.watchlist_override : null
+    if (override && override.length) {
+      setWatchlistOverrideInput(String(override.join(',')))
+    }
+  }, [controlState?.data])
+
+  const normalizeWatchlist = (raw: string): string[] => {
+    const items = String(raw || '')
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean)
+      .map((s) => s.replace(/\s+/g, '').replaceAll('/', '').replaceAll('-', '').toUpperCase())
+      .filter(Boolean)
+    return Array.from(new Set(items))
+  }
+
+  const postControl = async (payload: any) => {
+    setControlStatus('Zapisuję...')
+    try {
+      const headers: Record<string, string> = withAdminToken({ 'Content-Type': 'application/json' })
+      const res = await fetch(`${API_BASE}/api/control/state`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(payload),
+      })
+      if (!res.ok) {
+        const msg = res.status === 401 ? '401 Unauthorized (ADMIN_TOKEN?)' : 'Błąd zapisu'
+        throw new Error(msg)
+      }
+      setControlStatus('OK')
+      setControlRefreshKey((k) => k + 1)
+    } catch (e: any) {
+      setControlStatus(String(e?.message || 'Błąd zapisu'))
+    }
+  }
 
   return (
     <div className="flex-1 p-6 overflow-auto">
@@ -852,9 +889,7 @@ function SettingsView({ activeView, mode }: { activeView: string, mode: 'demo' |
             onClick={async () => {
               setResetStatus('Resetuję bazę...')
               try {
-                const token = (adminToken || '').trim()
-                const headers: Record<string, string> = {}
-                if (token) headers['X-Admin-Token'] = token
+                const headers: Record<string, string> = withAdminToken()
                 const res = await fetch(`${API_BASE}/api/account/reset?scope=full`, { method: 'POST', headers })
                 if (!res.ok) throw new Error('Błąd resetu')
                 setResetStatus('Reset zakończony')
@@ -869,6 +904,115 @@ function SettingsView({ activeView, mode }: { activeView: string, mode: 'demo' |
           {resetStatus && <span className="text-xs text-slate-400">{resetStatus}</span>}
         </div>
       </div>
+
+      {!isLogs && (
+        <div className="bg-rldc-dark-card rounded-lg p-6 border border-rldc-dark-border neon-card mt-4">
+          <h2 className="text-lg font-semibold mb-4 text-slate-200">Control Plane</h2>
+          {controlStatus && <div className="text-xs text-slate-500 mb-3">{controlStatus}</div>}
+
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+            <div className="terminal-card border border-rldc-dark-border rounded-lg px-4 py-3">
+              <div className="text-[10px] uppercase tracking-widest text-slate-500">DEMO trading</div>
+              <div className="mt-2 flex items-center gap-2">
+                <button
+                  onClick={() => postControl({ demo_trading_enabled: !Boolean(controlState?.data?.demo_trading_enabled) })}
+                  className={`px-3 py-2 text-xs rounded border transition ${
+                    controlState?.data?.demo_trading_enabled
+                      ? 'bg-rldc-green-primary/15 text-rldc-green-primary border-rldc-green-primary/20'
+                      : 'bg-rldc-red-primary/15 text-rldc-red-primary border-rldc-red-primary/20'
+                  }`}
+                >
+                  {controlState?.data?.demo_trading_enabled ? 'ON' : 'OFF'}
+                </button>
+                <div className="text-xs text-slate-500">
+                  updated: {String(controlState?.data?.updated_at || '--')}
+                </div>
+              </div>
+            </div>
+
+            <div className="terminal-card border border-rldc-dark-border rounded-lg px-4 py-3">
+              <div className="text-[10px] uppercase tracking-widest text-slate-500">WS enabled</div>
+              <div className="mt-2 flex items-center gap-2">
+                <button
+                  onClick={() => postControl({ ws_enabled: !Boolean(controlState?.data?.ws_enabled) })}
+                  className={`px-3 py-2 text-xs rounded border transition ${
+                    controlState?.data?.ws_enabled
+                      ? 'bg-rldc-green-primary/15 text-rldc-green-primary border-rldc-green-primary/20'
+                      : 'bg-rldc-red-primary/15 text-rldc-red-primary border-rldc-red-primary/20'
+                  }`}
+                >
+                  {controlState?.data?.ws_enabled ? 'ON' : 'OFF'}
+                </button>
+              </div>
+            </div>
+
+            <div className="terminal-card border border-rldc-dark-border rounded-lg px-4 py-3">
+              <div className="text-[10px] uppercase tracking-widest text-slate-500">Max certainty mode</div>
+              <div className="mt-2 flex items-center gap-2">
+                <button
+                  onClick={() => postControl({ max_certainty_mode: !Boolean(controlState?.data?.max_certainty_mode) })}
+                  className={`px-3 py-2 text-xs rounded border transition ${
+                    controlState?.data?.max_certainty_mode
+                      ? 'bg-rldc-green-primary/15 text-rldc-green-primary border-rldc-green-primary/20'
+                      : 'bg-slate-500/10 text-slate-300 border-rldc-dark-border'
+                  }`}
+                >
+                  {controlState?.data?.max_certainty_mode ? 'ON' : 'OFF'}
+                </button>
+              </div>
+            </div>
+
+            <div className="terminal-card border border-rldc-dark-border rounded-lg px-4 py-3">
+              <div className="text-[10px] uppercase tracking-widest text-slate-500">DEMO quote ccy</div>
+              <div className="mt-2 text-sm font-mono text-slate-200">{String(controlState?.data?.demo_quote_ccy || '--')}</div>
+            </div>
+          </div>
+
+          <div className="mt-4 terminal-card border border-rldc-dark-border rounded-lg px-4 py-3">
+            <div className="text-[10px] uppercase tracking-widest text-slate-500">Effective watchlist</div>
+            <div className="mt-2 text-xs text-slate-300 font-mono">
+              {Array.isArray(controlState?.data?.watchlist) ? controlState.data.watchlist.join(',') : '--'}
+            </div>
+            {controlState?.data?.watchlist_source && (
+              <div className="mt-1 text-[10px] text-slate-500">
+                source: {String(controlState.data.watchlist_source)}
+              </div>
+            )}
+          </div>
+
+          <div className="mt-4 terminal-card border border-rldc-dark-border rounded-lg px-4 py-3">
+            <div className="text-[10px] uppercase tracking-widest text-slate-500">Watchlist override</div>
+            <div className="mt-2 text-xs text-slate-500 mb-2">comma-separated (np. WLFI/EUR,BTC/EUR)</div>
+            <input
+              value={watchlistOverrideInput}
+              onChange={(e) => setWatchlistOverrideInput(e.target.value)}
+              placeholder="WLFI/EUR,BTC/EUR"
+              className="w-full px-3 py-2 text-xs rounded bg-rldc-dark-bg border border-rldc-dark-border text-slate-200 font-mono"
+            />
+            <div className="mt-3 flex items-center gap-2">
+              <button
+                onClick={() => {
+                  const list = normalizeWatchlist(watchlistOverrideInput)
+                  if (!list.length) {
+                    setControlStatus('Podaj przynajmniej 1 symbol albo użyj Clear override.')
+                    return
+                  }
+                  postControl({ watchlist: list })
+                }}
+                className="px-4 py-2 text-xs rounded bg-rldc-teal-primary/20 text-rldc-teal-primary hover:bg-rldc-teal-primary/30 transition"
+              >
+                Save override
+              </button>
+              <button
+                onClick={() => postControl({ watchlist: [] })}
+                className="px-4 py-2 text-xs rounded bg-slate-500/10 text-slate-200 hover:bg-slate-500/20 transition border border-rldc-dark-border"
+              >
+                Clear override
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {isLogs && (
         <div className="mt-4">

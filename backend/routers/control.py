@@ -50,11 +50,16 @@ def _effective_watchlist(request: Request, overrides: dict) -> List[str]:
 
 def _build_state(request: Request, db: Session) -> dict:
     overrides = get_overrides(db, ["demo_trading_enabled", "ws_enabled", "max_certainty_mode", "watchlist"])
+    has_watchlist_override = overrides.get("watchlist") is not None
+    watchlist_override = _parse_watchlist(overrides.get("watchlist") or "") if has_watchlist_override else None
+    watchlist_source = "override" if has_watchlist_override else ("collector" if getattr(request.app.state, "collector", None) is not None else "env")
     data = {
         "demo_trading_enabled": effective_bool(db, "demo_trading_enabled", "DEMO_TRADING_ENABLED", True),
         "ws_enabled": effective_bool(db, "ws_enabled", "WS_ENABLED", True),
         "max_certainty_mode": effective_bool(db, "max_certainty_mode", "MAX_CERTAINTY_MODE", False),
         "watchlist": _effective_watchlist(request, overrides),
+        "watchlist_override": watchlist_override,
+        "watchlist_source": watchlist_source,
         "demo_quote_ccy": get_demo_quote_ccy(),
         "updated_at": datetime.utcnow().isoformat(),
     }
@@ -104,4 +109,3 @@ async def set_control_state(
         raise
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Error setting control state: {str(exc)}")
-
