@@ -56,9 +56,18 @@ export default function OpenOrders() {
   }
 
   const closeOne = async (positionId: number) => {
+    return closeOneQty(positionId, null)
+  }
+
+  const closeOneQty = async (positionId: number, quantity: number | null) => {
     setActionStatus(`Zamykam #${positionId}...`)
     try {
-      const res = await fetch(`${API_BASE}/api/positions/${positionId}/close?mode=demo`, {
+      const url = new URL(`${API_BASE}/api/positions/${positionId}/close`)
+      url.searchParams.set('mode', 'demo')
+      if (typeof quantity === 'number' && Number.isFinite(quantity) && quantity > 0) {
+        url.searchParams.set('quantity', String(quantity))
+      }
+      const res = await fetch(url.toString(), {
         method: 'POST',
         headers: withAdminToken(),
       })
@@ -162,12 +171,29 @@ export default function OpenOrders() {
                   </span>
                 </td>
                 <td className="py-3">
-                  <button
-                    onClick={() => closeOne(order.id)}
-                    className="px-3 py-1 text-xs rounded bg-rldc-red-primary/20 text-rldc-red-primary hover:bg-rldc-red-primary hover:text-white transition"
-                  >
-                    Zamknij
-                  </button>
+                  <div className="flex items-center gap-1">
+                    <button
+                      onClick={() => closeOneQty(order.id, Math.max(0, Number(order.quantity || 0) * 0.25))}
+                      className="px-2 py-1 text-xs rounded bg-rldc-red-primary/10 text-rldc-red-primary hover:bg-rldc-red-primary hover:text-white transition border border-rldc-red-primary/20"
+                      title="Zamknij 25%"
+                    >
+                      25%
+                    </button>
+                    <button
+                      onClick={() => closeOneQty(order.id, Math.max(0, Number(order.quantity || 0) * 0.5))}
+                      className="px-2 py-1 text-xs rounded bg-rldc-red-primary/10 text-rldc-red-primary hover:bg-rldc-red-primary hover:text-white transition border border-rldc-red-primary/20"
+                      title="Zamknij 50%"
+                    >
+                      50%
+                    </button>
+                    <button
+                      onClick={() => closeOne(order.id)}
+                      className="px-3 py-1 text-xs rounded bg-rldc-red-primary/20 text-rldc-red-primary hover:bg-rldc-red-primary hover:text-white transition"
+                      title="Zamknij 100%"
+                    >
+                      100%
+                    </button>
+                  </div>
                 </td>
               </tr>
             ))}

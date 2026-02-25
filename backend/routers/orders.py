@@ -292,6 +292,35 @@ async def reject_pending_order(
     return {"success": True, "data": {"id": p.id, "status": p.status, "confirmed_at": p.confirmed_at.isoformat()}}
 
 
+@router.post("/pending/{pending_id}/cancel")
+async def cancel_pending_order(
+    pending_id: int,
+    db: Session = Depends(get_db),
+    admin: None = Depends(require_admin),
+):
+    """
+    Anuluj pending order (web/admin). Na start: tylko DEMO. Działa tylko dla status=PENDING.
+    """
+    p = db.query(PendingOrder).filter(PendingOrder.id == pending_id).first()
+    if not p:
+        raise HTTPException(status_code=404, detail="Pending order not found")
+    if (p.mode or "").lower() != "demo":
+        raise HTTPException(status_code=403, detail="Only demo pending orders can be cancelled")
+    if (p.status or "").upper() != "PENDING":
+        raise HTTPException(status_code=409, detail="Pending order is not in PENDING status")
+
+    p.status = "REJECTED"
+    p.reason = (p.reason or "").strip() or None
+    if p.reason:
+        p.reason = f"{p.reason} (cancelled)"
+    else:
+        p.reason = "cancelled"
+    p.confirmed_at = datetime.utcnow()
+    db.commit()
+    db.refresh(p)
+    return {"success": True, "data": {"id": p.id, "status": p.status, "confirmed_at": p.confirmed_at.isoformat()}}
+
+
 @router.post("/")
 async def create_order(
     order: OrderCreate,

@@ -82,11 +82,12 @@ def _latest_price_for_symbol(db: Session, symbol: str) -> Optional[float]:
 async def close_position(
     position_id: int,
     mode: str = Query("demo", description="Tryb: demo lub live (na start: tylko demo)"),
+    quantity: Optional[float] = Query(None, gt=0, description="Ile zamknąć (domyślnie: całość)"),
     db: Session = Depends(get_db),
     admin: None = Depends(require_admin),
 ):
     """
-    Utwórz PENDING order do zamknięcia pozycji (DEMO): SELL qty=position.quantity.
+    Utwórz PENDING order do zamknięcia pozycji (DEMO): SELL qty=position.quantity (lub częściowo).
     """
     if mode != "demo":
         raise HTTPException(status_code=403, detail="Only demo positions can be closed")
@@ -104,9 +105,20 @@ async def close_position(
     if not sym:
         raise HTTPException(status_code=400, detail="Invalid position symbol")
 
-    qty = float(pos.quantity or 0.0)
-    if qty <= 0:
+    pos_qty = float(pos.quantity or 0.0)
+    if pos_qty <= 0:
         raise HTTPException(status_code=409, detail="Position quantity is not positive")
+
+    qty = pos_qty
+    if quantity is not None:
+        try:
+            qty = float(quantity)
+        except Exception:
+            raise HTTPException(status_code=400, detail="Invalid quantity")
+        if qty <= 0:
+            raise HTTPException(status_code=400, detail="Quantity must be positive")
+        if qty > pos_qty:
+            raise HTTPException(status_code=409, detail="Quantity exceeds position quantity")
 
     existing = (
         db.query(PendingOrder)
@@ -137,7 +149,7 @@ async def close_position(
         quantity=qty,
         mode="demo",
         status="PENDING",
-        reason=f"Close position #{pos.id}",
+        reason=f"Close position #{pos.id}" if qty == pos_qty else f"Partial close position #{pos.id} qty={qty}",
         created_at=datetime.utcnow(),
     )
     db.add(p)

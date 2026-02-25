@@ -121,6 +121,31 @@ def test_pending_confirm_reject_demo(client):
     assert payload.get("success") is True
     assert (payload.get("data") or {}).get("status") == "REJECTED"
 
+    # cancel needs a fresh PENDING record
+    db = SessionLocal()
+    try:
+        p3 = PendingOrder(
+            symbol="XRPEUR",
+            side="BUY",
+            order_type="MARKET",
+            price=1.0,
+            quantity=10.0,
+            mode="demo",
+            status="PENDING",
+        )
+        db.add(p3)
+        db.commit()
+        db.refresh(p3)
+        pid3 = int(p3.id)
+    finally:
+        db.close()
+
+    resp = client.post(f"/api/orders/pending/{pid3}/cancel")
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload.get("success") is True
+    assert (payload.get("data") or {}).get("status") == "REJECTED"
+
 
 def test_pending_create_demo(client):
     resp = client.post(
@@ -200,6 +225,44 @@ def test_close_position_creates_pending_sell(client):
         assert p.status == "PENDING"
         assert p.side == "SELL"
         assert abs(float(p.quantity) - 0.5) < 1e-9
+    finally:
+        db.close()
+
+
+def test_partial_close_position_creates_pending_sell_qty(client):
+    db = SessionLocal()
+    try:
+        db.add(MarketData(symbol="CLOSE4EUR", price=50.0))
+        pos = Position(
+            symbol="CLOSE4EUR",
+            side="LONG",
+            entry_price=40.0,
+            quantity=1.0,
+            current_price=50.0,
+            unrealized_pnl=10.0,
+            mode="demo",
+        )
+        db.add(pos)
+        db.commit()
+        db.refresh(pos)
+        pid = int(pos.id)
+    finally:
+        db.close()
+
+    resp = client.post(f"/api/positions/{pid}/close?mode=demo&quantity=0.25")
+    assert resp.status_code == 200
+
+    db = SessionLocal()
+    try:
+        p = (
+            db.query(PendingOrder)
+            .filter(PendingOrder.symbol == "CLOSE4EUR", PendingOrder.mode == "demo")
+            .order_by(PendingOrder.created_at.desc())
+            .first()
+        )
+        assert p is not None
+        assert p.side == "SELL"
+        assert abs(float(p.quantity) - 0.25) < 1e-9
     finally:
         db.close()
 

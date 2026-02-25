@@ -204,13 +204,23 @@ function DashboardV2View({ tradingMode }: { tradingMode: 'live' | 'demo' | 'back
     ) : null
 
   const closePosition = async (positionId: number) => {
+    // default: full close
+    return closePositionQty(positionId, null)
+  }
+
+  const closePositionQty = async (positionId: number, quantity: number | null) => {
     if (mode !== 'demo') {
       setPosActionStatus('Close działa tylko w DEMO')
       return
     }
-    setPosActionStatus(`Zamykam #${positionId}...`)
+    setPosActionStatus(`Zamykam #${positionId}${quantity ? ` qty=${quantity}` : ''}...`)
     try {
-      const res = await fetch(`${API_BASE}/api/positions/${positionId}/close?mode=demo`, {
+      const url = new URL(`${API_BASE}/api/positions/${positionId}/close`)
+      url.searchParams.set('mode', 'demo')
+      if (typeof quantity === 'number' && Number.isFinite(quantity) && quantity > 0) {
+        url.searchParams.set('quantity', String(quantity))
+      }
+      const res = await fetch(url.toString(), {
         method: 'POST',
         headers: withAdminToken(),
       })
@@ -241,7 +251,11 @@ function DashboardV2View({ tradingMode }: { tradingMode: 'live' | 'demo' | 'back
     }
   }
 
-  const posRows = (positions?.data || []).map((p: any) => [
+  const posRows = (positions?.data || []).map((p: any) => {
+    const qty = toNum(p.quantity)
+    const q25 = qty !== null ? Math.max(0, qty * 0.25) : null
+    const q50 = qty !== null ? Math.max(0, qty * 0.5) : null
+    return [
     p.symbol,
     p.side,
     p.quantity,
@@ -249,17 +263,34 @@ function DashboardV2View({ tradingMode }: { tradingMode: 'live' | 'demo' | 'back
     typeof p.current_price === 'number' ? p.current_price.toFixed(4) : p.current_price ?? '--',
     typeof p.unrealized_pnl === 'number' ? p.unrealized_pnl.toFixed(2) : p.unrealized_pnl ?? '--',
     mode === 'demo' ? (
-      <button
-        key={`close-${p.id}`}
-        onClick={() => closePosition(Number(p.id))}
-        className="px-2 py-1 text-[11px] rounded bg-rldc-red-primary/20 text-rldc-red-primary hover:bg-rldc-red-primary hover:text-white transition"
-      >
-        Close
-      </button>
+      <div key={`close-${p.id}`} className="flex items-center gap-1">
+        <button
+          onClick={() => closePositionQty(Number(p.id), q25)}
+          className="px-2 py-1 text-[11px] rounded bg-rldc-red-primary/10 text-rldc-red-primary hover:bg-rldc-red-primary hover:text-white transition border border-rldc-red-primary/20"
+          title="Close 25%"
+        >
+          25%
+        </button>
+        <button
+          onClick={() => closePositionQty(Number(p.id), q50)}
+          className="px-2 py-1 text-[11px] rounded bg-rldc-red-primary/10 text-rldc-red-primary hover:bg-rldc-red-primary hover:text-white transition border border-rldc-red-primary/20"
+          title="Close 50%"
+        >
+          50%
+        </button>
+        <button
+          onClick={() => closePosition(Number(p.id))}
+          className="px-2 py-1 text-[11px] rounded bg-rldc-red-primary/20 text-rldc-red-primary hover:bg-rldc-red-primary hover:text-white transition"
+          title="Close 100%"
+        >
+          100%
+        </button>
+      </div>
     ) : (
       '--'
     ),
-  ])
+  ]
+  })
 
   const kpis = [
     { label: 'Equity', value: formatMoney(quoteCcy, equity), accent: 'text-rldc-green-primary' },
