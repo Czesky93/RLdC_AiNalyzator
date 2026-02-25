@@ -1,6 +1,7 @@
 'use client'
 
 import React, { useEffect, useState } from 'react'
+import { API_BASE, withAdminToken } from '../../lib/api'
 
 type PositionItem = {
   id: number
@@ -17,13 +18,13 @@ export default function OpenOrders() {
   const [positions, setPositions] = useState<PositionItem[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  const [actionStatus, setActionStatus] = useState<string | null>(null)
 
   useEffect(() => {
     let cancelled = false
     const fetchPositions = async () => {
       try {
-        const base = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
-        const res = await fetch(`${base}/api/positions?mode=demo`)
+        const res = await fetch(`${API_BASE}/api/positions?mode=demo`)
         if (!res.ok) {
           throw new Error('Błąd pobierania pozycji')
         }
@@ -42,6 +43,53 @@ export default function OpenOrders() {
       clearInterval(interval)
     }
   }, [])
+
+  const refresh = async () => {
+    try {
+      const res = await fetch(`${API_BASE}/api/positions?mode=demo`)
+      if (!res.ok) throw new Error('Błąd odświeżania pozycji')
+      const json = await res.json()
+      setPositions(json.data || [])
+    } catch (e) {
+      // ignore
+    }
+  }
+
+  const closeOne = async (positionId: number) => {
+    setActionStatus(`Zamykam #${positionId}...`)
+    try {
+      const res = await fetch(`${API_BASE}/api/positions/${positionId}/close?mode=demo`, {
+        method: 'POST',
+        headers: withAdminToken(),
+      })
+      if (!res.ok) {
+        const msg = res.status === 401 ? '401 Unauthorized (ADMIN_TOKEN?)' : 'Błąd zamknięcia'
+        throw new Error(msg)
+      }
+      setActionStatus('OK (utworzono pending)')
+      await refresh()
+    } catch (e: any) {
+      setActionStatus(String(e?.message || 'Błąd zamknięcia'))
+    }
+  }
+
+  const closeAll = async () => {
+    setActionStatus('Zamykam wszystkie...')
+    try {
+      const res = await fetch(`${API_BASE}/api/positions/close-all?mode=demo`, {
+        method: 'POST',
+        headers: withAdminToken(),
+      })
+      if (!res.ok) {
+        const msg = res.status === 401 ? '401 Unauthorized (ADMIN_TOKEN?)' : 'Błąd zamknięcia'
+        throw new Error(msg)
+      }
+      setActionStatus('OK (utworzono pendingy)')
+      await refresh()
+    } catch (e: any) {
+      setActionStatus(String(e?.message || 'Błąd zamknięcia'))
+    }
+  }
 
   const totalPnl = positions.reduce((sum, p) => sum + (p.unrealized_pnl || 0), 0)
 
@@ -65,6 +113,7 @@ export default function OpenOrders() {
       <div className="overflow-x-auto">
         {loading && <div className="text-sm text-slate-400">Ładowanie pozycji...</div>}
         {error && <div className="text-sm text-rldc-red-primary">{error}</div>}
+        {actionStatus && <div className="text-xs text-slate-400 mb-2">{actionStatus}</div>}
         <table className="w-full font-mono text-[12px]">
           <thead>
             <tr className="border-b border-rldc-dark-border text-left text-[10px] uppercase tracking-widest text-slate-500">
@@ -113,7 +162,10 @@ export default function OpenOrders() {
                   </span>
                 </td>
                 <td className="py-3">
-                  <button className="px-3 py-1 text-xs rounded bg-rldc-red-primary/20 text-rldc-red-primary hover:bg-rldc-red-primary hover:text-white transition">
+                  <button
+                    onClick={() => closeOne(order.id)}
+                    className="px-3 py-1 text-xs rounded bg-rldc-red-primary/20 text-rldc-red-primary hover:bg-rldc-red-primary hover:text-white transition"
+                  >
                     Zamknij
                   </button>
                 </td>
@@ -142,7 +194,10 @@ export default function OpenOrders() {
           </div>
         </div>
         
-        <button className="px-4 py-2 bg-rldc-red-primary hover:bg-red-600 text-white rounded-lg text-sm font-medium transition">
+        <button
+          onClick={() => closeAll()}
+          className="px-4 py-2 bg-rldc-red-primary hover:bg-red-600 text-white rounded-lg text-sm font-medium transition"
+        >
           Zamknij wszystkie
         </button>
       </div>

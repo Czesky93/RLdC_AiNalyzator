@@ -60,12 +60,22 @@ function useFetch<T>(url: string, refreshMs: number = 0) {
   return { data, loading, error }
 }
 
-function SimpleTable({ title, headers, rows }: { title: string, headers: string[], rows: React.ReactNode[][] }) {
+function SimpleTable({
+  title,
+  headers,
+  rows,
+  actions,
+}: {
+  title: string
+  headers: string[]
+  rows: React.ReactNode[][]
+  actions?: React.ReactNode
+}) {
   return (
     <div className="terminal-card rounded-lg p-4 border border-rldc-dark-border neon-card">
       <div className="flex items-center justify-between mb-3">
         <h2 className="text-sm font-semibold text-slate-200">{title}</h2>
-        <div className="text-[10px] uppercase tracking-widest terminal-muted">live</div>
+        {actions ? actions : <div className="text-[10px] uppercase tracking-widest terminal-muted">live</div>}
       </div>
       <div className="overflow-x-auto">
         <table className="w-full font-mono text-[12px]">
@@ -154,8 +164,10 @@ function DashboardV2View({ tradingMode }: { tradingMode: 'live' | 'demo' | 'back
   const mode = tradingMode === 'live' ? 'live' : 'demo'
   const { data: summary } = useFetch<any>(`${API_BASE}/api/account/summary?mode=${mode}`, 15000)
   const { data: control } = useFetch<any>(`${API_BASE}/api/control/state`, 15000)
-  const { data: positions } = useFetch<any>(`${API_BASE}/api/positions?mode=${mode}`, 60000)
+  const [positionsRefresh, setPositionsRefresh] = useState(0)
+  const { data: positions } = useFetch<any>(`${API_BASE}/api/positions?mode=${mode}&_=${positionsRefresh}`, 60000)
   const [selectedSymbol, setSelectedSymbol] = useState<string>('BTCEUR')
+  const [posActionStatus, setPosActionStatus] = useState<string | null>(null)
 
   useEffect(() => {
     const wl = control?.data?.watchlist
@@ -191,6 +203,44 @@ function DashboardV2View({ tradingMode }: { tradingMode: 'live' | 'demo' | 'back
       </div>
     ) : null
 
+  const closePosition = async (positionId: number) => {
+    if (mode !== 'demo') {
+      setPosActionStatus('Close działa tylko w DEMO')
+      return
+    }
+    setPosActionStatus(`Zamykam #${positionId}...`)
+    try {
+      const res = await fetch(`${API_BASE}/api/positions/${positionId}/close?mode=demo`, {
+        method: 'POST',
+        headers: withAdminToken(),
+      })
+      if (!res.ok) throw new Error(res.status === 401 ? '401 Unauthorized (ADMIN_TOKEN?)' : 'Błąd zamknięcia')
+      setPosActionStatus('OK (utworzono pending)')
+      setPositionsRefresh((n) => n + 1)
+    } catch (e: any) {
+      setPosActionStatus(String(e?.message || 'Błąd zamknięcia'))
+    }
+  }
+
+  const closeAllPositions = async () => {
+    if (mode !== 'demo') {
+      setPosActionStatus('Close-all działa tylko w DEMO')
+      return
+    }
+    setPosActionStatus('Zamykam wszystkie...')
+    try {
+      const res = await fetch(`${API_BASE}/api/positions/close-all?mode=demo`, {
+        method: 'POST',
+        headers: withAdminToken(),
+      })
+      if (!res.ok) throw new Error(res.status === 401 ? '401 Unauthorized (ADMIN_TOKEN?)' : 'Błąd zamknięcia')
+      setPosActionStatus('OK (utworzono pendingy)')
+      setPositionsRefresh((n) => n + 1)
+    } catch (e: any) {
+      setPosActionStatus(String(e?.message || 'Błąd zamknięcia'))
+    }
+  }
+
   const posRows = (positions?.data || []).map((p: any) => [
     p.symbol,
     p.side,
@@ -198,6 +248,17 @@ function DashboardV2View({ tradingMode }: { tradingMode: 'live' | 'demo' | 'back
     typeof p.entry_price === 'number' ? p.entry_price.toFixed(4) : p.entry_price ?? '--',
     typeof p.current_price === 'number' ? p.current_price.toFixed(4) : p.current_price ?? '--',
     typeof p.unrealized_pnl === 'number' ? p.unrealized_pnl.toFixed(2) : p.unrealized_pnl ?? '--',
+    mode === 'demo' ? (
+      <button
+        key={`close-${p.id}`}
+        onClick={() => closePosition(Number(p.id))}
+        className="px-2 py-1 text-[11px] rounded bg-rldc-red-primary/20 text-rldc-red-primary hover:bg-rldc-red-primary hover:text-white transition"
+      >
+        Close
+      </button>
+    ) : (
+      '--'
+    ),
   ])
 
   const kpis = [
@@ -244,8 +305,21 @@ function DashboardV2View({ tradingMode }: { tradingMode: 'live' | 'demo' | 'back
               <div className="col-span-12 xl:col-span-5">
                 <SimpleTable
                   title="Positions"
-                  headers={['Symbol', 'Side', 'Qty', 'Entry', 'Current', 'uPnL']}
+                  headers={['Symbol', 'Side', 'Qty', 'Entry', 'Current', 'uPnL', 'Actions']}
                   rows={posRows}
+                  actions={
+                    <div className="flex items-center gap-2">
+                      {posActionStatus && <div className="text-[10px] text-slate-500">{posActionStatus}</div>}
+                      {mode === 'demo' && (
+                        <button
+                          onClick={() => closeAllPositions()}
+                          className="px-2 py-1 rounded text-[10px] font-semibold border bg-rldc-red-primary/15 text-rldc-red-primary border-rldc-red-primary/20 hover:bg-rldc-red-primary hover:text-white transition"
+                        >
+                          Close all
+                        </button>
+                      )}
+                    </div>
+                  }
                 />
               </div>
             </div>
