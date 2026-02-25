@@ -12,7 +12,7 @@ import random
 import io
 import csv
 
-from backend.database import get_db, Order, Alert, PendingOrder
+from backend.database import get_db, Order, Alert, PendingOrder, MarketData
 from backend.auth import require_admin
 
 router = APIRouter()
@@ -25,6 +25,14 @@ class OrderCreate(BaseModel):
     order_type: str = "MARKET"  # MARKET, LIMIT
     price: Optional[float] = None
     quantity: float
+
+
+class PendingOrderCreate(BaseModel):
+    symbol: str
+    side: str  # BUY, SELL
+    quantity: float
+    price: Optional[float] = None
+    reason: Optional[str] = None
 
 
 class DemoOrderGenerator:
@@ -154,6 +162,86 @@ async def get_pending_orders(
         return {"success": True, "mode": mode, "data": data, "count": len(data)}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error getting pending orders: {str(e)}")
+
+
+@router.post("/pending")
+async def create_pending_order(
+    payload: PendingOrderCreate,
+    mode: str = Query("demo", description="Tryb: demo lub live (na start: tylko demo)"),
+    db: Session = Depends(get_db),
+    admin: None = Depends(require_admin),
+):
+    """
+    Utwórz pending order (web/manual). Na start: tylko DEMO.
+    """
+    if mode != "demo":
+        raise HTTPException(status_code=403, detail="Only demo pending orders can be created")
+
+    symbol = (payload.symbol or "").strip()
+    if not symbol:
+        raise HTTPException(status_code=400, detail="Symbol is required")
+    symbol = symbol.replace(" ", "").replace("/", "").replace("-", "").upper()
+
+    side = (payload.side or "").strip().upper()
+    if side not in {"BUY", "SELL"}:
+        raise HTTPException(status_code=400, detail="Invalid side. Use BUY or SELL")
+
+    try:
+        qty = float(payload.quantity or 0.0)
+    except Exception:
+        qty = 0.0
+    if qty <= 0:
+        raise HTTPException(status_code=400, detail="Quantity must be positive")
+
+    price = payload.price
+    if price is None:
+        latest = (
+            db.query(MarketData)
+            .filter(MarketData.symbol == symbol)
+            .order_by(desc(MarketData.timestamp))
+            .first()
+        )
+        if latest and latest.price is not None:
+            try:
+                price = float(latest.price)
+            except Exception:
+                price = None
+    if price is None:
+        raise HTTPException(status_code=400, detail="Price is required (no market data available)")
+    try:
+        price_f = float(price)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid price")
+    if price_f <= 0:
+        raise HTTPException(status_code=400, detail="Price must be positive")
+
+    p = PendingOrder(
+        symbol=symbol,
+        side=side,
+        order_type="MARKET",
+        price=price_f,
+        quantity=qty,
+        mode="demo",
+        status="PENDING",
+        reason=(payload.reason or None),
+        created_at=datetime.utcnow(),
+    )
+    db.add(p)
+    db.commit()
+    db.refresh(p)
+    return {
+        "success": True,
+        "data": {
+            "id": p.id,
+            "symbol": p.symbol,
+            "side": p.side,
+            "quantity": p.quantity,
+            "price": p.price,
+            "status": p.status,
+            "reason": p.reason,
+            "created_at": p.created_at.isoformat() if p.created_at else None,
+        },
+    }
 
 
 @router.post("/pending/{pending_id}/confirm")

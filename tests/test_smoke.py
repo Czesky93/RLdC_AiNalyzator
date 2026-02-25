@@ -122,6 +122,19 @@ def test_pending_confirm_reject_demo(client):
     assert (payload.get("data") or {}).get("status") == "REJECTED"
 
 
+def test_pending_create_demo(client):
+    resp = client.post(
+        "/api/orders/pending?mode=demo",
+        json={"symbol": "BTC/EUR", "side": "BUY", "quantity": 0.01, "price": 100.0, "reason": "manual"},
+    )
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload.get("success") is True
+    data = payload.get("data") or {}
+    assert data.get("status") == "PENDING"
+    assert data.get("symbol") == "BTCEUR"
+
+
 def test_control_state_no_admin_token(client):
     resp = client.get("/api/control/state")
     assert resp.status_code == 200

@@ -43,6 +43,18 @@ function normalizeSymbol(s: string): string {
   return (s || '').trim().replaceAll('/', '').replaceAll('-', '').toUpperCase()
 }
 
+function toNum(value: any): number | null {
+  const n = Number(value)
+  return Number.isFinite(n) ? n : null
+}
+
+function formatPrice(v: number | null): string {
+  if (v === null) return '--'
+  if (v < 1) return v.toFixed(6)
+  if (v < 1000) return v.toFixed(4)
+  return v.toFixed(2)
+}
+
 function actionLabel(row: RangeRow | null) {
   if (!row) return 'WAIT'
   if (row.buy_action && String(row.buy_action).includes('KUP')) return 'BUY'
@@ -64,9 +76,14 @@ export default function DecisionsRiskPanel({
   const [control, setControl] = useState<any | null>(null)
   const [pending, setPending] = useState<PendingRow[]>([])
   const [pendingCount, setPendingCount] = useState<number | null>(null)
+  const [tickerPrice, setTickerPrice] = useState<number | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [pendingAction, setPendingAction] = useState<string | null>(null)
+  const [ticketSide, setTicketSide] = useState<'BUY' | 'SELL'>('BUY')
+  const [ticketQty, setTicketQty] = useState<string>('0.01')
+  const [ticketReason, setTicketReason] = useState<string>('')
+  const [ticketStatus, setTicketStatus] = useState<string | null>(null)
 
   useEffect(() => {
     let cancelled = false
@@ -83,8 +100,9 @@ export default function DecisionsRiskPanel({
           tasks.push(fetch(`${API_BASE}/api/orders/pending?mode=demo&status=PENDING&limit=5`))
           tasks.push(fetch(`${API_BASE}/api/orders/pending?mode=demo&status=PENDING&limit=200`))
         }
+        tasks.push(fetch(`${API_BASE}/api/market/ticker/${sym}`))
         const res = await Promise.all(tasks)
-        if (res.some((r) => !r.ok)) throw new Error('Błąd pobierania danych')
+        if (res.slice(0, mode === 'demo' ? 5 : 2).some((r) => !r.ok)) throw new Error('Błąd pobierania danych')
 
         const rangesJson = await res[0].json()
         const riskJson = await res[1].json()
@@ -98,10 +116,14 @@ export default function DecisionsRiskPanel({
         let controlJson: any = null
         let pendingJson: any = null
         let pendingCountJson: any = null
+        let tickerJson: any = null
         if (mode === 'demo') {
           controlJson = await res[2].json()
           pendingJson = await res[3].json()
           pendingCountJson = await res[4].json()
+          tickerJson = await res[5].json()
+        } else {
+          tickerJson = await res[2].json()
         }
 
         if (!cancelled) {
@@ -110,6 +132,7 @@ export default function DecisionsRiskPanel({
           setControl(controlJson?.data || null)
           setPending((pendingJson?.data || []) as PendingRow[])
           setPendingCount(typeof pendingCountJson?.count === 'number' ? pendingCountJson.count : null)
+          setTickerPrice(toNum(tickerJson?.price))
         }
       } catch (e: any) {
         if (!cancelled) setError(String(e?.message || 'Nie udało się pobrać danych'))
@@ -156,6 +179,40 @@ export default function DecisionsRiskPanel({
       setPendingCount((c) => (typeof c === 'number' ? Math.max(0, c - 1) : c))
     } catch (e: any) {
       setPendingAction(String(e?.message || 'Błąd akcji'))
+    }
+  }
+
+  const submitTicket = async () => {
+    setTicketStatus('Tworzę pending...')
+    try {
+      const qty = toNum(ticketQty)
+      if (qty === null || qty <= 0) {
+        setTicketStatus('Podaj poprawne qty > 0')
+        return
+      }
+      const headers: Record<string, string> = withAdminToken({ 'Content-Type': 'application/json' })
+      const res = await fetch(`${API_BASE}/api/orders/pending?mode=demo`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          symbol: sym,
+          side: ticketSide,
+          quantity: qty,
+          price: tickerPrice,
+          reason: ticketReason || undefined,
+        }),
+      })
+      if (!res.ok) throw new Error(res.status === 401 ? '401 Unauthorized (ADMIN_TOKEN?)' : 'Błąd tworzenia pending')
+      const json = await res.json()
+      const row = json?.data as PendingRow | undefined
+      if (row && row.id) {
+        setPending((items) => [row, ...items].slice(0, 5))
+        setPendingCount((c) => (typeof c === 'number' ? c + 1 : c))
+      }
+      setTicketStatus('OK')
+      setTicketReason('')
+    } catch (e: any) {
+      setTicketStatus(String(e?.message || 'Błąd tworzenia pending'))
     }
   }
 
@@ -285,8 +342,73 @@ export default function DecisionsRiskPanel({
             </div>
           </div>
         )}
+
+        {mode === 'demo' && (
+          <div className="rounded-lg border border-rldc-dark-border bg-rldc-dark-bg p-3">
+            <div className="flex items-center justify-between">
+              <div className="text-[10px] uppercase tracking-widest text-slate-500">Trade ticket (DEMO)</div>
+              {ticketStatus && <div className="text-[10px] text-slate-500">{ticketStatus}</div>}
+            </div>
+            <div className="mt-3 grid grid-cols-2 gap-3">
+              <div className="rounded-lg border border-rldc-dark-border bg-[#0b121a] p-3">
+                <div className="text-[10px] uppercase tracking-widest text-slate-500 mb-2">Side</div>
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={() => setTicketSide('BUY')}
+                    className={`px-3 py-2 text-xs rounded border transition ${
+                      ticketSide === 'BUY'
+                        ? 'bg-rldc-green-primary/15 text-rldc-green-primary border-rldc-green-primary/20'
+                        : 'bg-rldc-dark-bg text-slate-300 border-rldc-dark-border hover:bg-rldc-dark-hover'
+                    }`}
+                  >
+                    BUY
+                  </button>
+                  <button
+                    onClick={() => setTicketSide('SELL')}
+                    className={`px-3 py-2 text-xs rounded border transition ${
+                      ticketSide === 'SELL'
+                        ? 'bg-rldc-red-primary/15 text-rldc-red-primary border-rldc-red-primary/20'
+                        : 'bg-rldc-dark-bg text-slate-300 border-rldc-dark-border hover:bg-rldc-dark-hover'
+                    }`}
+                  >
+                    SELL
+                  </button>
+                </div>
+              </div>
+              <div className="rounded-lg border border-rldc-dark-border bg-[#0b121a] p-3">
+                <div className="text-[10px] uppercase tracking-widest text-slate-500 mb-2">Qty</div>
+                <input
+                  value={ticketQty}
+                  onChange={(e) => setTicketQty(e.target.value)}
+                  className="w-full px-3 py-2 text-xs rounded bg-rldc-dark-bg border border-rldc-dark-border text-slate-200 font-mono"
+                  placeholder="0.01"
+                />
+                <div className="mt-2 text-[10px] text-slate-500">
+                  Price: <span className="font-mono text-slate-200">{formatPrice(tickerPrice)}</span>
+                </div>
+              </div>
+            </div>
+            <div className="mt-3">
+              <div className="text-[10px] uppercase tracking-widest text-slate-500 mb-2">Reason (optional)</div>
+              <input
+                value={ticketReason}
+                onChange={(e) => setTicketReason(e.target.value)}
+                className="w-full px-3 py-2 text-xs rounded bg-rldc-dark-bg border border-rldc-dark-border text-slate-200"
+                placeholder="Manual trade"
+              />
+            </div>
+            <div className="mt-3 flex items-center gap-2">
+              <button
+                onClick={submitTicket}
+                className="px-4 py-2 text-xs rounded bg-rldc-teal-primary/20 text-rldc-teal-primary hover:bg-rldc-teal-primary/30 transition"
+              >
+                Create pending
+              </button>
+              <div className="text-[10px] text-slate-500">Creates PENDING; use Confirm/Reject above.</div>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   )
 }
-
