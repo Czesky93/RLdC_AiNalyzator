@@ -25,6 +25,7 @@ interface SidebarProps {
 
 const menuItems = [
   { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard },
+  { id: 'dashboard-classic', label: 'Dashboard (Classic)', icon: LayoutDashboard },
   { id: 'markets', label: 'Markets', icon: TrendingUp },
   { id: 'trade-desk', label: 'Trade Desk', icon: Target },
   { id: 'portfolio', label: 'Portfolio', icon: Wallet },

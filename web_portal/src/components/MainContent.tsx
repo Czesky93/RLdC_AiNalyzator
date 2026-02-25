@@ -6,6 +6,7 @@ import OpenOrders from './widgets/OpenOrders'
 import MarketInsights from './widgets/MarketInsights'
 import DecisionRisk from './widgets/DecisionRisk'
 import { ADMIN_TOKEN_STORAGE_KEY, API_BASE, getAdminToken, withAdminToken } from '../lib/api'
+import EquityCurve from './widgets/EquityCurve'
 
 interface MainContentProps {
   activeView: string
@@ -101,69 +102,195 @@ function ViewHeader({ title }: { title: string }) {
 }
 
 export default function MainContent({ activeView, tradingMode }: MainContentProps) {
-  if (activeView !== 'dashboard') {
-    return <OtherView activeView={activeView} tradingMode={tradingMode} />
+  if (activeView === 'dashboard') {
+    return <DashboardV2View tradingMode={tradingMode} />
   }
+  if (activeView === 'dashboard-classic') {
+    return <ClassicDashboardView tradingMode={tradingMode} />
+  }
+  return <OtherView activeView={activeView} tradingMode={tradingMode} />
+}
 
+function toNum(value: any): number | null {
+  const n = Number(value)
+  return Number.isFinite(n) ? n : null
+}
+
+function formatMoney(ccy: string | null, value: number | null): string {
+  if (value === null) return '--'
+  const formatted = new Intl.NumberFormat('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(value)
+  if (!ccy) return formatted
+  return `${ccy} ${formatted}`
+}
+
+function formatPct(value: number | null): string {
+  if (value === null) return '--'
+  return `${value.toFixed(2)}%`
+}
+
+function DashboardHeader({
+  title,
+  tradingMode,
+}: {
+  title: string
+  tradingMode: 'live' | 'demo' | 'backtest'
+}) {
   const { data: openaiStatus } = useFetch<any>(`${API_BASE}/api/account/openai-status`, 60000)
+  return (
+    <div className="mb-4 flex items-center justify-between">
+      <h1 className="text-2xl font-bold terminal-title">{title}</h1>
+      <div className="flex items-center gap-2">
+        <div className="px-3 py-1 bg-rldc-teal-primary/20 text-rldc-teal-primary rounded text-sm font-medium">
+          Tryb: {tradingMode.toUpperCase()}
+        </div>
+        <OpenAIStatusPill status={openaiStatus?.data} />
+      </div>
+    </div>
+  )
+}
+
+function DashboardV2View({ tradingMode }: { tradingMode: 'live' | 'demo' | 'backtest' }) {
+  const mode = tradingMode === 'live' ? 'live' : 'demo'
+  const { data: summary } = useFetch<any>(`${API_BASE}/api/account/summary?mode=${mode}`, 15000)
+  const { data: control } = useFetch<any>(`${API_BASE}/api/control/state`, 15000)
+  const { data: positions } = useFetch<any>(`${API_BASE}/api/positions?mode=${mode}`, 60000)
+
+  const quoteCcy = summary?.data?.quote_ccy ? String(summary.data.quote_ccy) : null
+  const equity = toNum(summary?.data?.equity)
+  const cash = toNum(summary?.data?.cash ?? summary?.data?.balance ?? summary?.data?.free_margin)
+  const positionsValue = toNum(summary?.data?.positions_value)
+  const unrealized = toNum(summary?.data?.unrealized_pnl)
+  const realized24h = toNum(summary?.data?.realized_pnl_24h)
+  const roiPct = toNum(summary?.data?.roi) !== null ? (toNum(summary?.data?.roi) as number) * 100 : null
+
+  const tradingEnabled = control?.data?.demo_trading_enabled
+  const tradingPill =
+    mode === 'demo' ? (
+      <div
+        className={`px-3 py-1 rounded text-[11px] font-semibold border ${
+          tradingEnabled === true
+            ? 'bg-rldc-green-primary/15 text-rldc-green-primary border-rldc-green-primary/20'
+            : tradingEnabled === false
+              ? 'bg-rldc-red-primary/15 text-rldc-red-primary border-rldc-red-primary/20'
+              : 'bg-slate-500/10 text-slate-300 border-rldc-dark-border'
+        }`}
+        title="Control Plane"
+      >
+        TRADING: {tradingEnabled === null || tradingEnabled === undefined ? '--' : tradingEnabled ? 'ON' : 'OFF'}
+      </div>
+    ) : null
+
+  const posRows = (positions?.data || []).map((p: any) => [
+    p.symbol,
+    p.side,
+    p.quantity,
+    typeof p.entry_price === 'number' ? p.entry_price.toFixed(4) : p.entry_price ?? '--',
+    typeof p.current_price === 'number' ? p.current_price.toFixed(4) : p.current_price ?? '--',
+    typeof p.unrealized_pnl === 'number' ? p.unrealized_pnl.toFixed(2) : p.unrealized_pnl ?? '--',
+  ])
+
+  const kpis = [
+    { label: 'Equity', value: formatMoney(quoteCcy, equity), accent: 'text-rldc-green-primary' },
+    { label: 'Cash', value: formatMoney(quoteCcy, cash), accent: 'text-slate-100' },
+    { label: 'Positions Value', value: formatMoney(quoteCcy, positionsValue), accent: 'text-slate-100' },
+    { label: 'Unrealized PnL', value: formatMoney(quoteCcy, unrealized), accent: unrealized && unrealized < 0 ? 'text-rldc-red-primary' : 'text-rldc-green-primary' },
+    { label: 'Realized 24h', value: formatMoney(quoteCcy, realized24h), accent: realized24h && realized24h < 0 ? 'text-rldc-red-primary' : 'text-rldc-green-primary' },
+    { label: 'ROI', value: formatPct(roiPct), accent: roiPct && roiPct < 0 ? 'text-rldc-red-primary' : 'text-rldc-green-primary' },
+  ]
 
   return (
     <div className="flex-1 overflow-auto">
       <div className="p-6 max-w-[1680px] mx-auto">
-      {/* Mode Indicator */}
-      <div className="mb-4 flex items-center justify-between">
-        <h1 className="text-2xl font-bold terminal-title">RLDC Ain Alyzer</h1>
-        <div className="flex items-center gap-2">
-          <div className="px-3 py-1 bg-rldc-teal-primary/20 text-rldc-teal-primary rounded text-sm font-medium">
-            Tryb: {tradingMode.toUpperCase()}
+        <div className="flex items-center justify-between">
+          <DashboardHeader title="RLDC Ain Alyzer" tradingMode={tradingMode} />
+          {tradingPill}
+        </div>
+
+        <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3 mb-4">
+          {kpis.map((k) => (
+            <div key={k.label} className="terminal-card border border-rldc-dark-border rounded-lg px-4 py-3 neon-card">
+              <div className="text-[10px] uppercase tracking-widest text-slate-500">{k.label}</div>
+              <div className={`text-lg font-semibold font-mono ${k.accent}`}>{k.value}</div>
+              <div className="text-[10px] text-slate-500 mt-1">{quoteCcy || '--'}</div>
+            </div>
+          ))}
+        </div>
+
+        <div className="grid grid-cols-12 gap-4">
+          <div className="col-span-12 lg:col-span-8 space-y-4">
+            <TradingView allowSymbolSelect={true} refreshMs={60000} titleOverride="Market" />
+            <EquityCurve mode={mode} hours={24} quoteCcy={quoteCcy || undefined} refreshMs={60000} />
+            <div className="grid grid-cols-12 gap-4">
+              <div className="col-span-12 xl:col-span-7">
+                <OpenOrders />
+              </div>
+              <div className="col-span-12 xl:col-span-5">
+                <SimpleTable
+                  title="Positions"
+                  headers={['Symbol', 'Side', 'Qty', 'Entry', 'Current', 'uPnL']}
+                  rows={posRows}
+                />
+              </div>
+            </div>
+            <OpenAIRangesWidget />
           </div>
-          <OpenAIStatusPill status={openaiStatus?.data} />
+          <div className="col-span-12 lg:col-span-4 space-y-4">
+            <DecisionRisk />
+            <PendingOrdersWidget mode={mode} />
+            <MarketInsights />
+          </div>
         </div>
       </div>
+    </div>
+  )
+}
 
-      <ActionBanner />
-
-      <KpiStrip tradingMode={tradingMode} />
-
-      {/* Main Grid (układ jak makieta: WLFI lewo, BTC prawo, niżej wykres wybierany + AI) */}
-      <div className="grid grid-cols-12 gap-4">
-        <div className="col-span-12 lg:col-span-6">
-          <TradingView
-            symbol="WLFI/EUR"
-            allowSymbolSelect={false}
-            titleOverride="WLFI/EUR"
-            refreshMs={60000}
-          />
-        </div>
-        <div className="col-span-12 lg:col-span-6">
-          <TradingView
-            symbol="BTC/EUR"
-            allowSymbolSelect={false}
-            titleOverride="BTC/EUR"
-            refreshMs={60000}
-          />
+function ClassicDashboardView({ tradingMode }: { tradingMode: 'live' | 'demo' | 'backtest' }) {
+  const { data: openaiStatus } = useFetch<any>(`${API_BASE}/api/account/openai-status`, 60000)
+  return (
+    <div className="flex-1 overflow-auto">
+      <div className="p-6 max-w-[1680px] mx-auto">
+        <div className="mb-4 flex items-center justify-between">
+          <h1 className="text-2xl font-bold terminal-title">RLDC Ain Alyzer (Classic)</h1>
+          <div className="flex items-center gap-2">
+            <div className="px-3 py-1 bg-rldc-teal-primary/20 text-rldc-teal-primary rounded text-sm font-medium">
+              Tryb: {tradingMode.toUpperCase()}
+            </div>
+            <OpenAIStatusPill status={openaiStatus?.data} />
+          </div>
         </div>
 
-        <div className="col-span-12">
-          <TradingView allowSymbolSelect={true} refreshMs={60000} titleOverride="Wykres (wybierz parę)" />
-        </div>
+        <ActionBanner />
+        <KpiStrip tradingMode={tradingMode} />
 
-        <div className="col-span-12 lg:col-span-8">
-          <OpenAIRangesWidget />
-        </div>
-        <div className="col-span-12 lg:col-span-4 space-y-4">
-          <DecisionRisk />
-          <PendingOrdersWidget mode={tradingMode === 'live' ? 'live' : 'demo'} />
-          <MarketInsights />
-        </div>
+        <div className="grid grid-cols-12 gap-4">
+          <div className="col-span-12 lg:col-span-6">
+            <TradingView symbol="WLFI/EUR" allowSymbolSelect={false} titleOverride="WLFI/EUR" refreshMs={60000} />
+          </div>
+          <div className="col-span-12 lg:col-span-6">
+            <TradingView symbol="BTC/EUR" allowSymbolSelect={false} titleOverride="BTC/EUR" refreshMs={60000} />
+          </div>
 
-        <div className="col-span-12 lg:col-span-7">
-          <OpenOrders />
+          <div className="col-span-12">
+            <TradingView allowSymbolSelect={true} refreshMs={60000} titleOverride="Wykres (wybierz parę)" />
+          </div>
+
+          <div className="col-span-12 lg:col-span-8">
+            <OpenAIRangesWidget />
+          </div>
+          <div className="col-span-12 lg:col-span-4 space-y-4">
+            <DecisionRisk />
+            <PendingOrdersWidget mode={tradingMode === 'live' ? 'live' : 'demo'} />
+            <MarketInsights />
+          </div>
+
+          <div className="col-span-12 lg:col-span-7">
+            <OpenOrders />
+          </div>
+          <div className="col-span-12 lg:col-span-5">
+            <DecisionReasonsWidget />
+          </div>
         </div>
-        <div className="col-span-12 lg:col-span-5">
-          <DecisionReasonsWidget />
-        </div>
-      </div>
       </div>
     </div>
   )

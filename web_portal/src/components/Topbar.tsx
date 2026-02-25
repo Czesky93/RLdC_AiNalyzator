@@ -1,18 +1,34 @@
 'use client'
 
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { Bell, Power, Search, Twitter, User2 } from 'lucide-react'
 import { API_BASE, withAdminToken } from '../lib/api'
 
 interface TopbarProps {
+  activeView: string
+  setActiveView: (view: string) => void
   tradingMode: 'live' | 'demo' | 'backtest'
   setTradingMode: (mode: 'live' | 'demo' | 'backtest') => void
 }
 
-export default function Topbar({ tradingMode, setTradingMode }: TopbarProps) {
+export default function Topbar({ activeView, setActiveView, tradingMode, setTradingMode }: TopbarProps) {
   const [tradingEnabled, setTradingEnabled] = useState<boolean | null>(null)
   const [controlError, setControlError] = useState<string | null>(null)
   const [stopping, setStopping] = useState(false)
+
+  const navItems = useMemo(
+    () => [
+      { label: 'Dashboard', view: 'dashboard' },
+      { label: 'Markets', view: 'markets' },
+      { label: 'Trade Desk', view: 'trade-desk' },
+      { label: 'Portfolio', view: 'portfolio' },
+      { label: 'Strategies', view: 'strategies' },
+      { label: 'AI & Signals', view: 'ai-signals' },
+      { label: 'Risk', view: 'decisions' },
+      { label: 'Collages', view: 'dashboard-classic' },
+    ],
+    []
+  )
 
   const refreshControl = async () => {
     try {
@@ -42,15 +58,20 @@ export default function Topbar({ tradingMode, setTradingMode }: TopbarProps) {
           RLDC
         </div>
         <nav className="hidden md:flex items-center space-x-5 text-[11px] uppercase tracking-widest">
-          {['Dashboard', 'Markets', 'Trade Desk', 'Portfolio', 'Strategies', 'AI & Signals', 'Risk'].map((item) => (
-            <a
-              key={item}
-              href="#"
-              className="text-slate-300 hover:text-rldc-teal-light transition relative after:absolute after:inset-x-0 after:-bottom-4 after:h-0.5 after:bg-rldc-teal-light after:scale-x-0 hover:after:scale-x-100 after:transition"
-            >
-              {item}
-            </a>
-          ))}
+          {navItems.map((item) => {
+            const isActive = activeView === item.view
+            return (
+              <button
+                key={item.view}
+                onClick={() => setActiveView(item.view)}
+                className={`text-slate-300 hover:text-rldc-teal-light transition relative after:absolute after:inset-x-0 after:-bottom-4 after:h-0.5 after:bg-rldc-teal-light after:transition ${
+                  isActive ? 'text-rldc-teal-light after:scale-x-100' : 'after:scale-x-0 hover:after:scale-x-100'
+                }`}
+              >
+                {item.label}
+              </button>
+            )
+          })}
         </nav>
       </div>
 

@@ -12,6 +12,8 @@ export default function Dashboard() {
   return (
     <div className="min-h-screen text-slate-100 app-shell">
       <Topbar 
+        activeView={activeView}
+        setActiveView={setActiveView}
         tradingMode={tradingMode} 
         setTradingMode={setTradingMode}
       />
