@@ -3,13 +3,19 @@ Binance REST API Client for RLdC Trading Bot
 """
 import os
 import time
-from typing import List, Dict, Optional
+import hmac
+import hashlib
+from typing import List, Dict, Optional, Any
+from urllib.parse import urlencode, quote
+import requests
 from binance.client import Client
 from binance.exceptions import BinanceAPIException, BinanceRequestException
 from dotenv import load_dotenv
 import logging
+from functools import lru_cache
 
-load_dotenv()
+_ENV_PATH = os.path.join(os.path.dirname(__file__), "..", ".env")
+load_dotenv(dotenv_path=_ENV_PATH, override=True)
 
 logger = logging.getLogger(__name__)
 
@@ -27,6 +33,7 @@ class BinanceClient:
         """
         self.api_key = api_key or os.getenv("BINANCE_API_KEY", "")
         self.api_secret = api_secret or os.getenv("BINANCE_API_SECRET", "")
+        self.time_offset_ms = 0
         
         # Inicjalizacja klienta - działa bez kluczy dla publicznych danych
         if self.api_key and self.api_secret:
@@ -35,6 +42,22 @@ class BinanceClient:
         else:
             self.client = Client()
             logger.info("⚠️  Binance client initialized without API keys (public data only)")
+
+        self._sync_time()
+
+    def _sync_time(self):
+        """Synchronizuj czas z serwerem Binance (ważne dla signed endpoints)."""
+        try:
+            server_time = self.client.get_server_time()
+            local_ms = int(time.time() * 1000)
+            self.time_offset_ms = int(server_time.get("serverTime", local_ms)) - local_ms
+            # python-binance używa timestamp_offset w częściach klienta
+            try:
+                self.client.timestamp_offset = self.time_offset_ms
+            except Exception:
+                pass
+        except Exception as exc:
+            logger.warning(f"⚠️  Cannot sync Binance server time: {str(exc)}")
     
     def get_ticker_price(self, symbol: str) -> Optional[Dict]:
         """
@@ -164,7 +187,15 @@ class BinanceClient:
             return None
         
         try:
-            account = self.client.get_account()
+            try:
+                account = self.client.get_account(recvWindow=5000)
+            except BinanceAPIException as e:
+                # Timestamp drift
+                if getattr(e, "code", None) == -1021:
+                    self._sync_time()
+                    account = self.client.get_account(recvWindow=5000)
+                else:
+                    raise
             
             # Parse balances
             balances = []
@@ -227,6 +258,135 @@ class BinanceClient:
         except Exception as e:
             logger.error(f"❌ Error getting 24h ticker for {symbol}: {str(e)}")
             return None
+
+    def _signed_request(self, base_url: str, path: str, params: Optional[Dict[str, Any]] = None) -> Optional[Any]:
+        if not self.api_key or not self.api_secret:
+            logger.warning("⚠️  Cannot call signed endpoint without API keys")
+            return None
+        params = params or {}
+        params["timestamp"] = int(time.time() * 1000) + int(self.time_offset_ms or 0)
+        query_string = urlencode(params, quote_via=quote, safe="~")
+        signature = hmac.new(
+            self.api_secret.encode("utf-8"),
+            query_string.encode("utf-8"),
+            hashlib.sha256
+        ).hexdigest()
+        url = f"{base_url}{path}?{query_string}&signature={signature}"
+        headers = {"X-MBX-APIKEY": self.api_key}
+        try:
+            resp = requests.get(url, headers=headers, timeout=10)
+            resp.raise_for_status()
+            return resp.json()
+        except Exception as e:
+            logger.error(f"❌ Signed request error {path}: {str(e)}")
+            return None
+
+    def get_simple_earn_account(self) -> Optional[Dict]:
+        return self._signed_request("https://api.binance.com", "/sapi/v1/simple-earn/account")
+
+    def get_simple_earn_flexible_positions(self) -> Optional[Dict]:
+        return self._signed_request("https://api.binance.com", "/sapi/v1/simple-earn/flexible/position")
+
+    def get_simple_earn_locked_positions(self) -> Optional[Dict]:
+        return self._signed_request("https://api.binance.com", "/sapi/v1/simple-earn/locked/position")
+
+    def get_futures_balance(self) -> Optional[Any]:
+        return self._signed_request("https://fapi.binance.com", "/fapi/v2/balance")
+
+    def get_futures_account(self) -> Optional[Dict]:
+        return self._signed_request("https://fapi.binance.com", "/fapi/v2/account")
+
+    def get_my_trades(self, symbol: str, limit: int = 500) -> Optional[List[Dict]]:
+        if not symbol:
+            return None
+        params = {"symbol": symbol, "limit": limit}
+        return self._signed_request("https://api.binance.com", "/api/v3/myTrades", params=params)
+
+    def get_avg_buy_price(self, symbol: str) -> Optional[float]:
+        trades = self.get_my_trades(symbol)
+        if not trades:
+            return None
+        buy_qty = 0.0
+        buy_cost = 0.0
+        for t in trades:
+            if t.get("isBuyer"):
+                qty = float(t.get("qty", 0))
+                price = float(t.get("price", 0))
+                buy_qty += qty
+                buy_cost += qty * price
+        if buy_qty <= 0:
+            return None
+        return buy_cost / buy_qty
+
+    @lru_cache(maxsize=1)
+    def _exchange_info(self) -> Dict:
+        """Pobierz i cache'uj exchange info."""
+        return self.client.get_exchange_info()
+
+    def resolve_symbol(self, pair: str) -> Optional[str]:
+        """
+        Rozwiąż parę w formacie BASE/QUOTE lub BASEQUOTE do rzeczywistego symbolu Binance.
+        """
+        if not pair:
+            return None
+
+        raw = pair.strip().upper()
+        direct = raw.replace("/", "")
+
+        try:
+            info = self._exchange_info()
+            symbols = info.get("symbols", [])
+
+            # Direct match
+            for s in symbols:
+                if s.get("symbol") == direct:
+                    return direct
+
+            # Match by base/quote
+            if "/" in raw:
+                base, quote = raw.split("/", 1)
+            else:
+                # Try infer base/quote from balances
+                base = raw[:-3]
+                quote = raw[-3:]
+
+            for s in symbols:
+                if s.get("baseAsset") == base and s.get("quoteAsset") == quote:
+                    return s.get("symbol")
+        except Exception as e:
+            logger.error(f"❌ Error resolving symbol {pair}: {str(e)}")
+
+        return None
+
+    def get_balances(self) -> List[Dict]:
+        """Pobierz saldo konta (wymaga API keys)."""
+        if not self.api_key or not self.api_secret:
+            logger.warning("⚠️  Cannot get balances without API keys")
+            return []
+        try:
+            try:
+                account = self.client.get_account(recvWindow=5000)
+            except BinanceAPIException as e:
+                if getattr(e, "code", None) == -1021:
+                    self._sync_time()
+                    account = self.client.get_account(recvWindow=5000)
+                else:
+                    raise
+            balances = []
+            for bal in account.get("balances", []):
+                free = float(bal.get("free", 0))
+                locked = float(bal.get("locked", 0))
+                if free > 0 or locked > 0:
+                    balances.append({
+                        "asset": bal.get("asset"),
+                        "free": free,
+                        "locked": locked,
+                        "total": free + locked,
+                    })
+            return balances
+        except Exception as e:
+            logger.error(f"❌ Error getting balances: {str(e)}")
+            return []
 
 
 # Singleton instance

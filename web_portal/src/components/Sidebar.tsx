@@ -42,7 +42,16 @@ const menuItems = [
 
 export default function Sidebar({ activeView, setActiveView }: SidebarProps) {
   return (
-    <div className="w-64 bg-rldc-dark-card border-r border-rldc-dark-border min-h-[calc(100vh-4rem)] p-4">
+    <div className="w-64 bg-[#0b121a] border-r border-rldc-dark-border min-h-[calc(100vh-3.5rem)] p-4 shadow-[inset_-1px_0_0_rgba(255,255,255,0.04)]">
+      <div className="mb-4 px-2">
+        <div className="text-[10px] text-slate-500 uppercase tracking-widest">FUTURES</div>
+        <div className="mt-2 flex items-center justify-between">
+          <div className="text-xs text-slate-300">BTC/USDT</div>
+          <div className="px-2 py-0.5 rounded bg-rldc-dark-bg border border-rldc-dark-border text-[10px] text-slate-400">
+            ACTIVE
+          </div>
+        </div>
+      </div>
       <nav className="space-y-1">
         {menuItems.map((item) => {
           const Icon = item.icon
@@ -52,7 +61,7 @@ export default function Sidebar({ activeView, setActiveView }: SidebarProps) {
             <button
               key={item.id}
               onClick={() => setActiveView(item.id)}
-              className={`w-full flex items-center space-x-3 px-4 py-3 rounded-lg text-sm font-medium transition ${
+              className={`w-full flex items-center space-x-3 px-4 py-2.5 rounded-lg text-[13px] font-medium transition ${
                 isActive
                   ? 'bg-rldc-teal-primary/10 text-rldc-teal-primary border-l-2 border-rldc-teal-primary'
                   : 'text-slate-400 hover:bg-rldc-dark-hover hover:text-slate-200'

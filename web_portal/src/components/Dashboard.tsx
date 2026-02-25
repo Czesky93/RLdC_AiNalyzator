@@ -10,7 +10,7 @@ export default function Dashboard() {
   const [tradingMode, setTradingMode] = useState<'live' | 'demo' | 'backtest'>('demo')
 
   return (
-    <div className="min-h-screen bg-rldc-dark-bg text-slate-100">
+    <div className="min-h-screen text-slate-100 app-shell">
       <Topbar 
         tradingMode={tradingMode} 
         setTradingMode={setTradingMode}

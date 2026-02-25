@@ -1,47 +1,58 @@
 'use client'
 
-import React from 'react'
+import React, { useEffect, useState } from 'react'
 import { TrendingUp, AlertCircle, CheckCircle } from 'lucide-react'
 
-const insights = [
-  {
-    id: '1',
-    type: 'signal',
-    title: 'Sygnał kupna BTC',
-    description: 'RSI wskazuje na oversold, MACD przecięcie wzrostowe',
-    confidence: 85,
-    time: '2 min temu',
-    status: 'active',
-  },
-  {
-    id: '2',
-    type: 'alert',
-    title: 'Wysoka zmienność ETH',
-    description: 'Zwiększona aktywność wielorybów, potencjalny ruch >5%',
-    confidence: 72,
-    time: '15 min temu',
-    status: 'warning',
-  },
-  {
-    id: '3',
-    type: 'insight',
-    title: 'Pozytywny sentyment rynku',
-    description: 'Analiza mediów społecznościowych wskazuje na wzrost optymizmu',
-    confidence: 68,
-    time: '1 godz. temu',
-    status: 'info',
-  },
-]
+type Insight = {
+  id: number
+  symbol: string
+  signal_type: 'BUY' | 'SELL' | 'HOLD'
+  confidence: number
+  reason: string
+  timestamp: string
+}
 
 export default function MarketInsights() {
+  const [insights, setInsights] = useState<Insight[]>([])
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
+
+  useEffect(() => {
+    let cancelled = false
+    const fetchSignals = async () => {
+      try {
+        const base = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
+        const res = await fetch(`${base}/api/signals/latest?limit=5`)
+        if (!res.ok) {
+          throw new Error('Błąd pobierania sygnałów')
+        }
+        const json = await res.json()
+        if (!cancelled) setInsights(json.data || [])
+      } catch (err) {
+        if (!cancelled) setError('Nie udało się pobrać sygnałów')
+      } finally {
+        if (!cancelled) setLoading(false)
+      }
+    }
+    fetchSignals()
+    const interval = setInterval(fetchSignals, 60000)
+    return () => {
+      cancelled = true
+      clearInterval(interval)
+    }
+  }, [])
+
   return (
-    <div className="bg-rldc-dark-card rounded-lg p-6 border border-rldc-dark-border h-full">
+    <div className="terminal-card rounded-lg p-5 border border-rldc-dark-border h-full neon-card">
       <div className="flex items-center justify-between mb-4">
         <h2 className="text-lg font-semibold text-slate-200">AI Insights</h2>
         <button className="text-xs text-rldc-teal-primary hover:text-rldc-teal-light transition">
           Zobacz wszystkie
         </button>
       </div>
+
+      {loading && <div className="text-sm text-slate-400">Ładowanie insights...</div>}
+      {error && <div className="text-sm text-rldc-red-primary">{error}</div>}
 
       <div className="space-y-3">
         {insights.map((insight) => (
@@ -51,21 +62,25 @@ export default function MarketInsights() {
           >
             <div className="flex items-start justify-between mb-2">
               <div className="flex items-center space-x-2">
-                {insight.status === 'active' && (
+                {insight.signal_type === 'BUY' && (
                   <TrendingUp size={16} className="text-rldc-green-primary" />
                 )}
-                {insight.status === 'warning' && (
+                {insight.signal_type === 'SELL' && (
                   <AlertCircle size={16} className="text-yellow-500" />
                 )}
-                {insight.status === 'info' && (
+                {insight.signal_type === 'HOLD' && (
                   <CheckCircle size={16} className="text-rldc-teal-primary" />
                 )}
-                <h3 className="text-sm font-semibold text-slate-200">{insight.title}</h3>
+                <h3 className="text-sm font-semibold text-slate-200">
+                  {insight.symbol} {insight.signal_type}
+                </h3>
               </div>
-              <span className="text-xs text-slate-500">{insight.time}</span>
+              <span className="text-xs text-slate-500">
+                {new Date(insight.timestamp).toLocaleTimeString('pl-PL')}
+              </span>
             </div>
 
-            <p className="text-xs text-slate-400 mb-3">{insight.description}</p>
+            <p className="text-xs text-slate-400 mb-3">{insight.reason}</p>
 
             <div className="flex items-center justify-between">
               <div className="flex items-center space-x-2">
@@ -73,11 +88,11 @@ export default function MarketInsights() {
                 <div className="flex-1 bg-rldc-dark-border rounded-full h-1.5 w-20">
                   <div
                     className="bg-rldc-teal-primary h-1.5 rounded-full"
-                    style={{ width: `${insight.confidence}%` }}
+                    style={{ width: `${Math.round(insight.confidence * 100)}%` }}
                   />
                 </div>
                 <span className="text-xs font-medium text-rldc-teal-primary">
-                  {insight.confidence}%
+                  {Math.round(insight.confidence * 100)}%
                 </span>
               </div>
             </div>
@@ -91,7 +106,7 @@ export default function MarketInsights() {
         <div className="space-y-2">
           <div className="flex items-center justify-between text-sm">
             <span className="text-slate-400">Aktywne sygnały</span>
-            <span className="font-medium text-rldc-green-primary">12</span>
+            <span className="font-medium text-rldc-green-primary">{insights.length}</span>
           </div>
           <div className="flex items-center justify-between text-sm">
             <span className="text-slate-400">Średnia pewność</span>

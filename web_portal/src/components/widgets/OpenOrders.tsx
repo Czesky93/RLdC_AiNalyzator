@@ -1,48 +1,54 @@
 'use client'
 
-import React from 'react'
+import React, { useEffect, useState } from 'react'
 
-const orders = [
-  {
-    id: '1',
-    symbol: 'BTC/USDT',
-    type: 'LONG',
-    size: '0.125',
-    entry: '€20,450',
-    current: '€20,587',
-    pnl: '+€17.13',
-    pnlPercent: '+0.67%',
-    status: 'active',
-  },
-  {
-    id: '2',
-    symbol: 'ETH/USDT',
-    type: 'SHORT',
-    size: '2.5',
-    entry: '€1,670',
-    current: '€1,654',
-    pnl: '+€40.00',
-    pnlPercent: '+2.4%',
-    status: 'active',
-  },
-  {
-    id: '3',
-    symbol: 'SOL/USDT',
-    type: 'LONG',
-    size: '15',
-    entry: '€95.20',
-    current: '€98.40',
-    pnl: '+€48.00',
-    pnlPercent: '+3.4%',
-    status: 'active',
-  },
-]
+type PositionItem = {
+  id: number
+  symbol: string
+  side: 'LONG' | 'SHORT'
+  quantity: number
+  entry_price: number
+  current_price: number
+  unrealized_pnl: number
+  pnl_percent: number
+}
 
 export default function OpenOrders() {
+  const [positions, setPositions] = useState<PositionItem[]>([])
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
+
+  useEffect(() => {
+    let cancelled = false
+    const fetchPositions = async () => {
+      try {
+        const base = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
+        const res = await fetch(`${base}/api/positions?mode=demo`)
+        if (!res.ok) {
+          throw new Error('Błąd pobierania pozycji')
+        }
+        const json = await res.json()
+        if (!cancelled) setPositions(json.data || [])
+      } catch (err) {
+        if (!cancelled) setError('Nie udało się pobrać pozycji')
+      } finally {
+        if (!cancelled) setLoading(false)
+      }
+    }
+    fetchPositions()
+    const interval = setInterval(fetchPositions, 60000)
+    return () => {
+      cancelled = true
+      clearInterval(interval)
+    }
+  }, [])
+
+  const totalPnl = positions.reduce((sum, p) => sum + (p.unrealized_pnl || 0), 0)
+
   return (
-    <div className="bg-rldc-dark-card rounded-lg p-6 border border-rldc-dark-border">
+    <div className="terminal-card rounded-lg p-5 border border-rldc-dark-border neon-card">
       <div className="flex items-center justify-between mb-4">
-        <h2 className="text-lg font-semibold text-slate-200">Otwarte Pozycje</h2>
+        <h2 className="text-sm font-semibold text-slate-200">Otwarte Pozycje</h2>
         <div className="flex space-x-2">
           <button className="px-3 py-1 text-xs rounded bg-rldc-dark-bg text-slate-400 hover:bg-rldc-teal-primary hover:text-white transition">
             Wszystkie
@@ -57,9 +63,11 @@ export default function OpenOrders() {
       </div>
 
       <div className="overflow-x-auto">
-        <table className="w-full">
+        {loading && <div className="text-sm text-slate-400">Ładowanie pozycji...</div>}
+        {error && <div className="text-sm text-rldc-red-primary">{error}</div>}
+        <table className="w-full font-mono text-[12px]">
           <thead>
-            <tr className="border-b border-rldc-dark-border text-left text-xs text-slate-500">
+            <tr className="border-b border-rldc-dark-border text-left text-[10px] uppercase tracking-widest text-slate-500">
               <th className="pb-3 font-medium">Para</th>
               <th className="pb-3 font-medium">Typ</th>
               <th className="pb-3 font-medium">Rozmiar</th>
@@ -71,7 +79,7 @@ export default function OpenOrders() {
             </tr>
           </thead>
           <tbody>
-            {orders.map((order) => (
+            {positions.map((order) => (
               <tr
                 key={order.id}
                 className="border-b border-rldc-dark-border/50 hover:bg-rldc-dark-hover transition"
@@ -80,28 +88,28 @@ export default function OpenOrders() {
                 <td className="py-3">
                   <span
                     className={`px-2 py-1 rounded text-xs font-medium ${
-                      order.type === 'LONG'
+                      order.side === 'LONG'
                         ? 'bg-rldc-green-primary/20 text-rldc-green-primary'
                         : 'bg-rldc-red-primary/20 text-rldc-red-primary'
                     }`}
                   >
-                    {order.type}
+                    {order.side}
                   </span>
                 </td>
-                <td className="py-3 text-sm text-slate-300">{order.size}</td>
-                <td className="py-3 text-sm text-slate-300">{order.entry}</td>
-                <td className="py-3 text-sm text-slate-300">{order.current}</td>
+                <td className="py-3 text-sm text-slate-300">{order.quantity}</td>
+                <td className="py-3 text-sm text-slate-300">${order.entry_price.toFixed(2)}</td>
+                <td className="py-3 text-sm text-slate-300">${order.current_price?.toFixed(2)}</td>
                 <td className="py-3">
                   <div className="text-sm font-medium text-rldc-green-primary">
-                    {order.pnl}
+                    {order.unrealized_pnl >= 0 ? '+' : ''}${order.unrealized_pnl.toFixed(2)}
                   </div>
                   <div className="text-xs text-rldc-green-primary/70">
-                    {order.pnlPercent}
+                    {order.unrealized_pnl >= 0 ? '+' : ''}{order.pnl_percent.toFixed(2)}%
                   </div>
                 </td>
                 <td className="py-3">
                   <span className="px-2 py-1 rounded text-xs font-medium bg-rldc-teal-primary/20 text-rldc-teal-primary">
-                    {order.status}
+                    aktywna
                   </span>
                 </td>
                 <td className="py-3">
@@ -120,15 +128,17 @@ export default function OpenOrders() {
         <div className="flex space-x-6">
           <div>
             <div className="text-xs text-slate-500 mb-1">Całkowity P&L</div>
-            <div className="text-lg font-bold text-rldc-green-primary">+€105.13</div>
+            <div className="text-lg font-bold text-rldc-green-primary">
+              {totalPnl >= 0 ? '+' : ''}${totalPnl.toFixed(2)}
+            </div>
           </div>
           <div>
             <div className="text-xs text-slate-500 mb-1">ROI</div>
-            <div className="text-lg font-bold text-rldc-green-primary">+2.1%</div>
+            <div className="text-lg font-bold text-rldc-green-primary">--</div>
           </div>
           <div>
             <div className="text-xs text-slate-500 mb-1">Otwarte pozycje</div>
-            <div className="text-lg font-bold text-slate-200">3</div>
+            <div className="text-lg font-bold text-slate-200">{positions.length}</div>
           </div>
         </div>
         

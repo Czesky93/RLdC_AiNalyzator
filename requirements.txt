@@ -15,9 +15,9 @@ ccxt==4.5.20
 websockets==14.1
 
 # Data Processing & Analysis
-pandas==2.2.3
-numpy==2.2.3
-pandas-ta==0.3.14b0
+pandas==2.3.2
+numpy==2.2.6
+pandas-ta==0.4.71b0
 
 # Telegram Bot
 python-telegram-bot==21.10

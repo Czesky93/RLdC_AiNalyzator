@@ -1,26 +1,73 @@
 """
 Market API Router - endpoints dla danych rynkowych
 """
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy.orm import Session
 from sqlalchemy import desc
 from typing import List, Optional
 from datetime import datetime, timedelta
+import os
+import json
 
-from backend.database import get_db, MarketData, Kline
+from backend.database import get_db, MarketData, Kline, SystemLog
 from backend.binance_client import get_binance_client
 
 router = APIRouter()
 
 
 @router.get("/summary")
-async def get_market_summary(db: Session = Depends(get_db)):
+async def get_market_summary(request: Request, db: Session = Depends(get_db)):
     """
     Pobierz podsumowanie rynku - ostatnie dane dla watchlist
     """
     try:
-        # Pobierz ostatnie dane dla każdego symbolu
-        symbols = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "MATICUSDT", "BNBUSDT"]
+        binance = get_binance_client()
+        symbols: List[str] = []
+
+        # 1) Preferuj watchlistę z kolektora (jeśli działa)
+        collector = getattr(request.app.state, "collector", None)
+        if collector is not None:
+            wl = getattr(collector, "watchlist", None)
+            if isinstance(wl, list) and wl:
+                symbols = [str(s) for s in wl if s]
+
+        # 2) Fallback: zbuduj z portfela Binance
+        if not symbols:
+            quotes = [q.strip().upper() for q in os.getenv("PORTFOLIO_QUOTES", "EUR,USDC").split(",") if q.strip()]
+            balances = binance.get_balances()
+            assets = [b.get("asset") for b in balances if (b.get("total") or 0) > 0]
+
+            def _candidates(asset: str):
+                a = (asset or "").strip().upper()
+                if not a:
+                    return []
+                # LD* (Simple Earn / Savings) -> underlying dla par rynkowych
+                if a.startswith("LD") and len(a) > 2:
+                    return [a[2:], a]
+                return [a]
+
+            for asset in assets:
+                if not asset:
+                    continue
+                for base in _candidates(asset):
+                    if not base or base in quotes:
+                        continue
+                    for quote in quotes:
+                        pair = f"{base}/{quote}"
+                        resolved = binance.resolve_symbol(pair)
+                        if resolved and resolved not in symbols:
+                            symbols.append(resolved)
+
+        # 3) Fallback: stała WATCHLIST z `.env` (działa bez kluczy)
+        if not symbols:
+            raw_watchlist = os.getenv("WATCHLIST", "")
+            items = [s.strip() for s in raw_watchlist.split(",") if s.strip()]
+            for item in items:
+                resolved_symbol = binance.resolve_symbol(item)
+                if not resolved_symbol:
+                    resolved_symbol = item.replace("/", "").strip().upper()
+                if resolved_symbol and resolved_symbol not in symbols:
+                    symbols.append(resolved_symbol)
         
         summary = []
         for symbol in symbols:
@@ -56,7 +103,6 @@ async def get_market_summary(db: Session = Depends(get_db)):
                 })
             else:
                 # Fallback - pobierz z Binance jeśli brak w bazie
-                binance = get_binance_client()
                 ticker = binance.get_24hr_ticker(symbol)
                 
                 if ticker:
@@ -234,3 +280,144 @@ async def get_orderbook(
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error getting orderbook: {str(e)}")
+
+
+@router.get("/ranges")
+async def get_price_ranges(
+    symbol: Optional[str] = Query(None, description="Symbol (np. BTCUSDT)"),
+    db: Session = Depends(get_db)
+):
+    """
+    Zwróć ostatnie zakresy cen (OpenAI) zapisane w blogu.
+    """
+    try:
+        from backend.database import BlogPost
+        latest = db.query(BlogPost).order_by(desc(BlogPost.created_at)).first()
+        if not latest or not latest.market_insights:
+            return {"success": True, "data": []}
+
+        insights = json.loads(latest.market_insights)
+        ranges = []
+        for ins in insights:
+            r = ins.get("range")
+            if not r:
+                continue
+            if symbol and ins.get("symbol") != symbol:
+                continue
+            ranges.append({
+                "symbol": ins.get("symbol"),
+                "buy_low": r.get("buy_low"),
+                "buy_high": r.get("buy_high"),
+                "sell_low": r.get("sell_low"),
+                "sell_high": r.get("sell_high"),
+                "buy_action": r.get("buy_action"),
+                "buy_target": r.get("buy_target"),
+                "sell_action": r.get("sell_action"),
+                "sell_target": r.get("sell_target"),
+                "comment": r.get("comment"),
+                "timestamp": ins.get("timestamp"),
+            })
+
+        return {"success": True, "data": ranges}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error getting ranges: {str(e)}")
+
+
+@router.get("/quantum")
+async def get_quantum_analysis(
+    db: Session = Depends(get_db)
+):
+    """
+    Zwróć ostatnią analizę kwantową z bloga.
+    """
+    try:
+        from backend.database import BlogPost
+        latest = db.query(BlogPost).order_by(desc(BlogPost.created_at)).first()
+        if not latest or not latest.market_insights:
+            return {"success": True, "data": []}
+
+        insights = json.loads(latest.market_insights)
+        data = []
+        for ins in insights:
+            q = ins.get("quantum")
+            if q:
+                data.append({
+                    "symbol": ins.get("symbol"),
+                    "weight": q.get("weight"),
+                    "volatility": q.get("volatility"),
+                    "timestamp": ins.get("timestamp"),
+                })
+
+        return {"success": True, "data": data}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error getting quantum: {str(e)}")
+
+
+@router.post("/analyze-now")
+async def analyze_now(
+    force: bool = Query(True, description="Jeśli true, pomija blokadę 1h i backoff (debug)"),
+    db: Session = Depends(get_db),
+):
+    """
+    Ręczne uruchomienie analizy + generacji bloga (OpenAI ranges) dla watchlisty z portfela.
+    Przydatne do testów po podmianie OPENAI_API_KEY bez czekania 1h.
+    """
+    try:
+        from backend.analysis import maybe_generate_insights_and_blog
+
+        binance = get_binance_client()
+        quotes = [q.strip().upper() for q in os.getenv("PORTFOLIO_QUOTES", "EUR,USDC").split(",") if q.strip()]
+        symbols: List[str] = []
+        balances = binance.get_balances()
+        assets = [b.get("asset") for b in balances if (b.get("total") or 0) > 0]
+
+        def _candidates(asset: str):
+            a = (asset or "").strip().upper()
+            if not a:
+                return []
+            if a.startswith("LD") and len(a) > 2:
+                return [a[2:], a]
+            return [a]
+
+        for asset in assets:
+            if not asset:
+                continue
+            for base in _candidates(asset):
+                if not base or base in quotes:
+                    continue
+                for quote in quotes:
+                    pair = f"{base}/{quote}"
+                    resolved = binance.resolve_symbol(pair)
+                    if resolved and resolved not in symbols:
+                        symbols.append(resolved)
+
+        if not symbols:
+            raise HTTPException(status_code=400, detail="Brak symboli z portfela (Spot) do analizy")
+
+        post = maybe_generate_insights_and_blog(db, symbols, force=force)
+        if not post:
+            last_err = (
+                db.query(SystemLog)
+                .filter(SystemLog.module == "analysis", SystemLog.level == "ERROR")
+                .order_by(desc(SystemLog.timestamp))
+                .first()
+            )
+            return {
+                "success": True,
+                "symbols": symbols,
+                "generated": False,
+                "message": "Nie wygenerowano nowych zakresów/insightów (sprawdź Logi -> module=analysis).",
+                "last_openai_error": (last_err.message[:220] if last_err and last_err.message else None),
+            }
+        return {
+            "success": True,
+            "symbols": symbols,
+            "generated": True,
+            "post_id": post.id,
+            "created_at": post.created_at.isoformat() if post.created_at else None,
+            "title": post.title,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error analyze-now: {str(e)}")

@@ -1,14 +1,15 @@
 """
 Database models and configuration for RLdC Trading Bot
 """
-from sqlalchemy import create_engine, Column, Integer, Float, String, DateTime, Boolean, Text, Enum
+from sqlalchemy import create_engine, Column, Integer, Float, String, DateTime, Boolean, Text, Enum, inspect, text
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 from datetime import datetime
 import os
 from dotenv import load_dotenv
 
-load_dotenv()
+_ENV_PATH = os.path.join(os.path.dirname(__file__), "..", ".env")
+load_dotenv(dotenv_path=_ENV_PATH, override=True)
 
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./trading_bot.db")
 
@@ -172,11 +173,46 @@ class TelegramMessage(Base):
     timestamp = Column(DateTime, default=datetime.utcnow, index=True)
 
 
+class PendingOrder(Base):
+    """Oczekujące potwierdzenia transakcji (Telegram)"""
+    __tablename__ = "pending_orders"
+
+    id = Column(Integer, primary_key=True, index=True)
+    symbol = Column(String(20), index=True, nullable=False)
+    side = Column(String(10), nullable=False)
+    order_type = Column(String(20), nullable=False)
+    price = Column(Float)
+    quantity = Column(Float, nullable=False)
+    mode = Column(String(10), nullable=False)  # demo, live
+    status = Column(String(20), nullable=False, default="PENDING")  # PENDING, CONFIRMED, REJECTED, EXECUTED
+    reason = Column(Text)
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+    confirmed_at = Column(DateTime)
+
+
 # Database initialization
 def init_db():
     """Inicjalizacja bazy danych - tworzenie tabel"""
     Base.metadata.create_all(bind=engine)
+    _ensure_schema()
     print("✅ Baza danych zainicjalizowana")
+
+
+def _ensure_schema():
+    """Minimalna migracja schematu (bez Alembic)."""
+    inspector = inspect(engine)
+
+    if "klines" not in inspector.get_table_names():
+        return
+
+    columns = {col["name"] for col in inspector.get_columns("klines")}
+    if "timeframe" not in columns:
+        with engine.begin() as conn:
+            try:
+                conn.execute(text("ALTER TABLE klines ADD COLUMN timeframe VARCHAR(10)"))
+                print("✅ Dodano kolumnę 'timeframe' do tabeli 'klines'")
+            except Exception as exc:
+                print(f"⚠️ Nie udało się dodać kolumny 'timeframe': {exc}")
 
 
 def get_db():
@@ -186,6 +222,54 @@ def get_db():
         yield db
     finally:
         db.close()
+
+
+def reset_database(scope: str = "full"):
+    """
+    Resetuj dane w bazie.
+    scope:
+      - full: czyści wszystkie tabele danych (łącznie z market_data/klines)
+      - demo: czyści dane demo/alerty/blog/logi/telegram
+    """
+    tables_full = [
+        "market_data",
+        "klines",
+        "signals",
+        "orders",
+        "positions",
+        "alerts",
+        "blog_posts",
+        "account_snapshots",
+        "system_logs",
+        "telegram_messages",
+        "pending_orders",
+    ]
+    tables_demo = [
+        "signals",
+        "orders",
+        "positions",
+        "alerts",
+        "blog_posts",
+        "account_snapshots",
+        "system_logs",
+        "telegram_messages",
+        "pending_orders",
+    ]
+    to_clear = tables_full if scope == "full" else tables_demo
+
+    with engine.begin() as conn:
+        if "sqlite" in DATABASE_URL:
+            try:
+                conn.execute(text("PRAGMA foreign_keys=OFF"))
+            except Exception:
+                pass
+        for table in to_clear:
+            conn.execute(text(f"DELETE FROM {table}"))
+        if "sqlite" in DATABASE_URL:
+            try:
+                conn.execute(text("PRAGMA foreign_keys=ON"))
+            except Exception:
+                pass
 
 
 if __name__ == "__main__":

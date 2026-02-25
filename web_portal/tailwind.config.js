@@ -7,6 +7,10 @@ module.exports = {
   ],
   theme: {
     extend: {
+      fontFamily: {
+        sans: ['Space Grotesk', 'system-ui', 'sans-serif'],
+        mono: ['JetBrains Mono', 'ui-monospace', 'SFMono-Regular', 'Menlo', 'Monaco', 'Consolas', 'Liberation Mono', 'monospace'],
+      },
       colors: {
         // Dark theme colors from template
         'rldc-dark': {
@@ -15,7 +19,7 @@ module.exports = {
           border: '#1e2d3d',
           hover: '#1a2730',
         },
-        // Teal/Green accent colors
+        // Teal/Cyan accent colors
         'rldc-teal': {
           primary: '#14b8a6',
           light: '#2dd4bf',
@@ -29,6 +33,10 @@ module.exports = {
         'rldc-red': {
           primary: '#ef4444',
           light: '#f87171',
+        },
+        'rldc-orange': {
+          primary: '#f59e0b',
+          light: '#fb923c',
         },
       },
     },

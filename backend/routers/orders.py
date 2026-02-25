@@ -12,7 +12,7 @@ import random
 import io
 import csv
 
-from backend.database import get_db, Order
+from backend.database import get_db, Order, Alert, PendingOrder
 
 router = APIRouter()
 
@@ -84,14 +84,21 @@ async def get_orders(
         # Pobierz zlecenia
         orders = query.order_by(desc(Order.timestamp)).limit(limit).all()
         
-        # Jeśli brak zleceń w demo, wygeneruj
-        if not orders and mode == "demo":
-            DemoOrderGenerator.generate_demo_orders(db, 50)
-            return await get_orders(mode, status, symbol, limit, db)
+        # Bez generatora demo - tylko realne dane
         
         # Formatuj dane
         result = []
         for order in orders:
+            # Spróbuj znaleźć powiązany alert z powodem
+            reason = None
+            alert = db.query(Alert).filter(
+                Alert.symbol == order.symbol,
+                Alert.alert_type == "SIGNAL",
+                Alert.timestamp <= order.timestamp + timedelta(minutes=2),
+                Alert.timestamp >= order.timestamp - timedelta(minutes=2)
+            ).order_by(Alert.timestamp.desc()).first()
+            if alert and alert.message:
+                reason = alert.message
             result.append({
                 "id": order.id,
                 "symbol": order.symbol,
@@ -102,7 +109,8 @@ async def get_orders(
                 "status": order.status,
                 "executed_price": order.executed_price,
                 "executed_quantity": order.executed_quantity,
-                "timestamp": order.timestamp.isoformat()
+                "timestamp": order.timestamp.isoformat(),
+                "reason": reason
             })
         
         return {
@@ -114,6 +122,37 @@ async def get_orders(
         
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error getting orders: {str(e)}")
+
+
+@router.get("/pending")
+async def get_pending_orders(
+    mode: str = Query("demo", description="Tryb: demo lub live"),
+    status: Optional[str] = Query(None, description="PENDING/CONFIRMED/REJECTED/EXECUTED"),
+    limit: int = Query(100, ge=1, le=500, description="Limit"),
+    db: Session = Depends(get_db)
+):
+    try:
+        query = db.query(PendingOrder).filter(PendingOrder.mode == mode)
+        if status:
+            query = query.filter(PendingOrder.status == status)
+        items = query.order_by(desc(PendingOrder.created_at)).limit(limit).all()
+        data = []
+        for p in items:
+            data.append({
+                "id": p.id,
+                "symbol": p.symbol,
+                "side": p.side,
+                "order_type": p.order_type,
+                "price": p.price,
+                "quantity": p.quantity,
+                "status": p.status,
+                "reason": p.reason,
+                "created_at": p.created_at.isoformat() if p.created_at else None,
+                "confirmed_at": p.confirmed_at.isoformat() if p.confirmed_at else None,
+            })
+        return {"success": True, "mode": mode, "data": data, "count": len(data)}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error getting pending orders: {str(e)}")
 
 
 @router.post("/")

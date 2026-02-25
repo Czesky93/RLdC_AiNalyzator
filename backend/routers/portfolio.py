@@ -9,6 +9,7 @@ from datetime import datetime
 import random
 
 from backend.database import get_db, Position
+from backend.binance_client import get_binance_client
 
 router = APIRouter()
 
@@ -26,27 +27,7 @@ async def get_portfolio(
             Position.mode == mode
         ).all()
         
-        # Jeśli brak pozycji w demo, wygeneruj przykładowe
-        if not positions and mode == "demo":
-            # Wygeneruj 3-5 demo positions
-            symbols = ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
-            for symbol in symbols:
-                pos = Position(
-                    symbol=symbol,
-                    side="LONG",
-                    entry_price=round(random.uniform(100, 50000), 2),
-                    quantity=round(random.uniform(0.1, 5), 4),
-                    current_price=round(random.uniform(100, 50000), 2),
-                    unrealized_pnl=round(random.uniform(-500, 500), 2),
-                    mode="demo",
-                    opened_at=datetime.utcnow()
-                )
-                db.add(pos)
-            
-            db.commit()
-            
-            # Pobierz ponownie
-            positions = db.query(Position).filter(Position.mode == mode).all()
+        # Jeśli brak pozycji w demo, zwracamy pusty wynik
         
         # Formatuj dane
         result = []
@@ -71,13 +52,31 @@ async def get_portfolio(
                 "updated_at": pos.updated_at.isoformat() if pos.updated_at else pos.opened_at.isoformat()
             })
         
-        return {
+        response = {
             "success": True,
             "mode": mode,
             "data": result,
             "count": len(result),
             "total_unrealized_pnl": round(total_unrealized_pnl, 2)
         }
+        
+        # Jeśli LIVE, dołącz salda z Binance
+        if mode == "live":
+            binance = get_binance_client()
+            spot_balances = binance.get_balances()
+            simple_earn_account = binance.get_simple_earn_account() or {}
+            simple_earn_flexible = binance.get_simple_earn_flexible_positions() or {}
+            simple_earn_locked = binance.get_simple_earn_locked_positions() or {}
+            futures_balance = binance.get_futures_balance() or []
+            futures_account = binance.get_futures_account() or {}
+            response["spot_balances"] = spot_balances
+            response["simple_earn_account"] = simple_earn_account
+            response["simple_earn_flexible"] = simple_earn_flexible
+            response["simple_earn_locked"] = simple_earn_locked
+            response["futures_balance"] = futures_balance
+            response["futures_account"] = futures_account
+        
+        return response
         
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error getting portfolio: {str(e)}")
