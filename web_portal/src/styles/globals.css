@@ -5,14 +5,47 @@
 @tailwind utilities;
 
 :root {
-  --bg-dark: #080e14;
-  --card-bg: #0f1822;
-  --border-color: #1a2a3a;
-  --teal-primary: #12d6b0;
-  --green-primary: #16f2a3;
+  /* Tło główne - ultra ciemny */
+  --bg-dark: #0a1219;
+  --bg-darker: #060b10;
+  
+  /* Karty i panele */
+  --card-bg: #111c26;
+  --card-hover: #1a2730;
+  
+  /* Obramowania */
+  --border-color: #1e2d3d;
+  --border-light: #2a3d4f;
+  
+  /* Kolory akcent - Teal/Cyan */
+  --teal-primary: #14b8a6;
+  --teal-light: #2dd4bf;
+  --teal-dark: #0f766e;
+  
+  /* Zielony - wzrosty */
+  --green-primary: #10b981;
+  --green-light: #34d399;
+  --green-dark: #059669;
+  
+  /* Czerwony - spadki */
   --red-primary: #ef4444;
-  --accent-2: #42f5d3;
-  --neon-glow: rgba(18, 214, 176, 0.55);
+  --red-light: #f87171;
+  --red-dark: #dc2626;
+  
+  /* Pomarańczowy - alerty */
+  --orange-primary: #f59e0b;
+  --orange-light: #fbbf24;
+  --orange-dark: #d97706;
+  
+  /* Tekst */
+  --text-primary: #f1f5f9;
+  --text-secondary: #cbd5e1;
+  --text-muted: #64748b;
+  --text-disabled: #475569;
+  
+  /* Efekty */
+  --neon-glow: rgba(20, 184, 166, 0.55);
+  --shadow-elevation: 0 18px 40px rgba(0, 0, 0, 0.45);
 }
 
 body {
@@ -153,4 +186,73 @@ main, .app-shell {
 
 ::-webkit-scrollbar-thumb:hover {
   background: #2a3f52;
+}
+
+/* Trading Terminal Utilities */
+.btn-primary {
+  @apply bg-teal-primary hover:bg-teal-light text-white font-medium px-4 py-2 rounded-lg transition-all duration-200 shadow-lg hover:shadow-teal-primary/30;
+}
+
+.btn-danger {
+  @apply bg-orange-primary hover:bg-orange-light text-white font-bold px-5 py-2.5 rounded-lg transition-all duration-200 shadow-lg hover:shadow-orange-primary/40;
+}
+
+.btn-secondary {
+  @apply bg-rldc-dark-card hover:bg-rldc-dark-hover text-slate-300 border border-rldc-dark-border font-medium px-4 py-2 rounded-lg transition-all duration-200;
+}
+
+.badge-success {
+  @apply bg-green-primary/20 text-green-light border border-green-primary/40 px-2.5 py-0.5 rounded-md text-xs font-medium;
+}
+
+.badge-danger {
+  @apply bg-red-primary/20 text-red-light border border-red-primary/40 px-2.5 py-0.5 rounded-md text-xs font-medium;
+}
+
+.badge-warning {
+  @apply bg-orange-primary/20 text-orange-light border border-orange-primary/40 px-2.5 py-0.5 rounded-md text-xs font-medium;
+}
+
+.badge-info {
+  @apply bg-teal-primary/20 text-teal-light border border-teal-primary/40 px-2.5 py-0.5 rounded-md text-xs font-medium;
+}
+
+.metric-card {
+  @apply bg-rldc-dark-card border border-rldc-dark-border rounded-lg p-4 shadow-lg hover:border-rldc-dark-border/80 transition-all;
+}
+
+.progress-bar {
+  @apply h-2 bg-rldc-dark-bg rounded-full overflow-hidden;
+}
+
+.progress-fill {
+  @apply h-full bg-gradient-to-r from-teal-primary to-teal-light transition-all duration-300;
+}
+
+.icon-button {
+  @apply w-9 h-9 flex items-center justify-center rounded-lg hover:bg-rldc-dark-hover transition-colors text-slate-400 hover:text-slate-200;
+}
+
+.nav-link {
+  @apply text-slate-400 hover:text-slate-100 transition-colors px-3 py-2 text-sm font-medium;
+}
+
+.nav-link-active {
+  @apply text-teal-primary font-semibold;
+}
+
+.table-row {
+  @apply border-b border-rldc-dark-border/50 hover:bg-rldc-dark-hover transition-colors;
+}
+
+.sidebar-item {
+  @apply flex items-center space-x-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-all duration-200;
+}
+
+.sidebar-item-active {
+  @apply bg-teal-primary/10 text-teal-primary border-l-2 border-teal-primary;
+}
+
+.sidebar-item-inactive {
+  @apply text-slate-400 hover:bg-rldc-dark-hover hover:text-slate-200;
 }

@@ -2,9 +2,10 @@
 Account API Router - endpoints dla danych konta (demo i live)
 """
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from sqlalchemy import desc
-from typing import Optional
+from typing import Any, Dict, Optional
 from datetime import datetime, timedelta
 import os
 import re
@@ -13,13 +14,118 @@ import hashlib
 
 from backend.database import get_db, AccountSnapshot, Position, SystemLog, reset_database
 from backend.binance_client import get_binance_client
-from backend.accounting import compute_demo_account_state, get_demo_quote_ccy
+from backend.accounting import compute_demo_account_state, compute_risk_snapshot, get_demo_quote_ccy
 from backend.auth import require_admin
+from backend.experiments import compare_snapshots_for_experiment, create_experiment, get_experiment, list_experiments
+from backend.recommendations import (
+    generate_recommendation,
+    get_recommendation,
+    list_recommendations,
+    pending_recommendation_candidates,
+    recommendation_overview,
+)
+from backend.review_flow import apply_review_decision, list_review_queue, review_bundle
+from backend.promotion_flow import get_promotion, list_promotions, promote_recommendation
+from backend.post_promotion_monitoring import (
+    evaluate_monitoring,
+    get_monitoring_by_promotion,
+    get_monitoring_record,
+    list_monitoring_records,
+)
+from backend.rollback_decision import (
+    create_rollback_decision,
+    get_rollback_decision,
+    latest_rollback_decision_for_promotion,
+    list_rollback_decisions,
+)
+from backend.rollback_flow import execute_rollback, get_rollback_execution, list_rollback_executions
+from backend.post_rollback_monitoring import (
+    evaluate_post_rollback_monitoring,
+    get_post_rollback_monitoring_by_rollback,
+    get_post_rollback_monitoring_record,
+    list_post_rollback_monitoring_records,
+)
+from backend.reporting import (
+    analytics_bundle,
+    config_snapshot_compare_report,
+    config_snapshot_payload_report,
+    performance_overview,
+    risk_effectiveness_report,
+)
+from backend.policy_layer import (
+    create_policy_action,
+    get_policy_action,
+    list_active_policy_actions,
+    list_policy_actions,
+    policy_actions_summary,
+    resolve_policy_action,
+)
+from backend.runtime_settings import RuntimeSettingsError
 
 router = APIRouter()
 
 _openai_status_cache: dict = {"ts": None, "data": None}
 _demo_state_cache: dict = {"ts": None, "data": None}
+
+
+class ExperimentCreateRequest(BaseModel):
+    name: str
+    baseline_snapshot_id: str
+    candidate_snapshot_id: str
+    description: Optional[str] = None
+    mode: str = "demo"
+    scope: str = "global"
+    symbol: Optional[str] = None
+    strategy_name: Optional[str] = None
+    start_at: Optional[str] = None
+    end_at: Optional[str] = None
+    notes: Optional[str] = None
+
+
+class RecommendationCreateRequest(BaseModel):
+    experiment_id: int
+    notes: Optional[str] = None
+
+
+class RecommendationReviewRequest(BaseModel):
+    reviewed_by: str
+    decision_reason: Optional[str] = None
+    notes: Optional[str] = None
+    supersede_open_others: bool = False
+
+
+class PromotionCreateRequest(BaseModel):
+    recommendation_id: int
+    initiated_by: str
+    notes: Optional[str] = None
+
+
+class PromotionMonitoringRequest(BaseModel):
+    notes: Optional[str] = None
+
+
+class RollbackDecisionRequest(BaseModel):
+    initiated_by: Optional[str] = None
+    monitoring_id: Optional[int] = None
+    notes: Optional[str] = None
+
+
+class RollbackExecutionRequest(BaseModel):
+    initiated_by: str
+    notes: Optional[str] = None
+
+
+class PolicyActionCreateRequest(BaseModel):
+    source_type: str
+    source_id: int
+    verdict_status: str
+    reason_codes: Optional[list] = None
+    urgency: Optional[str] = None
+    notes: Optional[str] = None
+
+
+class PolicyActionResolveRequest(BaseModel):
+    notes: Optional[str] = None
 
 
 def _sanitize_openai_message(msg: str) -> str:
@@ -407,82 +513,601 @@ async def get_risk_summary(
     Podsumowanie ryzyka dla demo/live
     """
     try:
-        max_daily_loss_pct = float(os.getenv("MAX_DAILY_LOSS_PERCENT", "5.0"))
-        max_drawdown_pct = float(os.getenv("MAX_DRAWDOWN_PERCENT", "10.0"))
-        if mode != "demo":
-            # LIVE: zachowaj dotychczasowe zachowanie (pozycje są read-only).
-            initial_balance = float(os.getenv("DEMO_INITIAL_BALANCE", "10000"))
-            positions = db.query(Position).filter(Position.mode == mode).all()
-            unrealized_pnl = sum((p.unrealized_pnl or 0.0) for p in positions)
-            worst_dd = 0.0
-            for p in positions:
-                if p.entry_price and p.current_price and p.entry_price > 0:
-                    dd = ((p.current_price - p.entry_price) / p.entry_price) * 100
-                    if dd < worst_dd:
-                        worst_dd = dd
-            daily_loss_limit = -(initial_balance * max_daily_loss_pct / 100)
-            daily_loss_triggered = unrealized_pnl <= daily_loss_limit
-            drawdown_triggered = worst_dd <= -max_drawdown_pct
-            return {
-                "success": True,
-                "mode": mode,
-                "data": {
-                    "initial_balance": initial_balance,
-                    "max_daily_loss_pct": max_daily_loss_pct,
-                    "max_drawdown_pct": max_drawdown_pct,
-                    "unrealized_pnl": round(unrealized_pnl, 2),
-                    "daily_loss_limit": round(daily_loss_limit, 2),
-                    "worst_drawdown_pct": round(worst_dd, 2),
-                    "daily_loss_triggered": daily_loss_triggered,
-                    "drawdown_triggered": drawdown_triggered,
-                    "positions_count": len(positions),
-                },
-            }
-
-        state = _cached_demo_state(db)
-        initial_balance = float(state.get("initial_balance") or float(os.getenv("DEMO_INITIAL_BALANCE", "10000")))
-        unrealized_pnl = float(state.get("unrealized_pnl") or 0.0)
-        realized_pnl_24h = float(state.get("realized_pnl_24h") or 0.0)
-        realized_pnl_total = float(state.get("realized_pnl_total") or 0.0)
-
-        worst_dd = 0.0
-        for p in (state.get("positions") or []):
-            try:
-                entry = float(p.get("avg_entry") or 0.0)
-                cur = float(p.get("current_price") or 0.0)
-                if entry > 0:
-                    dd = ((cur - entry) / entry) * 100
-                    if dd < worst_dd:
-                        worst_dd = dd
-            except Exception:
-                continue
-
-        daily_loss_limit = -(initial_balance * max_daily_loss_pct / 100)
-        pnl_24h = realized_pnl_24h + unrealized_pnl
-        daily_loss_triggered = pnl_24h <= daily_loss_limit
-        drawdown_triggered = worst_dd <= -max_drawdown_pct
-
+        risk = compute_risk_snapshot(db, mode=mode)
         return {
             "success": True,
             "mode": mode,
-            "data": {
-                "initial_balance": initial_balance,
-                "max_daily_loss_pct": max_daily_loss_pct,
-                "max_drawdown_pct": max_drawdown_pct,
-                "unrealized_pnl": round(unrealized_pnl, 2),
-                "realized_pnl_24h": round(realized_pnl_24h, 2),
-                "realized_pnl_total": round(realized_pnl_total, 2),
-                "pnl_24h": round(pnl_24h, 2),
-                "daily_loss_limit": round(daily_loss_limit, 2),
-                "worst_drawdown_pct": round(worst_dd, 2),
-                "daily_loss_triggered": daily_loss_triggered,
-                "drawdown_triggered": drawdown_triggered,
-                "positions_count": len(state.get("positions") or []),
-                "quote_ccy": state.get("quote_ccy"),
-            }
+            "data": risk,
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error getting risk summary: {str(e)}")
+
+
+@router.get("/analytics/overview")
+async def get_analytics_overview(
+    mode: str = Query("demo", description="Tryb: demo lub live"),
+    db: Session = Depends(get_db),
+):
+    """
+    Cost-aware performance overview built on accounting/reporting source-of-truth.
+    """
+    try:
+        return {
+            "success": True,
+            "mode": mode,
+            "data": performance_overview(db, mode=mode),
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error getting analytics overview: {str(e)}")
+
+
+@router.get("/analytics/risk-effectiveness")
+async def get_risk_effectiveness(
+    mode: str = Query("demo", description="Tryb: demo lub live"),
+    db: Session = Depends(get_db),
+):
+    """
+    Reporting view of risk gate effectiveness and protective actions.
+    """
+    try:
+        return {
+            "success": True,
+            "mode": mode,
+            "data": risk_effectiveness_report(db, mode=mode),
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error getting risk effectiveness analytics: {str(e)}")
+
+
+@router.get("/analytics")
+async def get_analytics_bundle(
+    mode: str = Query("demo", description="Tryb: demo lub live"),
+    db: Session = Depends(get_db),
+):
+    """
+    Unified analytics payload for dashboards and audit tooling.
+    """
+    try:
+        return {
+            "success": True,
+            "mode": mode,
+            "data": analytics_bundle(db, mode=mode),
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error getting analytics bundle: {str(e)}")
+
+
+@router.get("/analytics/config-snapshots/compare")
+async def compare_config_snapshot_payloads(
+    snapshot_a: str,
+    snapshot_b: str,
+    mode: str = Query("demo", description="Tryb: demo lub live"),
+    db: Session = Depends(get_db),
+):
+    try:
+        return {
+            "success": True,
+            "mode": mode,
+            "data": config_snapshot_compare_report(db, snapshot_a, snapshot_b, mode=mode),
+        }
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error comparing config snapshots: {str(e)}")
+
+
+@router.get("/analytics/config-snapshots/{snapshot_id}")
+async def get_config_snapshot_payload(
+    snapshot_id: str,
+    db: Session = Depends(get_db),
+):
+    try:
+        payload = config_snapshot_payload_report(db, snapshot_id)
+        if payload is None:
+            raise HTTPException(status_code=404, detail="Config snapshot not found")
+        return {
+            "success": True,
+            "data": payload,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error getting config snapshot payload: {str(e)}")
+
+
+@router.get("/analytics/experiments/compare")
+async def compare_experiment_variants(
+    baseline_snapshot_id: str,
+    candidate_snapshot_id: str,
+    mode: str = Query("demo", description="Tryb: demo lub live"),
+    symbol: Optional[str] = Query(None),
+    strategy_name: Optional[str] = Query(None),
+    start_at: Optional[str] = Query(None),
+    end_at: Optional[str] = Query(None),
+    db: Session = Depends(get_db),
+):
+    try:
+        return {
+            "success": True,
+            "data": compare_snapshots_for_experiment(
+                db,
+                baseline_snapshot_id=baseline_snapshot_id,
+                candidate_snapshot_id=candidate_snapshot_id,
+                mode=mode,
+                symbol=symbol,
+                strategy_name=strategy_name,
+                start_at=datetime.fromisoformat(start_at) if start_at else None,
+                end_at=datetime.fromisoformat(end_at) if end_at else None,
+            ),
+        }
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error comparing experiment variants: {str(e)}")
+
+
+@router.get("/analytics/experiments")
+async def get_experiments(
+    db: Session = Depends(get_db),
+):
+    try:
+        return {"success": True, "data": list_experiments(db)}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error listing experiments: {str(e)}")
+
+
+@router.get("/analytics/experiments/{experiment_id}")
+async def get_experiment_by_id(
+    experiment_id: int,
+    db: Session = Depends(get_db),
+):
+    try:
+        return {"success": True, "data": get_experiment(db, experiment_id)}
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error getting experiment: {str(e)}")
+
+
+@router.post("/analytics/experiments")
+async def create_experiment_endpoint(
+    payload: ExperimentCreateRequest,
+    db: Session = Depends(get_db),
+    admin: None = Depends(require_admin),
+):
+    try:
+        result = create_experiment(
+            db,
+            name=payload.name,
+            description=payload.description,
+            baseline_snapshot_id=payload.baseline_snapshot_id,
+            candidate_snapshot_id=payload.candidate_snapshot_id,
+            mode=payload.mode,
+            scope=payload.scope,
+            symbol=payload.symbol,
+            strategy_name=payload.strategy_name,
+            start_at=payload.start_at,
+            end_at=payload.end_at,
+            notes=payload.notes,
+        )
+        return {"success": True, "data": result}
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error creating experiment: {str(e)}")
+
+
+@router.get("/analytics/recommendations")
+async def get_recommendations(
+    db: Session = Depends(get_db),
+):
+    try:
+        return {"success": True, "data": list_recommendations(db)}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error listing recommendations: {str(e)}")
+
+
+@router.get("/analytics/recommendations/overview")
+async def get_recommendations_overview(
+    db: Session = Depends(get_db),
+):
+    try:
+        return {
+            "success": True,
+            "data": {
+                "overview": recommendation_overview(db),
+                "pending_experiments": pending_recommendation_candidates(db),
+            },
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error getting recommendation overview: {str(e)}")
+
+
+@router.get("/analytics/recommendations/review-queue")
+async def get_recommendation_review_queue(
+    db: Session = Depends(get_db),
+):
+    try:
+        return {"success": True, "data": list_review_queue(db)}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error getting recommendation review queue: {str(e)}")
+
+
+@router.post("/analytics/recommendations")
+async def create_recommendation_endpoint(
+    payload: RecommendationCreateRequest,
+    db: Session = Depends(get_db),
+    admin: None = Depends(require_admin),
+):
+    try:
+        return {
+            "success": True,
+            "data": generate_recommendation(db, payload.experiment_id, notes=payload.notes),
+        }
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error generating recommendation: {str(e)}")
+
+
+@router.get("/analytics/recommendations/{recommendation_id}")
+async def get_recommendation_by_id(
+    recommendation_id: int,
+    db: Session = Depends(get_db),
+):
+    try:
+        return {"success": True, "data": get_recommendation(db, recommendation_id)}
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error getting recommendation: {str(e)}")
+
+
+@router.get("/analytics/recommendations/{recommendation_id}/review")
+async def get_recommendation_review_bundle(
+    recommendation_id: int,
+    db: Session = Depends(get_db),
+):
+    try:
+        return {"success": True, "data": review_bundle(db, recommendation_id)}
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error getting recommendation review bundle: {str(e)}")
+
+
+def _apply_review_http(
+    db: Session,
+    recommendation_id: int,
+    payload: RecommendationReviewRequest,
+    action: str,
+) -> Dict[str, Any]:
+    return apply_review_decision(
+        db,
+        recommendation_id=recommendation_id,
+        action=action,
+        reviewed_by=payload.reviewed_by,
+        decision_reason=payload.decision_reason,
+        notes=payload.notes,
+        supersede_open_others=payload.supersede_open_others,
+    )
+
+
+@router.post("/analytics/recommendations/{recommendation_id}/start-review")
+async def start_recommendation_review(
+    recommendation_id: int,
+    payload: RecommendationReviewRequest,
+    db: Session = Depends(get_db),
+    admin: None = Depends(require_admin),
+):
+    try:
+        return {"success": True, "data": _apply_review_http(db, recommendation_id, payload, "start_review")}
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error starting recommendation review: {str(e)}")
+
+
+@router.post("/analytics/recommendations/{recommendation_id}/approve")
+async def approve_recommendation(
+    recommendation_id: int,
+    payload: RecommendationReviewRequest,
+    db: Session = Depends(get_db),
+    admin: None = Depends(require_admin),
+):
+    try:
+        return {"success": True, "data": _apply_review_http(db, recommendation_id, payload, "approve")}
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error approving recommendation: {str(e)}")
+
+
+@router.post("/analytics/recommendations/{recommendation_id}/reject")
+async def reject_recommendation(
+    recommendation_id: int,
+    payload: RecommendationReviewRequest,
+    db: Session = Depends(get_db),
+    admin: None = Depends(require_admin),
+):
+    try:
+        return {"success": True, "data": _apply_review_http(db, recommendation_id, payload, "reject")}
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error rejecting recommendation: {str(e)}")
+
+
+@router.post("/analytics/recommendations/{recommendation_id}/defer")
+async def defer_recommendation(
+    recommendation_id: int,
+    payload: RecommendationReviewRequest,
+    db: Session = Depends(get_db),
+    admin: None = Depends(require_admin),
+):
+    try:
+        return {"success": True, "data": _apply_review_http(db, recommendation_id, payload, "defer")}
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error deferring recommendation: {str(e)}")
+
+
+@router.get("/analytics/promotions")
+async def get_config_promotions(
+    db: Session = Depends(get_db),
+):
+    try:
+        return {"success": True, "data": list_promotions(db)}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error listing promotions: {str(e)}")
+
+
+@router.get("/analytics/promotions/{promotion_id}")
+async def get_config_promotion_by_id(
+    promotion_id: int,
+    db: Session = Depends(get_db),
+):
+    try:
+        return {"success": True, "data": get_promotion(db, promotion_id)}
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error getting promotion: {str(e)}")
+
+
+@router.post("/analytics/promotions")
+async def create_config_promotion(
+    payload: PromotionCreateRequest,
+    db: Session = Depends(get_db),
+    admin: None = Depends(require_admin),
+):
+    try:
+        return {
+            "success": True,
+            "data": promote_recommendation(
+                db,
+                recommendation_id=payload.recommendation_id,
+                initiated_by=payload.initiated_by,
+                notes=payload.notes,
+            ),
+        }
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except RuntimeSettingsError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error creating promotion: {str(e)}")
+
+
+@router.get("/analytics/promotion-monitoring")
+async def get_promotion_monitoring_records(
+    db: Session = Depends(get_db),
+):
+    try:
+        return {"success": True, "data": list_monitoring_records(db)}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error listing promotion monitoring records: {str(e)}")
+
+
+@router.get("/analytics/promotion-monitoring/{monitoring_id}")
+async def get_promotion_monitoring_record(
+    monitoring_id: int,
+    db: Session = Depends(get_db),
+):
+    try:
+        return {"success": True, "data": get_monitoring_record(db, monitoring_id)}
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error getting promotion monitoring record: {str(e)}")
+
+
+@router.get("/analytics/promotions/{promotion_id}/monitoring")
+async def get_monitoring_verdict_for_promotion(
+    promotion_id: int,
+    db: Session = Depends(get_db),
+):
+    try:
+        return {"success": True, "data": get_monitoring_by_promotion(db, promotion_id)}
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error getting promotion monitoring verdict: {str(e)}")
+
+
+@router.post("/analytics/promotions/{promotion_id}/monitoring/evaluate")
+async def evaluate_promotion_monitoring(
+    promotion_id: int,
+    payload: PromotionMonitoringRequest,
+    db: Session = Depends(get_db),
+    admin: None = Depends(require_admin),
+):
+    try:
+        return {"success": True, "data": evaluate_monitoring(db, promotion_id, notes=payload.notes)}
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error evaluating promotion monitoring: {str(e)}")
+
+
+@router.get("/analytics/rollbacks")
+async def get_rollback_decisions(
+    db: Session = Depends(get_db),
+):
+    try:
+        return {"success": True, "data": list_rollback_decisions(db)}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error listing rollback decisions: {str(e)}")
+
+
+@router.get("/analytics/rollbacks/{rollback_id}")
+async def get_rollback_decision_by_id(
+    rollback_id: int,
+    db: Session = Depends(get_db),
+):
+    try:
+        return {"success": True, "data": get_rollback_decision(db, rollback_id)}
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error getting rollback decision: {str(e)}")
+
+
+@router.get("/analytics/promotions/{promotion_id}/rollback-decision")
+async def get_latest_rollback_decision_for_promotion(
+    promotion_id: int,
+    db: Session = Depends(get_db),
+):
+    try:
+        return {"success": True, "data": latest_rollback_decision_for_promotion(db, promotion_id)}
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error getting rollback decision for promotion: {str(e)}")
+
+
+@router.post("/analytics/promotions/{promotion_id}/rollback-decision")
+async def create_promotion_rollback_decision(
+    promotion_id: int,
+    payload: RollbackDecisionRequest,
+    db: Session = Depends(get_db),
+    admin: None = Depends(require_admin),
+):
+    try:
+        return {
+            "success": True,
+            "data": create_rollback_decision(
+                db,
+                promotion_id=promotion_id,
+                initiated_by=payload.initiated_by,
+                monitoring_id=payload.monitoring_id,
+                notes=payload.notes,
+            ),
+        }
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error creating rollback decision: {str(e)}")
+
+
+@router.get("/analytics/rollback-executions")
+async def get_rollback_execution_records(
+    db: Session = Depends(get_db),
+):
+    try:
+        return {"success": True, "data": list_rollback_executions(db)}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error listing rollback executions: {str(e)}")
+
+
+@router.get("/analytics/rollback-executions/{rollback_id}")
+async def get_rollback_execution_record(
+    rollback_id: int,
+    db: Session = Depends(get_db),
+):
+    try:
+        return {"success": True, "data": get_rollback_execution(db, rollback_id)}
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error getting rollback execution: {str(e)}")
+
+
+@router.post("/analytics/rollbacks/{rollback_id}/execute")
+async def execute_rollback_decision(
+    rollback_id: int,
+    payload: RollbackExecutionRequest,
+    db: Session = Depends(get_db),
+    admin: None = Depends(require_admin),
+):
+    try:
+        return {
+            "success": True,
+            "data": execute_rollback(
+                db,
+                rollback_id=rollback_id,
+                initiated_by=payload.initiated_by,
+                notes=payload.notes,
+            ),
+        }
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except RuntimeSettingsError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error executing rollback: {str(e)}")
+
+
+@router.get("/analytics/post-rollback-monitoring")
+async def get_post_rollback_monitoring_records(
+    db: Session = Depends(get_db),
+):
+    try:
+        return {"success": True, "data": list_post_rollback_monitoring_records(db)}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error listing post-rollback monitoring records: {str(e)}")
+
+
+@router.get("/analytics/post-rollback-monitoring/{monitoring_id}")
+async def get_post_rollback_monitoring_record_by_id(
+    monitoring_id: int,
+    db: Session = Depends(get_db),
+):
+    try:
+        return {"success": True, "data": get_post_rollback_monitoring_record(db, monitoring_id)}
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error getting post-rollback monitoring record: {str(e)}")
+
+
+@router.get("/analytics/rollbacks/{rollback_id}/post-monitoring")
+async def get_post_rollback_monitoring_for_rollback(
+    rollback_id: int,
+    db: Session = Depends(get_db),
+):
+    try:
+        return {"success": True, "data": get_post_rollback_monitoring_by_rollback(db, rollback_id)}
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error getting post-rollback monitoring verdict: {str(e)}")
+
+
+@router.post("/analytics/rollbacks/{rollback_id}/post-monitoring/evaluate")
+async def evaluate_rollback_post_monitoring(
+    rollback_id: int,
+    payload: PromotionMonitoringRequest,
+    db: Session = Depends(get_db),
+    admin: None = Depends(require_admin),
+):
+    try:
+        return {"success": True, "data": evaluate_post_rollback_monitoring(db, rollback_id, notes=payload.notes)}
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error evaluating post-rollback monitoring: {str(e)}")
 
 
 @router.get("/system-logs")
@@ -518,3 +1143,96 @@ async def get_system_logs(
         return {"success": True, "data": data, "count": len(data)}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error getting system logs: {str(e)}")
+
+
+# ---------------------------------------------------------------------------
+# Policy Actions
+# ---------------------------------------------------------------------------
+
+
+@router.get("/analytics/policy-actions")
+async def get_policy_actions_list(
+    status: Optional[str] = Query(None, description="Filtr statusu: open, resolved, superseded"),
+    source_type: Optional[str] = Query(None, description="Filtr źródła: promotion_monitoring, rollback_decision, rollback_monitoring"),
+    db: Session = Depends(get_db),
+):
+    try:
+        return {"success": True, "data": list_policy_actions(db, status=status, source_type=source_type)}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Błąd pobierania policy actions: {str(e)}")
+
+
+@router.get("/analytics/policy-actions/active")
+async def get_active_policy_actions(
+    db: Session = Depends(get_db),
+):
+    try:
+        return {"success": True, "data": list_active_policy_actions(db)}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Błąd pobierania aktywnych policy actions: {str(e)}")
+
+
+@router.get("/analytics/policy-actions/summary")
+async def get_policy_actions_summary(
+    db: Session = Depends(get_db),
+):
+    try:
+        return {"success": True, "data": policy_actions_summary(db)}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Błąd pobierania podsumowania policy actions: {str(e)}")
+
+
+@router.get("/analytics/policy-actions/{policy_action_id}")
+async def get_policy_action_by_id(
+    policy_action_id: int,
+    db: Session = Depends(get_db),
+):
+    try:
+        return {"success": True, "data": get_policy_action(db, policy_action_id)}
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Błąd pobierania policy action: {str(e)}")
+
+
+@router.post("/analytics/policy-actions")
+async def create_policy_action_endpoint(
+    payload: PolicyActionCreateRequest,
+    db: Session = Depends(get_db),
+    admin: None = Depends(require_admin),
+):
+    try:
+        return {
+            "success": True,
+            "data": create_policy_action(
+                db,
+                source_type=payload.source_type,
+                source_id=payload.source_id,
+                verdict_status=payload.verdict_status,
+                reason_codes=payload.reason_codes,
+                urgency=payload.urgency,
+                notes=payload.notes,
+            ),
+        }
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Błąd tworzenia policy action: {str(e)}")
+
+
+@router.post("/analytics/policy-actions/{policy_action_id}/resolve")
+async def resolve_policy_action_endpoint(
+    policy_action_id: int,
+    payload: PolicyActionResolveRequest,
+    db: Session = Depends(get_db),
+    admin: None = Depends(require_admin),
+):
+    try:
+        return {
+            "success": True,
+            "data": resolve_policy_action(db, policy_action_id, notes=payload.notes),
+        }
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Błąd rozwiązywania policy action: {str(e)}")

@@ -1,7 +1,7 @@
 'use client'
 
 import { useEffect, useMemo, useState } from 'react'
-import { Bell, Power, Search, Twitter, User2 } from 'lucide-react'
+import { Bell, Power, Search, Cloud, Download, User2, ChevronDown } from 'lucide-react'
 import { API_BASE, withAdminToken } from '../lib/api'
 
 interface TopbarProps {
@@ -18,14 +18,13 @@ export default function Topbar({ activeView, setActiveView, tradingMode, setTrad
 
   const navItems = useMemo(
     () => [
-      { label: 'Dashboard', view: 'dashboard' },
       { label: 'Markets', view: 'markets' },
       { label: 'Trade Desk', view: 'trade-desk' },
       { label: 'Portfolio', view: 'portfolio' },
       { label: 'Strategies', view: 'strategies' },
       { label: 'AI & Signals', view: 'ai-signals' },
-      { label: 'Risk', view: 'decisions' },
-      { label: 'Collages', view: 'dashboard-classic' },
+      { label: 'Risk', view: 'risk' },
+      { label: 'Collegues', view: 'collegues' },
     ],
     []
   )
@@ -51,21 +50,36 @@ export default function Topbar({ activeView, setActiveView, tradingMode, setTrad
   }, [])
 
   return (
-    <div className="sticky top-0 z-50 h-14 bg-gradient-to-r from-[#0b121a]/90 via-[#0f1a24]/90 to-[#0b121a]/90 border-b border-rldc-dark-border flex items-center justify-between px-5 shadow-[0_12px_35px_rgba(0,0,0,0.55)] backdrop-blur">
-      {/* Left: Logo and Navigation */}
-      <div className="flex items-center space-x-8">
-        <div className="text-3xl font-bold text-slate-100 tracking-wide neon-text">
-          RLDC
+    <div className="sticky top-0 z-50 h-14 bg-gradient-to-r from-[#0b121a]/95 via-[#0f1a24]/95 to-[#0b121a]/95 border-b border-rldc-dark-border flex items-center justify-between px-5 shadow-elevation backdrop-blur-md">
+      {/* Left: Logo and Main Menu */}
+      <div className="flex items-center space-x-6">
+        {/* Logo */}
+        <div className="flex items-center space-x-4">
+          <div className="text-2xl font-bold text-slate-100 tracking-wider">
+            <span className="text-teal-primary">RLDC</span>
+          </div>
+          
+          {/* Basic Dom Dropdown */}
+          <div className="relative group">
+            <button className="flex items-center space-x-1 px-3 py-1.5 rounded-lg bg-rldc-dark-card border border-rldc-dark-border hover:border-teal-primary/40 transition text-sm text-slate-300">
+              <span className="text-xs font-medium">Basic Dom</span>
+              <ChevronDown size={14} />
+            </button>
+          </div>
         </div>
-        <nav className="hidden md:flex items-center space-x-5 text-[11px] uppercase tracking-widest">
+
+        {/* Navigation */}
+        <nav className="hidden lg:flex items-center space-x-1">
           {navItems.map((item) => {
             const isActive = activeView === item.view
             return (
               <button
                 key={item.view}
                 onClick={() => setActiveView(item.view)}
-                className={`text-slate-300 hover:text-rldc-teal-light transition relative after:absolute after:inset-x-0 after:-bottom-4 after:h-0.5 after:bg-rldc-teal-light after:transition ${
-                  isActive ? 'text-rldc-teal-light after:scale-x-100' : 'after:scale-x-0 hover:after:scale-x-100'
+                className={`px-3 py-1.5 text-xs font-medium transition rounded-md ${
+                  isActive 
+                    ? 'text-teal-primary bg-teal-primary/10' 
+                    : 'text-slate-400 hover:text-slate-200 hover:bg-rldc-dark-hover'
                 }`}
               >
                 {item.label}
@@ -75,55 +89,47 @@ export default function Topbar({ activeView, setActiveView, tradingMode, setTrad
         </nav>
       </div>
 
-      {/* Right: Mode Selector and Actions */}
-      <div className="flex items-center space-x-4">
-        {/* Trading Mode Selector */}
-        <div className="hidden sm:flex bg-rldc-dark-bg rounded-lg overflow-hidden border border-rldc-dark-border glow-border">
-          {(['demo', 'live', 'backtest'] as const).map((mode) => (
-            <button
-              key={mode}
-              onClick={() => setTradingMode(mode)}
-              className={`px-4 py-2 text-xs font-medium transition ${
-                tradingMode === mode
-                  ? 'bg-rldc-teal-primary text-white'
-                  : 'text-slate-400 hover:text-rldc-teal-light'
-              }`}
-            >
-              {mode.toUpperCase()}
-            </button>
-          ))}
+      {/* Center: Live Status & Selectors */}
+      <div className="hidden xl:flex items-center space-x-3">
+        <div className="text-[10px] text-teal-primary font-bold uppercase tracking-wider flex items-center space-x-1.5">
+          <div className="w-2 h-2 bg-teal-primary rounded-full animate-pulse"></div>
+          <span>LIVE FUTURES RBC-CMC [Streaming] [Exchange] [Exchanges]</span>
+        </div>
+      </div>
+
+      {/* Right: Controls and Actions */}
+      <div className="flex items-center space-x-3">
+        {/* Selectors */}
+        <div className="hidden lg:flex items-center space-x-2 text-xs">
+          <select className="bg-rldc-dark-card border border-rldc-dark-border rounded px-2 py-1 text-slate-300 text-xs focus:outline-none focus:border-teal-primary/50">
+            <option>Ser. c6h</option>
+          </select>
+          <select className="bg-rldc-dark-card border border-rldc-dark-border rounded px-2 py-1 text-slate-300 text-xs focus:outline-none focus:border-teal-primary/50">
+            <option>Sym. BTCUSDT</option>
+          </select>
+          <select className="bg-rldc-dark-card border border-rldc-dark-border rounded px-2 py-1 text-slate-300 text-xs focus:outline-none focus:border-teal-primary/50">
+            <option>MAATHG cu PNBET</option>
+          </select>
         </div>
 
-        <div className="hidden lg:flex items-center gap-1">
-          <button className="p-2 hover:bg-rldc-dark-hover rounded-lg transition" aria-label="Search">
-            <Search size={18} className="text-slate-300" />
+        {/* Icon Buttons */}
+        <div className="flex items-center gap-1">
+          <button className="icon-button" aria-label="Search" title="Wyszukaj">
+            <Search size={18} />
           </button>
-          <button className="p-2 hover:bg-rldc-dark-hover rounded-lg transition" aria-label="Twitter">
-            <Twitter size={18} className="text-slate-300" />
+          <button className="icon-button" aria-label="Alerts" title="Alerty">
+            <Bell size={18} />
           </button>
-          <button className="p-2 hover:bg-rldc-dark-hover rounded-lg transition" aria-label="Notifications">
-            <Bell size={18} className="text-slate-300" />
+          <button className="icon-button" aria-label="Cloud" title="Chmura">
+            <Cloud size={18} />
           </button>
-          <button className="p-2 hover:bg-rldc-dark-hover rounded-lg transition" aria-label="Account">
-            <User2 size={18} className="text-slate-300" />
+          <button className="icon-button" aria-label="Download" title="Pobierz">
+            <Download size={18} />
+          </button>
+          <button className="icon-button" aria-label="Account" title="Konto">
+            <User2 size={18} />
           </button>
         </div>
-
-        {/* Trading State */}
-        {tradingMode === 'demo' && (
-          <div
-            className={`hidden md:flex items-center px-3 py-1 rounded text-[11px] font-semibold border ${
-              tradingEnabled === true
-                ? 'bg-rldc-green-primary/15 text-rldc-green-primary border-rldc-green-primary/20'
-                : tradingEnabled === false
-                  ? 'bg-rldc-red-primary/15 text-rldc-red-primary border-rldc-red-primary/20'
-                  : 'bg-slate-500/10 text-slate-300 border-rldc-dark-border'
-            }`}
-            title={controlError || 'DEMO trading state'}
-          >
-            TRADING: {tradingEnabled === null ? '--' : tradingEnabled ? 'ON' : 'OFF'}
-          </div>
-        )}
 
         {/* Stop Trading Button */}
         <button
@@ -140,17 +146,17 @@ export default function Topbar({ activeView, setActiveView, tradingMode, setTrad
               if (!res.ok) throw new Error('Błąd stop')
               await refreshControl()
             } catch {
-              setControlError('STOP TRADING nieudany (ADMIN_TOKEN?)')
+              setControlError('STOP TRADING nieudany')
             } finally {
               setStopping(false)
             }
           }}
-          className="flex items-center space-x-2 bg-rldc-orange-primary hover:bg-rldc-orange-light disabled:opacity-60 disabled:cursor-not-allowed text-slate-900 px-4 py-2 rounded-lg text-sm font-semibold transition shadow-[0_0_28px_rgba(245,158,11,0.35)]"
+          className="btn-danger flex items-center space-x-2"
           disabled={stopping || tradingEnabled === false}
-          title={tradingEnabled === false ? 'Trading już wyłączony' : 'Wyłącz DEMO trading'}
+          title={tradingEnabled === false ? 'Trading już wyłączony' : 'Wyłącz trading'}
         >
           <Power size={16} />
-          <span>{stopping ? 'STOPPING...' : 'STOP TRADING'}</span>
+          <span className="hidden sm:inline">{stopping ? 'STOPPING...' : 'STOP TRADING'}</span>
         </button>
       </div>
     </div>

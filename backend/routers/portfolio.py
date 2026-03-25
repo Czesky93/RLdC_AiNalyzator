@@ -8,6 +8,7 @@ from typing import Optional
 from datetime import datetime
 import random
 
+from backend.accounting import summarize_positions
 from backend.database import get_db, Position
 from backend.binance_client import get_binance_client
 
@@ -92,48 +93,27 @@ async def get_portfolio_summary(
     """
     try:
         positions = db.query(Position).filter(Position.mode == mode).all()
-        
-        if not positions:
-            return {
-                "success": True,
-                "mode": mode,
-                "data": {
-                    "total_positions": 0,
-                    "total_value": 0.0,
-                    "total_unrealized_pnl": 0.0,
-                    "winning_positions": 0,
-                    "losing_positions": 0
-                }
-            }
-        
-        total_value = 0.0
-        total_unrealized_pnl = 0.0
-        winning = 0
-        losing = 0
-        
-        for pos in positions:
-            value = pos.entry_price * pos.quantity
-            total_value += value
-            
-            pnl = pos.unrealized_pnl or 0.0
-            total_unrealized_pnl += pnl
-            
-            if pnl > 0:
-                winning += 1
-            elif pnl < 0:
-                losing += 1
-        
+        summary = summarize_positions(positions, db=db, label=f"{mode}_portfolio")
+        total_positions = int(summary.get("positions") or 0)
+        winning = sum(1 for pos in positions if float(pos.unrealized_pnl or 0.0) > 0.0)
+        losing = sum(1 for pos in positions if float(pos.unrealized_pnl or 0.0) < 0.0)
         return {
             "success": True,
             "mode": mode,
             "data": {
-                "total_positions": len(positions),
-                "total_value": round(total_value, 2),
-                "total_unrealized_pnl": round(total_unrealized_pnl, 2),
+                "total_positions": total_positions,
+                "total_value": round(float(summary.get("exposure") or 0.0), 2),
+                "total_unrealized_pnl": round(sum(float(pos.unrealized_pnl or 0.0) for pos in positions), 2),
                 "winning_positions": winning,
                 "losing_positions": losing,
-                "win_rate": round((winning / len(positions) * 100) if len(positions) > 0 else 0, 2)
-            }
+                "win_rate": round((winning / total_positions * 100) if total_positions > 0 else 0.0, 2),
+                "gross_pnl": round(float(summary.get("gross_pnl") or 0.0), 2),
+                "net_pnl": round(float(summary.get("net_pnl") or 0.0), 2),
+                "total_cost": round(float(summary.get("total_cost") or 0.0), 2),
+                "fee_cost": round(float(summary.get("fee_cost") or 0.0), 2),
+                "slippage_cost": round(float(summary.get("slippage_cost") or 0.0), 2),
+                "spread_cost": round(float(summary.get("spread_cost") or 0.0), 2),
+            },
         }
         
     except Exception as e:
