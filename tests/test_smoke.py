@@ -2099,3 +2099,262 @@ def test_policy_resolve_already_resolved(client):
     client.post(f"/api/account/analytics/policy-actions/{action_id}/resolve", json={})
     resp = client.post(f"/api/account/analytics/policy-actions/{action_id}/resolve", json={})
     assert resp.status_code == 409
+
+
+# ===========================================================================
+# Governance / Operator Workflow
+# ===========================================================================
+
+
+def test_governance_pipeline_status(client):
+    """Pipeline status endpoint zwraca zagregowany stan blokad."""
+    resp = client.get("/api/account/analytics/pipeline-status")
+    assert resp.status_code == 200
+    data = resp.json().get("data") or {}
+    assert "promotion_allowed" in data
+    assert "rollback_allowed" in data
+    assert "experiment_allowed" in data
+    assert "recommendation_allowed" in data
+
+
+def test_governance_pipeline_permission_no_blockers(client):
+    """Pipeline permission endpoint zwraca poprawną strukturę."""
+    resp = client.get("/api/account/analytics/pipeline-permission/promotion")
+    assert resp.status_code == 200
+    data = resp.json().get("data") or {}
+    assert "allowed" in data
+    assert "blocking_actions" in data
+    assert isinstance(data.get("blocking_actions"), list)
+
+
+def test_governance_pipeline_permission_invalid_operation(client):
+    """Nieznana operacja zwraca 400."""
+    resp = client.get("/api/account/analytics/pipeline-permission/unknown_op")
+    assert resp.status_code == 400
+
+
+def test_governance_pipeline_permission_blocked_by_policy(client):
+    """Po dodaniu policy action blokującej promotions — promotion zablokowana."""
+    client.post(
+        "/api/account/analytics/policy-actions",
+        json={
+            "source_type": "promotion_monitoring",
+            "source_id": 5000,
+            "verdict_status": "warning",
+            "reason_codes": ["POST_PROMOTION_NET_PNL_DEGRADATION"],
+        },
+    )
+    resp = client.get("/api/account/analytics/pipeline-permission/promotion")
+    assert resp.status_code == 200
+    data = resp.json().get("data") or {}
+    assert data.get("allowed") is False
+    assert len(data.get("blocking_actions", [])) > 0
+
+
+def test_governance_operator_queue_empty(client):
+    """Operator queue zwraca listę (może być pusta na starcie)."""
+    resp = client.get("/api/account/analytics/operator-queue")
+    assert resp.status_code == 200
+    data = resp.json().get("data")
+    assert isinstance(data, list)
+
+
+def test_governance_incident_create(client):
+    """Tworzenie incydentu powiązanego z policy action."""
+    pa_resp = client.post(
+        "/api/account/analytics/policy-actions",
+        json={
+            "source_type": "rollback_monitoring",
+            "source_id": 6000,
+            "verdict_status": "escalate",
+            "reason_codes": ["POST_ROLLBACK_RISK_PRESSURE_PERSISTENT"],
+        },
+    )
+    assert pa_resp.status_code == 200
+    pa_id = (pa_resp.json().get("data") or {}).get("id")
+
+    resp = client.post(
+        "/api/account/analytics/incidents",
+        json={"policy_action_id": pa_id},
+    )
+    assert resp.status_code == 200
+    inc = resp.json().get("data") or {}
+    assert inc.get("status") == "open"
+    assert inc.get("policy_action_id") == pa_id
+    assert inc.get("priority") == "critical"
+    assert inc.get("sla_deadline") is not None
+
+
+def test_governance_incident_duplicate_blocked(client):
+    """Nie można utworzyć duplikatu incydentu dla tej samej policy action."""
+    pa_resp = client.post(
+        "/api/account/analytics/policy-actions",
+        json={
+            "source_type": "promotion_monitoring",
+            "source_id": 6001,
+            "verdict_status": "rollback_candidate",
+        },
+    )
+    pa_id = (pa_resp.json().get("data") or {}).get("id")
+
+    client.post("/api/account/analytics/incidents", json={"policy_action_id": pa_id})
+    resp = client.post("/api/account/analytics/incidents", json={"policy_action_id": pa_id})
+    assert resp.status_code == 400
+    assert "już istnieje" in resp.json().get("detail", "")
+
+
+def test_governance_incident_lifecycle(client):
+    """Pełny lifecycle: open → acknowledged → in_progress → resolved."""
+    pa_resp = client.post(
+        "/api/account/analytics/policy-actions",
+        json={
+            "source_type": "rollback_decision",
+            "source_id": 6002,
+            "verdict_status": "rollback_required",
+        },
+    )
+    pa_id = (pa_resp.json().get("data") or {}).get("id")
+
+    inc_resp = client.post("/api/account/analytics/incidents", json={"policy_action_id": pa_id})
+    inc_id = (inc_resp.json().get("data") or {}).get("id")
+
+    # open → acknowledged
+    resp = client.post(
+        f"/api/account/analytics/incidents/{inc_id}/transition",
+        json={"new_status": "acknowledged", "operator": "admin"},
+    )
+    assert resp.status_code == 200
+    assert resp.json().get("data", {}).get("status") == "acknowledged"
+    assert resp.json().get("data", {}).get("acknowledged_by") == "admin"
+
+    # acknowledged → in_progress
+    resp = client.post(
+        f"/api/account/analytics/incidents/{inc_id}/transition",
+        json={"new_status": "in_progress", "operator": "admin"},
+    )
+    assert resp.status_code == 200
+    assert resp.json().get("data", {}).get("status") == "in_progress"
+
+    # in_progress → resolved
+    resp = client.post(
+        f"/api/account/analytics/incidents/{inc_id}/transition",
+        json={"new_status": "resolved", "operator": "admin", "notes": "przyczyna usunięta"},
+    )
+    assert resp.status_code == 200
+    data = resp.json().get("data") or {}
+    assert data.get("status") == "resolved"
+    assert data.get("resolved_at") is not None
+    assert data.get("resolution_notes") == "przyczyna usunięta"
+
+
+def test_governance_incident_invalid_transition(client):
+    """Niedozwolone przejście stanu zwraca 400."""
+    pa_resp = client.post(
+        "/api/account/analytics/policy-actions",
+        json={
+            "source_type": "promotion_monitoring",
+            "source_id": 6003,
+            "verdict_status": "watch",
+        },
+    )
+    pa_id = (pa_resp.json().get("data") or {}).get("id")
+
+    inc_resp = client.post("/api/account/analytics/incidents", json={"policy_action_id": pa_id})
+    inc_id = (inc_resp.json().get("data") or {}).get("id")
+
+    # open → in_progress (niedozwolone — trzeba najpierw acknowledged)
+    resp = client.post(
+        f"/api/account/analytics/incidents/{inc_id}/transition",
+        json={"new_status": "in_progress"},
+    )
+    assert resp.status_code == 400
+    assert "Niedozwolone" in resp.json().get("detail", "")
+
+
+def test_governance_incident_list_and_get(client):
+    """Lista i get incydentów z filtrami."""
+    resp = client.get("/api/account/analytics/incidents")
+    assert resp.status_code == 200
+    assert isinstance(resp.json().get("data"), list)
+
+    resp = client.get("/api/account/analytics/incidents?status=open")
+    assert resp.status_code == 200
+
+    resp = client.get("/api/account/analytics/incidents?priority=critical")
+    assert resp.status_code == 200
+
+
+def test_governance_incident_get_by_id(client):
+    """GET pojedynczego incydentu."""
+    pa_resp = client.post(
+        "/api/account/analytics/policy-actions",
+        json={
+            "source_type": "rollback_monitoring",
+            "source_id": 6004,
+            "verdict_status": "warning",
+        },
+    )
+    pa_id = (pa_resp.json().get("data") or {}).get("id")
+
+    inc_resp = client.post("/api/account/analytics/incidents", json={"policy_action_id": pa_id})
+    inc_id = (inc_resp.json().get("data") or {}).get("id")
+
+    resp = client.get(f"/api/account/analytics/incidents/{inc_id}")
+    assert resp.status_code == 200
+    assert resp.json().get("data", {}).get("id") == inc_id
+
+
+def test_governance_incident_not_found(client):
+    """Nieistniejący incydent → 404."""
+    resp = client.get("/api/account/analytics/incidents/999999")
+    assert resp.status_code == 404
+
+
+def test_governance_escalate_overdue(client):
+    """Endpoint eskalacji przeterminowanych incydentów."""
+    resp = client.post("/api/account/analytics/incidents/escalate-overdue")
+    assert resp.status_code == 200
+    assert "escalated_count" in resp.json()
+
+
+def test_governance_operator_queue_with_incidents(client):
+    """Operator queue zawiera incydenty i policy actions wymagające review."""
+    pa_resp = client.post(
+        "/api/account/analytics/policy-actions",
+        json={
+            "source_type": "promotion_monitoring",
+            "source_id": 6005,
+            "verdict_status": "warning",
+        },
+    )
+    pa_id = (pa_resp.json().get("data") or {}).get("id")
+    client.post("/api/account/analytics/incidents", json={"policy_action_id": pa_id})
+
+    resp = client.get("/api/account/analytics/operator-queue")
+    assert resp.status_code == 200
+    queue = resp.json().get("data") or []
+    assert len(queue) > 0
+    item = queue[0]
+    assert "type" in item
+    assert "priority" in item
+    assert "policy_action_id" in item
+
+
+def test_governance_pipeline_status_reflects_freezes(client):
+    """Pipeline status pokazuje blokady z aktywnych policy actions."""
+    # Dodaj critical action blokującą promotions i experiments
+    client.post(
+        "/api/account/analytics/policy-actions",
+        json={
+            "source_type": "rollback_monitoring",
+            "source_id": 6006,
+            "verdict_status": "escalate",
+        },
+    )
+
+    resp = client.get("/api/account/analytics/pipeline-status")
+    assert resp.status_code == 200
+    data = resp.json().get("data") or {}
+    # escalate blokuje promotion i experiment
+    assert data.get("promotion_allowed") is False
+    assert data.get("experiment_allowed") is False

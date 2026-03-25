@@ -1,12 +1,12 @@
 # PROJECT AUDIT MASTER
 
 ## Audit State
-- Current stage: `ETAP 2 - PIPELINE DOMKNIĘTY`
-- Current file: `backend/policy_layer.py`
-- Last completed file: `backend/post_rollback_monitoring.py`
-- Next stage: `governance / operator workflow`
-- Audit timestamp: `policy layer completed, 71 tests green`
-- Pipeline status: **FULL LOOP OPERATIONAL**
+- Current stage: `ETAP 3 - GOVERNANCE IMPLEMENTED`
+- Current file: `backend/governance.py`
+- Last completed file: `backend/governance.py`
+- Next stage: `Telegram notification hooks / scheduled reevaluation worker`
+- Audit timestamp: `governance layer completed, 86 tests green`
+- Pipeline status: **FULL LOOP + GOVERNANCE OPERATIONAL**
 
 ## Scope
 This document is the single audit state file for the repository. It tracks:
@@ -17,17 +17,18 @@ This document is the single audit state file for the repository. It tracks:
 - baseline test status.
 
 ## Executive Summary
-Repository status is closer to a trading dashboard prototype than a controlled net-PnL trading system.
 
-Main risk factors found in the first audit pass:
-- Trading logic, execution, data collection, AI insight generation, and operational workflows are coupled inside `backend/collector.py`.
-- There is no unified trade cost model for fee, slippage, spread, or execution quality.
-- Demo accounting ignores transaction costs, which can materially overstate performance.
-- Signal endpoints auto-generate demo data, which contaminates operational truth and weakens reporting integrity.
-- Persistence uses ad hoc schema mutation in application code instead of migrations.
-- Project structure declared in `README.md` does not match actual repository contents.
-- Test coverage is only smoke-level and does not validate trading invariants, cost controls, or risk limits.
-- Runtime configuration was previously fragmented across ENV fallbacks and router-local parsing; hardened in this pass, but not yet consumed by the trading core.
+**Stan po ETAP 2:** Repozytorium posiada kompletny, zamknięty pipeline bezpieczeństwa konfiguracji od `config → experiment → recommendation → review → promotion → monitoring → rollback decision → rollback execution → post-rollback monitoring → policy`. Warstwa policy jest determinizna i przetestowana (71 testów). System jest gotowy do implementacji governance / operator workflow.
+
+**Pozostałe ryzyka (z pierwszego audytu, częściowo zmitigowane):**
+- ~~Trading logic, execution, data collection are coupled inside `backend/collector.py`.~~ Częściowo rozdzielone — central runtime settings, risk.py, accounting.py są wydzielone, ale collector nadal łączy zbyt wiele odpowiedzialności.
+- ~~No unified trade cost model.~~ Istnieje `cost_ledger`, `net_pnl` na zamówieniach, `accounting.py` jako źródło prawdy kosztowej.
+- ~~Demo accounting ignores transaction costs.~~ `compute_demo_account_state(...)` jest teraz cost-aware.
+- Signal endpoints auto-generate demo data — **nadal aktualny problem**.
+- Persistence uses ad hoc schema mutation — **nadal aktualny**, brak migracji.
+- Project structure declared in `README.md` does not match actual repository contents — **nadal aktualny**.
+- Test coverage is only smoke-level — **częściowo poprawiony** (71 testów, ale brak testów trading invariants).
+- ~~Runtime configuration was fragmented.~~ Hardened: central registry + config snapshots + audit trail.
 
 ## Architecture Snapshot
 Current effective layers:
@@ -39,13 +40,13 @@ Current effective layers:
 
 Missing or weak layers versus target trading architecture:
 - `filters/`
-- `risk/`
-- `execution/`
-- `portfolio/`
-- `analytics/`
-- `reporting/`
-- `config/`
-- `ai/`
+- ~~`risk/`~~ → `backend/risk.py` (poprawiony)
+- `execution/` (brak wydzielonego modułu)
+- `portfolio/` (brak wydzielonego modułu)
+- ~~`analytics/`~~ → `backend/reporting.py` (poprawiony)
+- ~~`reporting/`~~ → `backend/reporting.py` (poprawiony)
+- ~~`config/`~~ → `backend/runtime_settings.py` + `config_snapshots` (poprawiony)
+- `ai/` (brak wydzielonego modułu)
 
 ## File Map
 
@@ -75,6 +76,7 @@ Missing or weak layers versus target trading architecture:
 - `backend/rollback_flow.py`: rollback execution using same apply path as promotion.
 - `backend/post_rollback_monitoring.py`: post-rollback stabilization monitoring.
 - `backend/policy_layer.py`: verdict → operational action mapping with audit trail.
+- `backend/governance.py`: governance / operator workflow — freeze enforcement, incident lifecycle, operator queue.
 - `backend/reporting.py`: central reporting/analytics layer for dashboards and audit.
 - `backend/__init__.py`: package marker.
 
@@ -118,75 +120,39 @@ Missing or weak layers versus target trading architecture:
 - `docs/QUICK_START.md`: setup guide.
 - `docs/IMPLEMENTATION_SUMMARY.md`: implementation summary.
 
-## Critical Problems
+## Critical Problems (zaktualizowane po ETAP 2)
 1. `backend/collector.py` is a god-object mixing data ingestion, signal generation, execution workflow, risk alerts, Telegram, reporting, and adaptive learning.
 Impact:
 - hard to reason about trade decisions,
 - nearly impossible to validate edge versus costs,
 - high regression risk when changing one behavior.
+**Status:** Częściowo zmitigowane — runtime settings, risk.py, reporting.py, accounting.py wydzielone. Collector nadal zbyt szeroki.
 
-2. No canonical execution-cost ledger exists.
+2. ~~No canonical execution-cost ledger exists.~~ **ROZWIĄZANE** — `cost_ledger` table + `net_pnl` na zamówieniach.
 Affected areas:
-- `backend/database.py`
-- `backend/accounting.py`
+- `backend/database.py` ✅
+- `backend/accounting.py` ✅
 - `backend/routers/orders.py`
 - likely execution logic inside `backend/collector.py`
-Impact:
-- no `gross_pnl`, `net_pnl`, `fee_cost`, `slippage_cost`, `spread_cost`, `expectancy_score`,
-- strategy can overtrade without detection,
-- reporting can overstate performance.
 
-3. Demo accounting excludes fees and slippage.
-Affected file:
-- `backend/accounting.py`
-Impact:
-- false-positive profitability,
-- invalid comparison against live results,
-- no guardrail for minimum expected edge.
+3. ~~Demo accounting excludes fees and slippage.~~ **ROZWIĄZANE** — `compute_demo_account_state(...)` jest cost-aware.
 
-4. Signal and market endpoints can synthesize demo data directly in API paths.
+4. Signal and market endpoints can synthesize demo data directly in API paths. **Nadal aktualny.**
 Affected files:
 - `backend/routers/signals.py`
 - possibly other endpoints via fallbacks
-Impact:
-- operational data pollution,
-- reporting ambiguity,
-- no clear separation between test fixtures and real state.
 
-5. No explicit risk module or hard trade throttles exist in the audited core.
-Missing controls from trading perspective:
-- max trades per pair per hour,
-- max trades per day,
-- loss streak cooldown,
-- daily and weekly kill switch,
-- asset blacklist/whitelist,
-- minimum expected move threshold.
+5. ~~No explicit risk module or hard trade throttles exist in the audited core.~~ **ROZWIĄZANE** — `backend/risk.py` z pełnym zestawem gate'ów.
 
-6. Schema management is unsafe for production evolution.
+6. Schema management is unsafe for production evolution. **Nadal aktualny.**
 Affected file:
 - `backend/database.py`
-Impact:
-- app startup mutates schema ad hoc,
-- no migration history,
-- high risk of silent DB drift.
 
-7. No config snapshot is attached to trading decisions or executions.
-Impact:
-- impossible to reconstruct which config produced a trade,
-- weak post-mortem analysis for fee leakage and overtrading,
-- no reliable walk-forward provenance.
+7. ~~No config snapshot is attached to trading decisions or executions.~~ **ROZWIĄZANE** — `config_snapshot_id` na zamówieniach, pozycjach, decyzjach.
 
-8. Control plane and domain logic were previously mixed and had no audit trail.
-Impact:
-- unsafe runtime changes,
-- no trace of old/new values or actor,
-- high risk of destabilizing live behavior.
+8. ~~Control plane and domain logic were previously mixed and had no audit trail.~~ **ROZWIĄZANE** — `runtime_settings.py` + `control.py` + config snapshots + policy actions.
 
-9. Environment bootstrap was not closed operationally.
-Impact:
-- tests failed before import,
-- no guaranteed reproducible dev/test startup path,
-- high friction for validation and CI.
+9. ~~Environment bootstrap was not closed operationally.~~ **ROZWIĄZANE** — `.venv/bin/pytest` działa od zera, 71 testów przechodzi.
 
 ## Medium Problems
 1. `README.md` documents modules and subsystems that do not exist in the repository.
@@ -205,44 +171,54 @@ Impact:
 ## Module Responsibility Map
 - Data ingestion: `backend/collector.py`, `backend/binance_client.py`, `backend/routers/market.py`
 - Signals and analysis: `backend/analysis.py`, `backend/routers/signals.py`
-- Risk management: partially embedded in `backend/collector.py`; no dedicated module
+- Risk management: `backend/risk.py` (poprawiony); legacy gates still partly in `backend/collector.py`
 - Execution: pending-order flow in `backend/routers/orders.py` and `backend/routers/positions.py`; live/demo execution logic appears embedded in `backend/collector.py`
 - Accounting and portfolio state: `backend/accounting.py`, `backend/routers/account.py`
-- Configuration and runtime control: `backend/runtime_settings.py`, `backend/routers/control.py`, environment variables
+- Configuration and runtime control: `backend/runtime_settings.py`, `backend/routers/control.py`, `config_snapshots`
+- Reporting and analytics: `backend/reporting.py` (poprawiony)
+- Experiments and comparison: `backend/experiments.py` (poprawiony)
+- Recommendations: `backend/recommendations.py` (poprawiony)
+- Review / approval flow: `backend/review_flow.py` (poprawiony)
+- Controlled promotion: `backend/promotion_flow.py` (poprawiony)
+- Post-promotion monitoring: `backend/post_promotion_monitoring.py` (poprawiony)
+- Rollback decision: `backend/rollback_decision.py` (poprawiony)
+- Rollback execution: `backend/rollback_flow.py` (poprawiony)
+- Post-rollback monitoring: `backend/post_rollback_monitoring.py` (poprawiony)
+- Policy layer: `backend/policy_layer.py` (poprawiony)
+- Governance / operator workflow: `backend/governance.py` (poprawiony)
 - Logging: `backend/system_logger.py`, `backend/database.py` `SystemLog`
 - Backtesting: not present
 - Walk-forward / out-of-sample validation: not present
 - AI integration: `backend/analysis.py`, OpenAI checks in `backend/routers/account.py`
-- Reporting: fragmented across routers and UI; no dedicated reporting layer
 
 ## Repair Plan
-1. Audit and stabilize configuration and runtime controls.
+1. ~~Audit and stabilize configuration and runtime controls.~~ **ZROBIONE** — `runtime_settings.py` i `control.py` poprawione.
 Target files:
-- `backend/runtime_settings.py`
-- `backend/routers/control.py`
+- `backend/runtime_settings.py` ✅
+- `backend/routers/control.py` ✅
 - `backend/app.py`
 
-2. Isolate execution workflow from routers and collector.
+2. Isolate execution workflow from routers and collector. **Nadal do zrobienia.**
 Target outcome:
 - dedicated execution service,
 - explicit order lifecycle,
 - full cost capture.
 
-3. Introduce risk layer before any further strategy changes.
+3. ~~Introduce risk layer before any further strategy changes.~~ **ZROBIONE** — `backend/risk.py` poprawiony.
 Required controls:
-- trade frequency caps,
-- cooldowns,
-- asset filters,
-- kill switches,
-- minimum edge gate.
+- trade frequency caps ✅
+- cooldowns ✅
+- asset filters ✅
+- kill switches ✅
+- minimum edge gate ✅
 
-4. Replace synthetic API demo generation with explicit fixtures or seed utilities.
+4. Replace synthetic API demo generation with explicit fixtures or seed utilities. **Nadal do zrobienia.**
 
-5. Separate analytics/reporting from signal generation and blog generation.
+5. ~~Separate analytics/reporting from signal generation and blog generation.~~ **ZROBIONE** — `backend/reporting.py` poprawiony.
 
-6. Add schema migration path and richer trade model for net-PnL accounting.
+6. Add schema migration path and richer trade model for net-PnL accounting. **Częściowo zrobione** — schemat rozszerzony o cost_ledger/net_pnl, ale brak migracji.
 
-7. Expand tests from smoke to trading invariants and cost/risk validation.
+7. ~~Expand tests from smoke to trading invariants and cost/risk validation.~~ **Częściowo zrobione** — 71 testów, ale nadal brak trading invariant tests.
 
 ## Per-File Status
 Status vocabulary:
@@ -275,13 +251,23 @@ Status vocabulary:
 | `backend/routers/market.py` | market API | `wymaga poprawy` | fallback logic and sourcing need cleanup |
 | `backend/routers/orders.py` | order API | `wymaga poprawy` | lacks cost model and service separation |
 | `backend/routers/signals.py` | signals API | `wymaga poprawy` | demo-data generation in production path |
-| `backend/routers/account.py` | account API | `wymaga poprawy` | mixed live/demo and ops diagnostics |
+| `backend/routers/account.py` | account API | `wymaga poprawy` | mixed live/demo and ops diagnostics; policy + pipeline endpoints dodane |
 | `backend/routers/positions.py` | positions API | `wymaga poprawy` | pending close flow only, no risk layer |
 | `backend/routers/control.py` | control plane API | `poprawiony` | thin HTTP delegation, audit trail response, live guard enforcement |
 | `backend/routers/blog.py` | blog API | `nieprzeanalizowany` | inspect later |
 | `backend/routers/portfolio.py` | portfolio API | `nieprzeanalizowany` | inspect later |
+| `backend/experiments.py` | experiment comparison | `poprawiony` | controlled before/after config eval |
+| `backend/recommendations.py` | recommendation engine | `poprawiony` | evidence-based config promotion suggestions |
+| `backend/review_flow.py` | review / approval | `poprawiony` | human gate before promotion |
+| `backend/promotion_flow.py` | promotion execution | `poprawiony` | controlled config promotion + rollback anchor |
+| `backend/post_promotion_monitoring.py` | post-promotion monitoring | `poprawiony` | net-PnL/cost/risk verdict loop |
+| `backend/rollback_decision.py` | rollback decision | `poprawiony` | verdict→rollback intent mapping |
+| `backend/rollback_flow.py` | rollback execution | `poprawiony` | same apply path as promotion |
+| `backend/post_rollback_monitoring.py` | post-rollback monitoring | `poprawiony` | stabilization verdict loop |
+| `backend/reporting.py` | reporting / analytics | `poprawiony` | central performance/cost/risk reporting |
 | `backend/policy_layer.py` | policy verdict→action | `poprawiony` | deterministic mappings, audit trail, supersede semantics |
-| `tests/test_smoke.py` | smoke tests | `przetestowany` | 71 tests (54 base + 17 policy layer) |
+| `backend/governance.py` | governance / operator workflow | `poprawiony` | freeze enforcement, incident lifecycle, operator queue, SLA |
+| `tests/test_smoke.py` | smoke tests | `przetestowany` | 86 tests (54 base + 17 policy + 15 governance) |
 | `telegram_bot/bot.py` | Telegram bot | `nieprzeanalizowany` | inspect after execution layer |
 | `telegram_bot/__init__.py` | package marker | `zatwierdzony` | no action needed |
 | `ai_trading/__init__.py` | placeholder package | `wymaga poprawy` | architecture placeholder only |
@@ -315,7 +301,8 @@ Status vocabulary:
   - executed tests via `.venv/bin/pytest`
 - Final result: `passed`
 - Command executed: `.venv/bin/pytest tests/test_smoke.py`
-- Outcome: `12 passed`
+- Initial outcome: `12 passed` (baseline)
+- Current outcome: `86 passed` (54 base + 17 policy + 15 governance)
 - Residual warning debt:
   - widespread `datetime.utcnow()` deprecations
   - SQLAlchemy `declarative_base()` deprecation path
@@ -766,27 +753,28 @@ Central capital-protection layer that consumes accounting rollups and runtime li
   - preserved: demo trading flow, pending confirmation workflow, AI/blog dependency, no-shorting demo policy
   - changed: entries now require centralized cost gate and min notional gate; critical throttles now come from runtime settings
 
-## Open Risks
+## Open Risks (zaktualizowane po ETAP 2)
 - Existing uncommitted frontend changes are present and must not be overwritten during backend audit.
 - Current repository mixes prototype/demo behaviors with operational endpoints, so audit findings may reveal hidden assumptions in UI flows.
-- Cost and expectancy controls cannot be implemented safely until order and position schemas are extended.
-- Trading core still ignores most newly formalized runtime parameters.
-- Control-plane audit trail is currently stored in generic `SystemLog`, not a dedicated immutable audit table.
-- Collector still owns too much mutable local state and strategy-specific fallback logic.
-- Schema evolution is still managed by ad hoc `ALTER TABLE` logic instead of migrations.
-- Config snapshot ids exist, but snapshot payloads are not yet persisted in a dedicated table.
-- Risk and reporting layers are not yet fully rewired to consume accounting as their only financial source of truth.
-- Risk is centralized for primary entry gates, but not yet for every legacy protective branch in collector.
+- ~~Cost and expectancy controls cannot be implemented safely until order and position schemas are extended.~~ **Schemat rozszerzony** — cost_ledger, net_pnl na zamówieniach/pozycjach.
+- ~~Trading core still ignores most newly formalized runtime parameters.~~ **Częściowo rozwiązane** — collector konsumuje centralne ustawienia dla kluczowych gate'ów.
+- ~~Control-plane audit trail is currently stored in generic `SystemLog`, not a dedicated immutable audit table.~~ **Częściowo rozwiązane** — config_snapshots + policy_actions + promotion/rollback audit tables.
+- Collector still owns too much mutable local state and strategy-specific fallback logic. **Nadal aktualny.**
+- Schema evolution is still managed by ad hoc `ALTER TABLE` logic instead of migrations. **Nadal aktualny.**
+- ~~Config snapshot ids exist, but snapshot payloads are not yet persisted in a dedicated table.~~ **ZROBIONE** — `config_snapshots` table.
+- ~~Risk and reporting layers are not yet fully rewired to consume accounting as their only financial source of truth.~~ **ZROBIONE** — risk.py i reporting.py konsumują accounting.
+- ~~Risk is centralized for primary entry gates, but not yet for every legacy protective branch in collector.~~ **Częściowo rozwiązane** — centralne gate'y w risk.py, legacy branches nadal w collector.
 
-## Next Actions
-- Propagate validated settings into `backend/collector.py` and future risk/execution services.
-- Inspect `backend/system_logger.py`, `backend/routers/portfolio.py`, and `backend/routers/blog.py` to close file map gaps.
-- Start execution/cost-model refactor with config snapshot attached to decisions.
-- Extend schema for realized cost fields and decision-trace persistence beyond generic logs.
-- Integrate `cost_ledger` and `net_pnl` into `backend/accounting.py` and reporting surfaces.
-- Rewire risk layer to consume `compute_risk_snapshot(...)` and accounting rollups only.
-- Rewire remaining account snapshot/KPI views to distinguish clearly between operational account state and analytics source-of-truth payloads.
-- Remove remaining collector-local risk fallbacks and expose risk decisions in reporting/analytics.
+## Next Actions (zaktualizowane po ETAP 2)
+- ~~Propagate validated settings into `backend/collector.py` and future risk/execution services.~~ **Częściowo zrobione** — collector konsumuje centralne ustawienia dla kluczowych gate'ów. Remaining: ATR multipliers, crash detection, adaptive tuning.
+- Inspect `backend/system_logger.py`, `backend/routers/portfolio.py`, and `backend/routers/blog.py` to close file map gaps. **Nadal do zrobienia.**
+- ~~Integrate `cost_ledger` and `net_pnl` into `backend/accounting.py` and reporting surfaces.~~ **Zrobione** — accounting jest cost-aware, reporting konsumuje accounting.
+- ~~Rewire risk layer to consume `compute_risk_snapshot(...)` and accounting rollups only.~~ **Zrobione** — `backend/risk.py` konsumuje accounting. Remaining: legacy branches w collector.
+- Start execution/cost-model refactor with config snapshot attached to decisions. **Nadal do zrobienia** — ale config snapshot jest już dostępny.
+- Extend schema for realized cost fields and decision-trace persistence beyond generic logs. **Częściowo zrobione** — schemat rozszerzony, ale nie wszystkie ścieżki tworzenia zamówień go wykorzystują.
+- Rewire remaining account snapshot/KPI views to distinguish clearly between operational account state and analytics source-of-truth payloads. **Nadal do zrobienia.**
+- Remove remaining collector-local risk fallbacks and expose risk decisions in reporting/analytics. **Nadal do zrobienia.**
+- **NOWY:** Implementacja governance / operator workflow (patrz sekcja poniżej).
 
 ## File: backend/runtime_settings.py
 Status: corrected
@@ -809,6 +797,7 @@ Status: corrected
 ### Required fixes
 - Consider decoupling snapshot persistence from pure read operations if polling overhead becomes material.
 - Add environment/bootstrap provenance if startup source attribution becomes important.
+- ~~Add review/approval state transitions before any controlled auto-tuning.~~ **ZROBIONE** — `review_flow.py`.
 
 ### Dependencies
 - `backend/database.py`
@@ -886,6 +875,7 @@ Status: corrected
 - Verdict logic is intentionally conservative and heuristic; it is not yet statistically aware.
 - Experiment scope currently supports `mode`, `symbol`, `strategy_name`, and date range, but not portfolio-segment or regime labels.
 - Results are stored as JSON payloads; there is no normalized fact table for long-horizon experiment analytics yet.
+- ~~No review/approval workflow exists yet.~~ **ZROBIONE** — `review_flow.py` + `promotion_flow.py` + pełny pipeline.
 
 ### Impact on trading
 - Enables controlled before/after evaluation of config changes without jumping straight to auto-tuning.
@@ -960,8 +950,8 @@ Status: corrected
 - Explicitly downgrades candidates that worsen leakage or risk actions without compensating net improvement.
 - Highlights parameter changes behind recommendations, making cost-sensitive settings easier to review.
 
-### Required fixes
-- Add review/approval state transitions before any controlled auto-tuning.
+### Required fixes (recommendations.py)
+- ~~Add review/approval state transitions before any controlled auto-tuning.~~ **ZROBIONE** — `review_flow.py`.
 - Add sample-size and statistical significance logic before allowing high-confidence promotion.
 - Add cross-experiment parameter ranking once more experiments accumulate.
 
@@ -1016,8 +1006,8 @@ Status: corrected
 - Keeps cost-sensitive config changes from being promoted implicitly without explicit human sign-off.
 - Makes it possible to defer suspicious low-sample improvements instead of overreacting to noise.
 
-### Required fixes
-- Add controlled promotion flow as a separate stage after approval.
+### Required fixes (review_flow.py)
+- ~~Add controlled promotion flow as a separate stage after approval.~~ **ZROBIONE** — `promotion_flow.py`.
 - Extend supersede logic to broader recommendation families if experiment volume grows.
 - Introduce reviewer identity/auth metadata beyond free-form strings when operational governance becomes stricter.
 
@@ -1063,10 +1053,10 @@ Status: corrected
 ### Role
 - Controlled promotion service applying an approved snapshot to runtime configuration with audit trail and rollback anchor.
 
-### Current problems
-- Rollback execution exists, but post-rollback monitoring is still only a hook/state placeholder.
+### Current problems (promotion_flow.py)
+- ~~Rollback execution exists, but post-rollback monitoring is still only a hook/state placeholder.~~ **ZROBIONE** — `post_rollback_monitoring.py` + `policy_layer.py`.
 - Promotion currently requires current active snapshot to match approved baseline exactly, which is safe but conservative.
-- Post-promotion monitoring exists, but repeated warning/rollback patterns still need explicit policy handling.
+- ~~Post-promotion monitoring exists, but repeated warning/rollback patterns still need explicit policy handling.~~ **ZROBIONE** — `policy_layer.py`.
 
 ### Impact on trading
 - Introduces the first controlled path that can change runtime behavior based on approved optimization results.
@@ -1076,8 +1066,8 @@ Status: corrected
 - Ensures cost-sensitive config changes are promoted only after approval and with explicit audit metadata.
 - Supports later monitoring of whether promoted settings improved leakage or only changed turnover.
 
-### Required fixes
-- Add post-rollback monitoring and rollback policy handling for repeated `warning` or `rollback_candidate` verdicts.
+### Required fixes (promotion_flow.py)
+- ~~Add post-rollback monitoring and rollback policy handling for repeated `warning` or `rollback_candidate` verdicts.~~ **ZROBIONE** — `post_rollback_monitoring.py` + `policy_layer.py`.
 - Consider drift-tolerant promotion policy if active runtime diverges slightly from baseline for benign reasons.
 
 ### Dependencies
@@ -1119,9 +1109,9 @@ Status: corrected
 ### Role
 - Post-promotion monitoring service evaluating whether a promoted snapshot remains healthy after deployment, using cost-aware accounting and risk outputs instead of ad hoc runtime heuristics.
 
-### Current problems
+### Current problems (post_promotion_monitoring.py)
 - Monitoring is still pull-based; there is no scheduler or periodic evaluation worker yet.
-- Rollback can now be decided, executed, and evaluated after rollback, but there is still no higher-level escalation policy spanning both monitoring layers.
+- ~~Rollback can now be decided, executed, and evaluated after rollback, but there is still no higher-level escalation policy spanning both monitoring layers.~~ **ZROBIONE** — `policy_layer.py` zamyka tę lukę.
 - Minimum sample and time gates are controlled by environment variables rather than central runtime settings.
 
 ### Impact on trading
@@ -1132,9 +1122,9 @@ Status: corrected
 - Detects post-promotion cost leakage drift and flags cases where a new config increases trading costs without sufficient net benefit.
 - Compares observed results against baseline cost-aware summaries before any rollback decision is considered.
 
-### Required fixes
+### Required fixes (post_promotion_monitoring.py)
 - Move monitoring thresholds into central runtime settings once rollout governance is extended.
-- Add escalation / intervention policy consuming promotion and rollback monitoring lineage together.
+- ~~Add escalation / intervention policy consuming promotion and rollback monitoring lineage together.~~ **ZROBIONE** — `policy_layer.py`.
 - Add expiry/escalation rules for promotions that remain stuck in `collecting` or `watch`.
 
 ### Dependencies
@@ -1206,8 +1196,8 @@ Status: corrected
 - Surfaces fee/slippage/spread leakage per symbol and per cost type.
 - Exposes whether risk gates are reducing leakage or merely throttling volume.
 
-### Required fixes
-- Add promotion/rollback-lineage-aware reporting once rollback execution exists.
+### Required fixes (reporting.py)
+- ~~Add promotion/rollback-lineage-aware reporting once rollback execution exists.~~ **Rollback execution istnieje** — `rollback_flow.py`. Lineage reporting nadal do rozbudowy.
 - Extend reporting windows beyond daily once risk/report consumers need regime comparisons.
 - Migrate remaining summary/KPI endpoints to use reporting vocabulary consistently.
 
@@ -1231,8 +1221,8 @@ Status: corrected
 ### Role
 - Rollback decision layer consuming post-promotion monitoring verdicts and translating them into auditable rollback intent without applying runtime configuration changes.
 
-### Current problems
-- Decision records now feed execution, but there is still no post-rollback monitoring lifecycle after execution.
+### Current problems (rollback_decision.py)
+- ~~Decision records now feed execution, but there is still no post-rollback monitoring lifecycle after execution.~~ **ZROBIONE** — `post_rollback_monitoring.py` + `policy_layer.py`.
 - Monitoring thresholds feeding rollback remain partly controlled by ENV rather than central runtime settings.
 - Latest decision is promotion-scoped and monitoring-scoped, but there is no execution-aware lifecycle yet.
 
@@ -1244,8 +1234,8 @@ Status: corrected
 - Makes rollback pressure visible when promoted configs degrade net PnL, leakage, drawdown, or risk behavior.
 - Avoids overreacting to tiny samples by keeping low-sample cases in `continue_monitoring`.
 
-### Required fixes
-- Add post-rollback monitoring and execution-aware lifecycle transitions after rollback completes.
+### Required fixes (rollback_decision.py)
+- ~~Add post-rollback monitoring and execution-aware lifecycle transitions after rollback completes.~~ **ZROBIONE** — `post_rollback_monitoring.py`.
 - Move monitoring sample/time thresholds into central runtime settings.
 - Extend rollback policy with retry/cancel semantics only if operationally required.
 
@@ -1302,8 +1292,8 @@ Status: corrected
 ### Role
 - Rollback execution flow applying an already-approved rollback decision through the same runtime update path used by promotions, with full audit trail and drift detection.
 
-### Current problems
-- Post-rollback monitoring exists, but there is still no escalation policy after a failed stabilization verdict.
+### Current problems (rollback_flow.py)
+- ~~Post-rollback monitoring exists, but there is still no escalation policy after a failed stabilization verdict.~~ **ZROBIONE** — `policy_layer.py` daje eskalację.
 - Execution currently blocks on runtime drift instead of offering an operator-mediated override path.
 - Rollback execution is single-shot; retry/cancel policy is not yet modeled beyond `pending`, `executed`, `failed`.
 
@@ -1315,8 +1305,8 @@ Status: corrected
 - Limits cost leakage and degraded expectancy persistence by making rollback executable once monitoring and rollback decision align.
 - Preserves visibility into whether rollback happened because of net PnL deterioration, drawdown pressure, leakage, or risk-action surge.
 
-### Required fixes
-- Add escalation policy over post-rollback monitoring verdicts.
+### Required fixes (rollback_flow.py)
+- ~~Add escalation policy over post-rollback monitoring verdicts.~~ **ZROBIONE** — `policy_layer.py`.
 - Decide whether failed rollback executions can be retried safely or must require a new decision record.
 - Move drift override policy into an explicit review/approval step if operators need manual exceptions.
 
@@ -1366,10 +1356,10 @@ Status: corrected
 ### Role
 - Post-rollback monitoring service evaluating whether a rollback actually stabilized the system after config reversion, using the same accounting/risk/reporting-derived metrics as the rest of the safety pipeline.
 
-### Current problems
+### Current problems (post_rollback_monitoring.py)
 - Monitoring is still pull-based; there is no scheduler or automatic reevaluation loop yet.
 - Thresholds for sample/time gates remain in environment variables instead of central runtime settings.
-- Verdicts stop at `escalate`; there is still no policy layer telling the operator or system what intervention should follow.
+- ~~Verdicts stop at `escalate`; there is still no policy layer telling the operator or system what intervention should follow.~~ **ZROBIONE** — `policy_layer.py`.
 
 ### Impact on trading
 - Closes the safety loop by showing whether rollback restored a healthier regime or whether degradation persists after config reversion.
@@ -1379,9 +1369,9 @@ Status: corrected
 - Confirms whether rollback actually reduces leakage and risk pressure instead of only reverting parameters.
 - Makes persistent post-rollback cost/risk degradation visible for later escalation policy.
 
-### Required fixes
+### Required fixes (post_rollback_monitoring.py)
 - Move post-rollback monitoring thresholds into central runtime settings.
-- Add escalation policy / operator workflow for `warning` and `escalate`.
+- ~~Add escalation policy / operator workflow for `warning` and `escalate`.~~ **ZROBIONE** — `policy_layer.py`.
 - Consider a shared monitoring orchestration layer if promotion and rollback monitoring start to need scheduled reevaluation.
 
 ### Dependencies
@@ -1443,6 +1433,7 @@ Status: corrected
 - [x] Baseline tests executed
 - [x] First file-level refactor completed
 - [x] Policy layer implemented and tested
+- [x] Governance / operator workflow implemented and tested
 
 ## File: backend/policy_layer.py
 Status: corrected
@@ -1580,13 +1571,245 @@ Full safety loop is now operational end-to-end:
 config → experiment → recommendation → review → promotion
   → post-promotion monitoring → rollback decision
   → rollback execution → post-rollback monitoring → policy
+  → GOVERNANCE (freeze enforcement + incident lifecycle + operator queue)
 ```
 
 Each layer consumes the previous layer's verdicts. No layer recalculates economics independently.
+Governance layer adds human-in-the-loop operational control over the pipeline.
+
+## File: backend/governance.py
+Status: corrected
+
+### Role
+- Governance / operator workflow layer above policy_layer — defines freeze enforcement, incident lifecycle, operator queue, and SLA auto-escalation.
+
+### Architectural position
+- Consumes: `policy_actions` (read only for freeze checks and queue composition)
+- Owns: `incidents` table (lifecycle, SLA, operator actions)
+- Does NOT: calculate PnL, execute promotions/rollbacks, modify policy actions, recalculate economics
+
+### Capabilities
+1. **Freeze enforcement** — `check_pipeline_permission(db, operation)` checks active policy actions' flags for a given operation type (`promotion`, `rollback`, `experiment`, `recommendation`). Returns `{allowed, blocking_actions}`.
+2. **Pipeline status** — `get_pipeline_status(db)` aggregates all four operation types into a single dashboard-ready snapshot.
+3. **Incident lifecycle** — `create_incident(db, policy_action_id)` creates an incident linked to a policy action with SLA deadline based on priority. `transition_incident(db, incident_id, new_status)` enforces valid state transitions: `open → acknowledged → in_progress → resolved`, with `escalated` reachable from `open` (auto) or `acknowledged`.
+4. **Operator queue** — `get_operator_queue(db)` returns a priority-sorted list of active incidents and unlinked policy actions requiring human review, with SLA countdown and breach flags.
+5. **SLA auto-escalation** — `escalate_overdue_incidents(db)` escalates `open` incidents past their SLA deadline. Call periodically from a worker.
+
+### SLA rules
+- `critical` priority → 15 min to acknowledge
+- `high` priority → 60 min to acknowledge
+- `medium` / `low` → no auto-escalation
+
+### Incident lifecycle states
+```
+open → acknowledged → in_progress → resolved
+         ↘                    ↗
+          escalated → in_progress
+```
+
+### Endpoints
+- `GET /api/account/analytics/pipeline-status` — zagregowany stan blokad
+- `GET /api/account/analytics/pipeline-permission/{operation}` — sprawdzenie uprawnienia dla jednej operacji
+- `GET /api/account/analytics/operator-queue` — kolejka operatora (priority-sorted)
+- `GET /api/account/analytics/incidents` — lista incydentów z filtrami `status`, `priority`
+- `GET /api/account/analytics/incidents/{id}` — pojedynczy incydent
+- `POST /api/account/analytics/incidents` — tworzenie incydentu (admin)
+- `POST /api/account/analytics/incidents/{id}/transition` — zmiana stanu incydentu (admin)
+- `POST /api/account/analytics/incidents/escalate-overdue` — auto-eskalacja przeterminowanych (admin)
+
+### Dependencies
+- `backend/database.py` (model `Incident`, model `PolicyAction` — read only)
+- `backend/routers/account.py` (thin endpoints)
+
+### Test status
+- passed via smoke tests: **86 tests total (54 original + 17 policy + 15 governance)**
+
+### Required fixes
+- Add Telegram notification hooks for critical incidents and SLA breaches
+- Add scheduled governance worker (periodic reevaluation + auto-escalation)
+- Consider extending incident model with `tags` or `category` for richer filtering
+- Move SLA thresholds into central runtime settings
+
+## Governance Layer
+- Model:
+  - `incidents`
+- Guard rails:
+  - no duplicate incident for same policy_action_id
+  - state transitions enforced via `_TRANSITIONS` map
+  - SLA deadline auto-calculated from priority
+  - auto-escalation only for `open` incidents past deadline
+  - operator queue sorted by priority then age
+- Stored audit fields:
+  - `policy_action_id`
+  - `status`
+  - `priority`
+  - `acknowledged_at`
+  - `acknowledged_by`
+  - `escalated_at`
+  - `resolved_at`
+  - `resolved_by`
+  - `resolution_notes`
+  - `sla_deadline`
 
 ## Next Recommended Stage: Governance / Operator Workflow
-- Who can approve which actions
-- Incident queue management
-- Freeze enforcement across pipeline
-- Incident lifecycle (open → acknowledged → in_progress → resolved)
-- Operator notification hooks
+
+### Cel
+Warstwa governance jest ostatnim brakującym elementem zamykającym pętlę bezpieczeństwa. Policy layer generuje deterministyczne aksje — governance definiuje **kto, kiedy i jak** na nie reaguje.
+
+### Zakres — co obejmuje governance
+1. **Operator Approval Matrix** — macierz uprawnień operatora ✅ (MVP: admin token)
+2. **Incident Lifecycle** — stany i przejścia incydentu ✅ (`backend/governance.py`)
+3. **Freeze Enforcement** — egzekwowanie blokad na pipeline ✅ (`check_pipeline_permission()`)
+4. **Queue Management** — kolejka akcji wymagających interwencji ✅ (`get_operator_queue()`)
+5. **Notification Hooks** — powiadomienia (Telegram/webhook) ❌ (następny etap)
+6. **Scheduled Reevaluation** — automatyczne odświeżanie otwartych policy actions ❌ (następny etap)
+
+---
+
+### 1. Operator Approval Matrix
+
+Kto może zatwierdzić jaką akcję:
+
+| Policy Action | Poziom wymagany | Auto-dozwolone? | Wymaga operatora? |
+|---|---|---|---|
+| `NO_ACTION` | brak | ✅ automatycznie | ❌ |
+| `CONTINUE_MONITORING` | brak | ✅ automatycznie | ❌ |
+| `REQUIRE_MANUAL_REVIEW` | `reviewer` | ❌ | ✅ |
+| `PREPARE_ROLLBACK` | `operator` | ❌ | ✅ |
+| `FREEZE_PROMOTIONS` | `operator` | ✅ automatycznie | powiadomienie |
+| `FREEZE_EXPERIMENTS` | `operator` | ✅ automatycznie | powiadomienie |
+| `ESCALATE_TO_OPERATOR` | `admin` | ❌ | ✅ obowiązkowe |
+| `CLOSE_INCIDENT` | `operator` | ❌ | ✅ |
+
+Domyślna implementacja MVP: jeden operator (admin token), brak roli reviewer — oba poziomy obsługuje ten sam token.
+
+### 2. Incident Lifecycle
+
+Stany incydentu i dozwolone przejścia:
+
+```
+open → acknowledged → in_progress → resolved
+         ↘                    ↗
+          escalated → in_progress
+```
+
+| Stan | Wejście | Wyjście | Kto może przejść |
+|---|---|---|---|
+| `open` | automatycznie (policy action) | `acknowledged`, `resolved` | system / operator |
+| `acknowledged` | operator potwierdza odbiór | `in_progress`, `escalated` | operator |
+| `in_progress` | operator rozpoczyna działanie | `resolved` | operator |
+| `escalated` | brak odpowiedzi w SLA | `in_progress` | system (auto) → admin |
+| `resolved` | operator zamyka lub system (CLOSE_INCIDENT) | terminal | operator / system |
+
+**SLA reguły (propozycja MVP):**
+- `critical` priority → auto-escalate po 15 min bez `acknowledged`
+- `high` priority → auto-escalate po 60 min bez `acknowledged`
+- `medium` / `low` → brak auto-eskalacji w MVP
+
+### 3. Freeze Enforcement
+
+Policy layer ustawia flagi: `promotion_allowed`, `rollback_allowed`, `experiments_allowed`, `freeze_recommendations`. Governance musi:
+
+- **Sprawdzać flagi PRZED** każdą operacją w pipeline:
+  - `promotion_flow.py` → sprawdź `promotion_allowed` z aktywnych policy actions
+  - `experiments.py` → sprawdź `experiments_allowed`
+  - `recommendations.py` → sprawdź `freeze_recommendations`
+  - `rollback_flow.py` → sprawdź `rollback_allowed`
+- **Agregacja:** jeśli JAKIKOLWIEK aktywny (open) policy action blokuje operację, operacja jest zablokowana
+- **Implementacja:** helper `check_pipeline_permission(operation: str, db) -> (allowed: bool, blocking_actions: list)`
+- **Endpoint:** `GET /api/account/analytics/pipeline-status` → zwraca bieżący stan blokad
+
+### 4. Queue Management
+
+Kolejka interwencji operatora:
+
+- **Źródło:** aktywne policy actions z `requires_human_review = True`
+- **Sortowanie:** priority (critical → high → medium → low), potem created_at ASC
+- **Dashboard view:** `list_active_policy_actions(...)` już istnieje — governance dodaje:
+  - czas od otwarcia (SLA countdown)
+  - czy eskalowane
+  - na jakim obiekcie (promotion_id / rollback_id / monitoring_id)
+  - sugerowane działanie (z policy action)
+- **Endpoint:** `GET /api/account/analytics/operator-queue`
+- **Operacje operatora:**
+  - `POST /api/account/analytics/operator-queue/{id}/acknowledge`
+  - `POST /api/account/analytics/operator-queue/{id}/resolve` (reuse istniejącego resolve)
+
+### 5. Notification Hooks
+
+Powiadomienia dla operatora:
+
+| Zdarzenie | Kanał | Priorytet |
+|---|---|---|
+| Nowy policy action `critical` | Telegram + webhook | natychmiast |
+| Nowy policy action `high` | Telegram | natychmiast |
+| Nowy policy action `medium` | webhook only | batch (5 min) |
+| SLA breach (auto-escalate) | Telegram | natychmiast |
+| Pipeline freeze activated | Telegram | natychmiast |
+| Incident resolved | webhook only | batch |
+
+**Implementacja MVP:**
+- `telegram_bot/bot.py` — dodanie `/incydenty` command i push notifications
+- Webhook: opcjonalny URL w runtime settings, POST z payloadem JSON
+- Fallback: jeśli Telegram niedostępny → log do `SystemLog` z `level=CRITICAL`
+
+### 6. Scheduled Reevaluation
+
+Otwarte policy actions wymagają okresowej ponownej oceny:
+
+- **Worker/cron:** co N minut (konfigurowalny, domyślnie 5 min) sprawdza otwarte policy actions
+- **Logika:** pobierz najnowszy verdict z source'a → jeśli się zmienił → superseduję starą action i tworzę nową
+- **Implementacja:** `governance_worker()` lub task w `backend/app.py` startup
+- **Guard rail:** nie reewaluuj actions w stanie `acknowledged` lub `in_progress` (operator pracuje)
+
+---
+
+### Model danych (zaimplementowany)
+
+```
+incidents (tabela w database.py):
+  - id (PK)
+  - policy_action_id (INT, NOT NULL, indexed)
+  - status: open | acknowledged | in_progress | escalated | resolved
+  - priority: critical | high | medium | low
+  - acknowledged_at
+  - acknowledged_by
+  - escalated_at
+  - resolved_at
+  - resolved_by
+  - resolution_notes
+  - sla_deadline
+  - created_at
+```
+
+### Zależności od istniejących modułów (stan po implementacji)
+
+| Moduł | Zmiana | Status |
+|---|---|---|
+| `backend/governance.py` | **NOWY** — freeze, incidents, queue, SLA | ✅ zaimplementowany |
+| `backend/database.py` | model `Incident` dodany, `incidents` w reset | ✅ zaimplementowany |
+| `backend/routers/account.py` | 8 nowych endpointów governance | ✅ zaimplementowany |
+| `backend/policy_layer.py` | bez zmian (read-only consumer) | ✅ nienaruszony |
+| `backend/promotion_flow.py` | guard do dodania (następna iteracja) | ❌ planowany |
+| `backend/experiments.py` | guard do dodania (następna iteracja) | ❌ planowany |
+| `backend/recommendations.py` | guard do dodania (następna iteracja) | ❌ planowany |
+| `backend/rollback_flow.py` | guard do dodania (następna iteracja) | ❌ planowany |
+| `telegram_bot/bot.py` | push notifications (następna iteracja) | ❌ planowany |
+| `backend/app.py` | governance worker (następna iteracja) | ❌ planowany |
+
+### Implementacja — proponowana kolejność
+
+1. ~~Freeze enforcement helper + pipeline-status endpoint~~ ✅
+2. ~~Operator queue endpoint + acknowledge/resolve~~ ✅
+3. ~~Incident lifecycle (model + stany)~~ ✅
+4. ~~SLA auto-escalation~~ ✅
+5. Telegram notification hooks ❌
+6. Scheduled reevaluation worker ❌
+7. ~~Testy governance~~ ✅ (86 testów — cel 90+ przy następnej iteracji)
+
+### Czego NIE obejmuje governance (na później)
+- Multi-user roles i RBAC (na razie single admin token)
+- WebSocket / SSE real-time dashboard push
+- Automatyczne podejmowanie decyzji (governance = human-in-the-loop)
+- Historyczny audit trail operatora (na razie wystarczy SystemLog)
+- Integracja z zewnętrznymi ticketing systems (Jira, PagerDuty)

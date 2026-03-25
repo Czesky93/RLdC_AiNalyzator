@@ -445,6 +445,25 @@ class PolicyAction(Base):
     notes = Column(Text)
 
 
+class Incident(Base):
+    """Governance incident lifecycle record linked to a policy action."""
+
+    __tablename__ = "incidents"
+
+    id = Column(Integer, primary_key=True, index=True)
+    policy_action_id = Column(Integer, nullable=False, index=True)
+    status = Column(String(20), nullable=False, default="open", index=True)
+    priority = Column(String(16), nullable=False, default="low", index=True)
+    acknowledged_at = Column(DateTime)
+    acknowledged_by = Column(String(80))
+    escalated_at = Column(DateTime)
+    resolved_at = Column(DateTime)
+    resolved_by = Column(String(80))
+    resolution_notes = Column(Text)
+    sla_deadline = Column(DateTime)
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+
+
 class DecisionTrace(Base):
     """Structured trace for both blocked and executed decisions."""
 
@@ -577,6 +596,7 @@ def reset_database(scope: str = "full"):
         "config_rollbacks",
         "rollback_monitoring",
         "policy_actions",
+        "incidents",
         "decision_traces",
         "cost_ledger",
     ]

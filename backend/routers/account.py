@@ -60,6 +60,16 @@ from backend.policy_layer import (
     policy_actions_summary,
     resolve_policy_action,
 )
+from backend.governance import (
+    check_pipeline_permission,
+    create_incident,
+    escalate_overdue_incidents,
+    get_incident,
+    get_operator_queue,
+    get_pipeline_status,
+    list_incidents,
+    transition_incident,
+)
 from backend.runtime_settings import RuntimeSettingsError
 
 router = APIRouter()
@@ -125,6 +135,16 @@ class PolicyActionCreateRequest(BaseModel):
 
 
 class PolicyActionResolveRequest(BaseModel):
+    notes: Optional[str] = None
+
+
+class IncidentCreateRequest(BaseModel):
+    policy_action_id: int
+
+
+class IncidentTransitionRequest(BaseModel):
+    new_status: str
+    operator: Optional[str] = None
     notes: Optional[str] = None
 
 
@@ -1236,3 +1256,116 @@ async def resolve_policy_action_endpoint(
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Błąd rozwiązywania policy action: {str(e)}")
+
+
+# ---------------------------------------------------------------------------
+# Governance / Operator Workflow
+# ---------------------------------------------------------------------------
+
+
+@router.get("/analytics/pipeline-status")
+async def get_pipeline_status_endpoint(
+    db: Session = Depends(get_db),
+):
+    try:
+        return {"success": True, "data": get_pipeline_status(db)}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Błąd pobierania pipeline status: {str(e)}")
+
+
+@router.get("/analytics/pipeline-permission/{operation}")
+async def check_pipeline_permission_endpoint(
+    operation: str,
+    db: Session = Depends(get_db),
+):
+    try:
+        return {"success": True, "data": check_pipeline_permission(db, operation)}
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Błąd sprawdzania uprawnień: {str(e)}")
+
+
+@router.get("/analytics/operator-queue")
+async def get_operator_queue_endpoint(
+    db: Session = Depends(get_db),
+):
+    try:
+        return {"success": True, "data": get_operator_queue(db)}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Błąd pobierania kolejki operatora: {str(e)}")
+
+
+@router.get("/analytics/incidents")
+async def list_incidents_endpoint(
+    status: Optional[str] = Query(None, description="Filtr statusu: open, acknowledged, in_progress, escalated, resolved"),
+    priority: Optional[str] = Query(None, description="Filtr priorytetu: critical, high, medium, low"),
+    db: Session = Depends(get_db),
+):
+    try:
+        return {"success": True, "data": list_incidents(db, status=status, priority=priority)}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Błąd pobierania incydentów: {str(e)}")
+
+
+@router.get("/analytics/incidents/{incident_id}")
+async def get_incident_endpoint(
+    incident_id: int,
+    db: Session = Depends(get_db),
+):
+    try:
+        return {"success": True, "data": get_incident(db, incident_id)}
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Błąd pobierania incydentu: {str(e)}")
+
+
+@router.post("/analytics/incidents")
+async def create_incident_endpoint(
+    payload: IncidentCreateRequest,
+    db: Session = Depends(get_db),
+    admin: None = Depends(require_admin),
+):
+    try:
+        return {"success": True, "data": create_incident(db, policy_action_id=payload.policy_action_id)}
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Błąd tworzenia incydentu: {str(e)}")
+
+
+@router.post("/analytics/incidents/{incident_id}/transition")
+async def transition_incident_endpoint(
+    incident_id: int,
+    payload: IncidentTransitionRequest,
+    db: Session = Depends(get_db),
+    admin: None = Depends(require_admin),
+):
+    try:
+        return {
+            "success": True,
+            "data": transition_incident(
+                db,
+                incident_id,
+                new_status=payload.new_status,
+                operator=payload.operator,
+                notes=payload.notes,
+            ),
+        }
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Błąd przejścia incydentu: {str(e)}")
+
+
+@router.post("/analytics/incidents/escalate-overdue")
+async def escalate_overdue_endpoint(
+    db: Session = Depends(get_db),
+    admin: None = Depends(require_admin),
+):
+    try:
+        escalated = escalate_overdue_incidents(db)
+        return {"success": True, "escalated_count": len(escalated), "data": escalated}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Błąd eskalacji: {str(e)}")
