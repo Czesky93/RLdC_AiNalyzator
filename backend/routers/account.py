@@ -71,6 +71,11 @@ from backend.governance import (
     list_incidents,
     transition_incident,
 )
+from backend.notification_hooks import (
+    dispatch_notification,
+    send_telegram_message,
+    _get_config as _get_notification_config,
+)
 from backend.runtime_settings import RuntimeSettingsError
 
 router = APIRouter()
@@ -1378,3 +1383,35 @@ async def escalate_overdue_endpoint(
         return {"success": True, "escalated_count": len(escalated), "data": escalated}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Błąd eskalacji: {str(e)}")
+
+
+# =====================================================================
+# Notification hooks
+# =====================================================================
+
+@router.get("/analytics/notifications/config")
+async def get_notification_config():
+    """Aktualny stan konfiguracji powiadomień (bez wrażliwych danych)."""
+    cfg = _get_notification_config()
+    return {
+        "success": True,
+        "data": {
+            "enabled": cfg["enabled"],
+            "telegram_configured": bool(cfg["telegram_bot_token"] and cfg["telegram_chat_id"]),
+            "telegram_min_priority": cfg["telegram_min_priority"],
+        },
+    }
+
+
+class TestNotificationRequest(BaseModel):
+    message: str = "Test powiadomienia z RLdC Trading Bot"
+
+
+@router.post("/analytics/notifications/test")
+async def test_notification(
+    payload: TestNotificationRequest,
+    admin: None = Depends(require_admin),
+):
+    """Wyślij testowe powiadomienie (do weryfikacji konfiguracji Telegram)."""
+    result = dispatch_notification("test", payload.message, priority="high")
+    return {"success": True, "data": result}

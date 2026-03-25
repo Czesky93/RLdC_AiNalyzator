@@ -57,7 +57,9 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Dostępne komendy:\n"
         "/status /risk /portfolio /orders /positions /lastsignal /blog /logs /report\n"
         "Potwierdzanie transakcji:\n"
-        "/confirm <ID>  /reject <ID>"
+        "/confirm <ID>  /reject <ID>\n"
+        "Governance:\n"
+        "/governance /freeze /incidents"
     )
     await _send_reply(update, text, "/start")
 
@@ -378,6 +380,117 @@ async def reject_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         db.close()
 
 
+async def governance_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Pipeline status + operator queue summary."""
+    db = SessionLocal()
+    try:
+        from backend.governance import get_pipeline_status, get_operator_queue
+
+        status = get_pipeline_status(db)
+        queue = get_operator_queue(db)
+
+        promo_icon = "✅" if status.get("promotion_allowed") else "🚫"
+        rollback_icon = "✅" if status.get("rollback_allowed") else "🚫"
+        exp_icon = "✅" if status.get("experiment_allowed") else "🚫"
+        rec_icon = "✅" if status.get("recommendation_allowed") else "🚫"
+
+        lines = [
+            "🏛️ Governance — stan pipeline",
+            f"{promo_icon} Promocja (blokery: {status.get('promotion_blockers_count', 0)})",
+            f"{rollback_icon} Rollback (blokery: {status.get('rollback_blockers_count', 0)})",
+            f"{exp_icon} Eksperymenty (blokery: {status.get('experiment_blockers_count', 0)})",
+            f"{rec_icon} Rekomendacje (blokery: {status.get('recommendation_blockers_count', 0)})",
+            "",
+            f"Operator queue: {len(queue)} elementów",
+        ]
+        if queue:
+            for item in queue[:5]:
+                item_type = item.get("type", "?")
+                prio = item.get("priority", "?")
+                summary = (item.get("summary") or "-")[:60]
+                sla_info = ""
+                if item.get("sla_breached"):
+                    sla_info = " ⚠️ SLA!"
+                lines.append(f"  • [{prio}] {item_type}: {summary}{sla_info}")
+            if len(queue) > 5:
+                lines.append(f"  … i {len(queue) - 5} więcej")
+
+        text = "\n".join(lines)
+    except Exception as exc:
+        text = f"❌ Błąd governance: {exc}"
+    finally:
+        db.close()
+
+    await _send_reply(update, text, "/governance")
+
+
+async def freeze_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Wyświetl aktywne blokady pipeline."""
+    db = SessionLocal()
+    try:
+        from backend.governance import check_pipeline_permission
+
+        operations = ["promotion", "rollback", "experiment", "recommendation"]
+        lines = ["🧊 Aktywne blokady freeze:"]
+        any_blocked = False
+        for op in operations:
+            result = check_pipeline_permission(db, op)
+            if not result["allowed"]:
+                any_blocked = True
+                blockers = result["blocking_actions"]
+                lines.append(f"\n🚫 {op.upper()} — {len(blockers)} blokad:")
+                for b in blockers[:3]:
+                    lines.append(
+                        f"  PA#{b['policy_action_id']} {b['policy_action']} "
+                        f"({b['priority']})"
+                    )
+                if len(blockers) > 3:
+                    lines.append(f"  … i {len(blockers) - 3} więcej")
+
+        if not any_blocked:
+            lines.append("✅ Brak aktywnych blokad — pipeline otwarty")
+
+        text = "\n".join(lines)
+    except Exception as exc:
+        text = f"❌ Błąd freeze: {exc}"
+    finally:
+        db.close()
+
+    await _send_reply(update, text, "/freeze")
+
+
+async def incidents_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Lista aktywnych incydentów."""
+    db = SessionLocal()
+    try:
+        from backend.governance import list_incidents
+
+        active = list_incidents(db)
+        active = [i for i in active if i.get("status") != "resolved"]
+
+        if not active:
+            text = "✅ Brak aktywnych incydentów"
+        else:
+            lines = [f"🔔 Aktywne incydenty ({len(active)}):"]
+            for inc in active[:10]:
+                inc_id = inc.get("id", "?")
+                prio = inc.get("priority", "?")
+                status = inc.get("status", "?")
+                pa_id = inc.get("policy_action_id", "?")
+                sla = inc.get("sla_deadline", "brak")
+                icon = "🔴" if prio == "critical" else "🟠" if prio == "high" else "🟡"
+                lines.append(f"{icon} #{inc_id} [{status}] priorytet={prio}, PA#{pa_id}, SLA={sla}")
+            if len(active) > 10:
+                lines.append(f"… i {len(active) - 10} więcej")
+            text = "\n".join(lines)
+    except Exception as exc:
+        text = f"❌ Błąd incidents: {exc}"
+    finally:
+        db.close()
+
+    await _send_reply(update, text, "/incidents")
+
+
 def main():
     if not TELEGRAM_BOT_TOKEN:
         raise RuntimeError("Brak TELEGRAM_BOT_TOKEN w .env")
@@ -399,6 +512,9 @@ def main():
     app.add_handler(CommandHandler("report", report_command))
     app.add_handler(CommandHandler("confirm", confirm_command))
     app.add_handler(CommandHandler("reject", reject_command))
+    app.add_handler(CommandHandler("governance", governance_command))
+    app.add_handler(CommandHandler("freeze", freeze_command))
+    app.add_handler(CommandHandler("incidents", incidents_command))
 
     app.run_polling()
 

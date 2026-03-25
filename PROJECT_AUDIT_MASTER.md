@@ -1,12 +1,12 @@
 # PROJECT AUDIT MASTER
 
 ## Audit State
-- Current stage: `ETAP 4 - PIPELINE GUARD INTEGRATION`
-- Current file: `backend/governance.py`
-- Last completed file: `backend/governance.py` (enforce_pipeline_permission + PipelineFreezeError)
-- Next stage: `Telegram notification hooks / scheduled reevaluation worker`
-- Audit timestamp: `pipeline guard integration completed, 91 tests green`
-- Pipeline status: **FULL LOOP + GOVERNANCE ENFORCED**
+- Current stage: `ETAP 5 - TELEGRAM / NOTIFICATION HOOKS`
+- Current file: `backend/notification_hooks.py`
+- Last completed file: `backend/notification_hooks.py` + `telegram_bot/bot.py`
+- Next stage: `Scheduled reevaluation worker`
+- Audit timestamp: `notification hooks completed, 103 tests green`
+- Pipeline status: **FULL LOOP + GOVERNANCE ENFORCED + NOTIFICATIONS**
 
 ## Scope
 This document is the single audit state file for the repository. It tracks:
@@ -269,10 +269,11 @@ Status vocabulary:
 | `backend/rollback_flow.py` | rollback execution | `poprawiony` | same apply path as promotion |
 | `backend/post_rollback_monitoring.py` | post-rollback monitoring | `poprawiony` | stabilization verdict loop |
 | `backend/reporting.py` | reporting / analytics | `poprawiony` | central performance/cost/risk reporting |
-| `backend/policy_layer.py` | policy verdict→action | `poprawiony` | deterministic mappings, audit trail, supersede semantics |
-| `backend/governance.py` | governance / operator workflow | `poprawiony` | freeze enforcement, incident lifecycle, operator queue, SLA, pipeline guards |
-| `tests/test_smoke.py` | smoke tests | `przetestowany` | 91 tests (54 base + 17 policy + 15 governance + 5 guard) |
-| `telegram_bot/bot.py` | Telegram bot | `nieprzeanalizowany` | inspect after execution layer |
+| `backend/policy_layer.py` | policy verdict→action | `poprawiony` | deterministic mappings, audit trail, supersede semantics, notification hook |
+| `backend/governance.py` | governance / operator workflow | `poprawiony` | freeze enforcement, incident lifecycle, operator queue, SLA, pipeline guards, notification hooks |
+| `backend/notification_hooks.py` | notification dispatcher | `poprawiony` | event formatting, Telegram adapter, DB logging, priority filtering |
+| `tests/test_smoke.py` | smoke tests | `przetestowany` | 103 tests (54 base + 17 policy + 15 governance + 5 guard + 12 notification) |
+| `telegram_bot/bot.py` | Telegram bot | `poprawiony` | komendy tradingowe + governance (/governance, /freeze, /incidents) |
 | `telegram_bot/__init__.py` | package marker | `zatwierdzony` | no action needed |
 | `ai_trading/__init__.py` | placeholder package | `wymaga poprawy` | architecture placeholder only |
 | `blockchain_analysis/__init__.py` | placeholder package | `wymaga poprawy` | architecture placeholder only |
@@ -306,7 +307,7 @@ Status vocabulary:
 - Final result: `passed`
 - Command executed: `.venv/bin/pytest tests/test_smoke.py`
 - Initial outcome: `12 passed` (baseline)
-- Current outcome: `91 passed` (54 base + 17 policy + 15 governance + 5 guard integration)
+- Current outcome: `103 passed` (54 base + 17 policy + 15 governance + 5 guard + 12 notification)
 - Residual warning debt:
   - widespread `datetime.utcnow()` deprecations
   - SQLAlchemy `declarative_base()` deprecation path
@@ -780,6 +781,7 @@ Central capital-protection layer that consumes accounting rollups and runtime li
 - Remove remaining collector-local risk fallbacks and expose risk decisions in reporting/analytics. **Nadal do zrobienia.**
 - **NOWY:** Implementacja governance / operator workflow (patrz sekcja poniżej).
 - **NOWY:** ~~Pipeline Guard Integration — podpięcie enforce_pipeline_permission do promote_recommendation, execute_rollback, create_experiment, generate_recommendation.~~ **ZROBIONE** — guardy aktywne, PipelineFreezeError → 403, 5 nowych testów, 91 passed.
+- **NOWY:** ~~Telegram / Notification Hooks — operacyjne powiadomienia o zdarzeniach governance.~~ **ZROBIONE** — notification_hooks.py, hooki w governance/policy, komendy Telegram, 103 passed.
 
 ## File: backend/runtime_settings.py
 Status: corrected

@@ -2496,3 +2496,240 @@ def test_guard_error_format_consistency(client):
     assert resp2.status_code == 403
     detail2 = resp2.json().get("detail") or {}
     assert required_keys.issubset(detail2.keys()), f"Brakujące klucze: {required_keys - detail2.keys()}"
+
+
+# =====================================================================
+# Notification hooks — formatowanie, dispatch, endpointy
+# =====================================================================
+
+def test_notification_format_incident_created():
+    """Format incydentu zawiera priorytet, PA id, SLA."""
+    from backend.notification_hooks import format_incident_created
+    incident = {
+        "id": 42,
+        "policy_action_id": 7,
+        "priority": "critical",
+        "sla_deadline": "2026-03-25T12:00:00",
+    }
+    pa = {
+        "policy_action": "escalate_rollback_monitoring",
+        "source_type": "rollback_monitoring",
+        "source_id": 100,
+        "summary": "test summary",
+    }
+    text = format_incident_created(incident, pa)
+    assert "#42" in text
+    assert "critical" in text
+    assert "#7" in text
+    assert "SLA" in text.upper() or "sla" in text.lower() or "SLA" in text
+
+
+def test_notification_format_incident_escalated():
+    """Format eskalacji zawiera ostrzeżenie i SLA."""
+    from backend.notification_hooks import format_incident_escalated
+    incident = {
+        "id": 5,
+        "policy_action_id": 3,
+        "priority": "high",
+        "sla_deadline": "2026-03-25T10:00:00",
+    }
+    text = format_incident_escalated(incident)
+    assert "#5" in text
+    assert "ESKALACJA" in text
+
+
+def test_notification_format_policy_action_created():
+    """Format policy action zawiera akcję, priorytet, opis."""
+    from backend.notification_hooks import format_policy_action_created
+    pa = {
+        "id": 10,
+        "policy_action": "hold_new_promotions",
+        "priority": "high",
+        "source_type": "promotion_monitoring",
+        "source_id": 1,
+        "summary": "PnL spadek",
+        "promotion_allowed": False,
+        "rollback_allowed": True,
+        "experiments_allowed": False,
+        "requires_human_review": True,
+    }
+    text = format_policy_action_created(pa)
+    assert "#10" in text
+    assert "hold_new_promotions" in text
+    assert "zablokowana" in text
+    assert "operatora" in text.lower()
+
+
+def test_notification_format_pipeline_blocked():
+    """Format blokady pipeline zawiera operację i blokery."""
+    from backend.notification_hooks import format_pipeline_blocked
+    text = format_pipeline_blocked("promotion", [
+        {"policy_action_id": 1, "priority": "critical"},
+        {"policy_action_id": 2, "priority": "high"},
+    ])
+    assert "promotion" in text
+    assert "PA#1" in text
+    assert "PA#2" in text
+    assert "2" in text  # count
+
+
+def test_notification_format_sla_breach():
+    """Format naruszenia SLA zawiera liczbę eskalowanych incydentów."""
+    from backend.notification_hooks import format_sla_breach
+    escalated = [
+        {"id": 1, "priority": "critical", "sla_deadline": "2026-03-25T10:00:00"},
+        {"id": 2, "priority": "high", "sla_deadline": "2026-03-25T11:00:00"},
+    ]
+    text = format_sla_breach(escalated)
+    assert "2" in text
+    assert "SLA" in text
+
+
+def test_notification_dispatch_logs_to_db():
+    """Dispatch zawsze loguje do DB (kanał log=True)."""
+    from backend.notification_hooks import dispatch_notification
+    result = dispatch_notification("test_event", "test message", priority="low")
+    assert result["event_type"] == "test_event"
+    assert result["channels"]["log"] is True
+    # Telegram powinien być None/False (brak tokenu w testach)
+    assert result["channels"]["telegram"] in (None, False)
+
+
+def test_notification_dispatch_skips_low_priority_telegram():
+    """Telegram pomijany przy priorytecie niższym niż próg."""
+    from backend.notification_hooks import dispatch_notification
+    result = dispatch_notification("low_prio_event", "low prio msg", priority="low")
+    assert result["channels"]["telegram"] is None
+
+
+def test_notification_config_endpoint(client):
+    """Endpoint /notifications/config zwraca konfigurację."""
+    resp = client.get("/api/account/analytics/notifications/config")
+    assert resp.status_code == 200
+    data = resp.json().get("data") or {}
+    assert "enabled" in data
+    assert "telegram_configured" in data
+    assert "telegram_min_priority" in data
+
+
+def test_notification_test_endpoint(client):
+    """Endpoint /notifications/test wysyła testowe powiadomienie."""
+    resp = client.post(
+        "/api/account/analytics/notifications/test",
+        json={"message": "Test z pytest"},
+    )
+    assert resp.status_code == 200
+    data = resp.json().get("data") or {}
+    assert data.get("event_type") == "test"
+    assert data.get("channels", {}).get("log") is True
+
+
+def test_notification_hook_on_policy_action(client):
+    """Tworzenie policy action triggeruje notification hook (logowany do DB)."""
+    # Tworzymy policy action — hook jest wbudowany w create_policy_action
+    from backend.database import SessionLocal, SystemLog
+    db = SessionLocal()
+    try:
+        before_count = db.query(SystemLog).filter(
+            SystemLog.module == "notification_hooks"
+        ).count()
+    finally:
+        db.close()
+
+    client.post(
+        "/api/account/analytics/policy-actions",
+        json={
+            "source_type": "promotion_monitoring",
+            "source_id": 9990,
+            "verdict_status": "warning",
+            "reason_codes": ["NOTIFY_TEST"],
+        },
+    )
+
+    db = SessionLocal()
+    try:
+        after_count = db.query(SystemLog).filter(
+            SystemLog.module == "notification_hooks"
+        ).count()
+    finally:
+        db.close()
+
+    assert after_count > before_count, "Notification hook powinien zapisać log do DB"
+
+
+def test_notification_hook_on_incident(client):
+    """Tworzenie incydentu triggeruje notification hook."""
+    from backend.database import SessionLocal, SystemLog
+
+    # Stwórz PA pod incydent
+    pa_resp = client.post(
+        "/api/account/analytics/policy-actions",
+        json={
+            "source_type": "rollback_monitoring",
+            "source_id": 9991,
+            "verdict_status": "escalate",
+        },
+    )
+    pa_id = (pa_resp.json().get("data") or {}).get("id")
+
+    db = SessionLocal()
+    try:
+        before_count = db.query(SystemLog).filter(
+            SystemLog.module == "notification_hooks",
+            SystemLog.message.like("%incident_created%"),
+        ).count()
+    finally:
+        db.close()
+
+    client.post(
+        "/api/account/analytics/incidents",
+        json={"policy_action_id": pa_id},
+    )
+
+    db = SessionLocal()
+    try:
+        after_count = db.query(SystemLog).filter(
+            SystemLog.module == "notification_hooks",
+            SystemLog.message.like("%incident_created%"),
+        ).count()
+    finally:
+        db.close()
+
+    assert after_count > before_count, "Incident notification powinien zapisać log"
+
+
+def test_notification_hook_on_blocked_operation(client):
+    """Zablokowana operacja triggeruje notification o blokadzie."""
+    from backend.database import SessionLocal, SystemLog
+
+    _ensure_blocking_policy_action(client)
+
+    db = SessionLocal()
+    try:
+        before_count = db.query(SystemLog).filter(
+            SystemLog.module == "notification_hooks",
+            SystemLog.message.like("%pipeline_blocked%"),
+        ).count()
+    finally:
+        db.close()
+
+    # Próba tworzenia eksperymentu (zablokowana)
+    client.post(
+        "/api/account/analytics/experiments",
+        json={
+            "name": "notify-test",
+            "baseline_snapshot_id": "x",
+            "candidate_snapshot_id": "y",
+        },
+    )
+
+    db = SessionLocal()
+    try:
+        after_count = db.query(SystemLog).filter(
+            SystemLog.module == "notification_hooks",
+            SystemLog.message.like("%pipeline_blocked%"),
+        ).count()
+    finally:
+        db.close()
+
+    assert after_count > before_count, "Pipeline blocked notification powinien zapisać log"

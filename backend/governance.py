@@ -21,6 +21,12 @@ from typing import Any, Dict, List, Optional
 from sqlalchemy.orm import Session
 
 from backend.database import Incident, PolicyAction
+from backend.notification_hooks import (
+    notify_incident_created,
+    notify_incident_escalated,
+    notify_pipeline_blocked,
+    notify_sla_breach,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -162,6 +168,10 @@ def enforce_pipeline_permission(db: Session, operation: str) -> None:
             "Pipeline freeze: operacja '%s' zablokowana przez %d policy actions",
             operation, len(result["blocking_actions"]),
         )
+        try:
+            notify_pipeline_blocked(operation, result["blocking_actions"])
+        except Exception as exc:
+            logger.error("Błąd wysyłki powiadomienia o blokadzie pipeline: %s", exc)
         raise PipelineFreezeError(operation, result["blocking_actions"])
 
 
@@ -236,7 +246,20 @@ def create_incident(
         "Incident created: id=%s, policy_action_id=%s, priority=%s, sla_deadline=%s",
         incident.id, policy_action_id, priority, sla_deadline,
     )
-    return _incident_dict(incident)
+
+    inc_dict = _incident_dict(incident)
+    try:
+        pa_dict = {
+            "policy_action": pa.policy_action,
+            "source_type": pa.source_type,
+            "source_id": int(pa.source_id),
+            "summary": pa.summary,
+        }
+        notify_incident_created(inc_dict, pa_dict)
+    except Exception as exc:
+        logger.error("Błąd wysyłki powiadomienia o incydencie: %s", exc)
+
+    return inc_dict
 
 
 def transition_incident(
@@ -429,5 +452,13 @@ def escalate_overdue_incidents(db: Session) -> List[Dict[str, Any]]:
 
     if escalated:
         db.commit()
+
+    if escalated:
+        try:
+            notify_sla_breach(escalated)
+            for esc in escalated:
+                notify_incident_escalated(esc)
+        except Exception as exc:
+            logger.error("Błąd wysyłki powiadomień o eskalacji SLA: %s", exc)
 
     return escalated

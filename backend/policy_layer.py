@@ -18,6 +18,8 @@ import logging
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
+from backend.notification_hooks import notify_policy_action_created
+
 from sqlalchemy.orm import Session
 
 from backend.database import (
@@ -389,7 +391,14 @@ def create_policy_action(
         "Policy action created: id=%s, source=%s/%s, action=%s, priority=%s",
         new_row.id, source_type, source_id, evaluation["policy_action"], evaluation["priority"],
     )
-    return _policy_action_dict(new_row)
+
+    result = _policy_action_dict(new_row)
+    try:
+        notify_policy_action_created(result)
+    except Exception as exc:
+        logger.error("Błąd wysyłki powiadomienia o policy action: %s", exc)
+
+    return result
 
 
 def resolve_policy_action(
