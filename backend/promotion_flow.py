@@ -11,6 +11,7 @@ from typing import Any, Dict, List
 from sqlalchemy.orm import Session
 
 from backend.database import ConfigPromotion, Position, Recommendation, RecommendationReview, get_config_snapshot
+from backend.governance import enforce_pipeline_permission
 from backend.recommendations import get_recommendation
 from backend.runtime_settings import RuntimeSettingsError, apply_runtime_updates, build_runtime_state
 
@@ -143,6 +144,7 @@ def promote_recommendation(
     initiated_by: str,
     notes: str | None = None,
 ) -> Dict[str, Any]:
+    enforce_pipeline_permission(db, "promotion")
     ctx = _validate_promotion_ready(db, recommendation_id)
     promotion = ConfigPromotion(
         recommendation_id=recommendation_id,

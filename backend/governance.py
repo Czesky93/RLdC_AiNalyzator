@@ -24,6 +24,35 @@ from backend.database import Incident, PolicyAction
 
 logger = logging.getLogger(__name__)
 
+
+# ---------------------------------------------------------------------------
+# Wyjątek freeze
+# ---------------------------------------------------------------------------
+
+class PipelineFreezeError(Exception):
+    """Operacja zablokowana przez aktywne policy actions (governance freeze)."""
+
+    def __init__(self, operation: str, blocking_actions: list):
+        self.operation = operation
+        self.blocking_actions = blocking_actions
+        blockers_desc = "; ".join(
+            f"[PA#{b['policy_action_id']}] {b['policy_action']} ({b['priority']})"
+            for b in blocking_actions
+        )
+        super().__init__(
+            f"Operacja '{operation}' zablokowana przez governance freeze. "
+            f"Aktywne blokery: {blockers_desc}"
+        )
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "error": "pipeline_freeze",
+            "operation": self.operation,
+            "message": str(self),
+            "blocking_actions": self.blocking_actions,
+            "blockers_count": len(self.blocking_actions),
+        }
+
 # ---------------------------------------------------------------------------
 # Stałe
 # ---------------------------------------------------------------------------
@@ -120,6 +149,20 @@ def check_pipeline_permission(
         "allowed": len(blocking) == 0,
         "blocking_actions": blocking,
     }
+
+
+def enforce_pipeline_permission(db: Session, operation: str) -> None:
+    """
+    Sprawdza uprawnienia pipeline i rzuca PipelineFreezeError jeśli operacja
+    jest zablokowana. Służy jako one-liner guard w flow functions.
+    """
+    result = check_pipeline_permission(db, operation)
+    if not result["allowed"]:
+        logger.warning(
+            "Pipeline freeze: operacja '%s' zablokowana przez %d policy actions",
+            operation, len(result["blocking_actions"]),
+        )
+        raise PipelineFreezeError(operation, result["blocking_actions"])
 
 
 def get_pipeline_status(db: Session) -> Dict[str, Any]:

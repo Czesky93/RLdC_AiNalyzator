@@ -11,6 +11,7 @@ from typing import Any, Dict, List
 from sqlalchemy.orm import Session
 
 from backend.database import ConfigRollback, get_config_snapshot
+from backend.governance import enforce_pipeline_permission
 from backend.promotion_flow import _active_position_count, _current_runtime_snapshot_id, _snapshot_to_updates
 from backend.rollback_decision import get_rollback_decision
 from backend.runtime_settings import RuntimeSettingsError, apply_runtime_updates
@@ -77,6 +78,7 @@ def execute_rollback(
     initiated_by: str,
     notes: str | None = None,
 ) -> Dict[str, Any]:
+    enforce_pipeline_permission(db, "rollback")
     row = _get_rollback_row(db, rollback_id)
     if row.decision_status not in {"rollback_recommended", "rollback_required"}:
         raise ValueError(f"Rollback decision is not executable: {row.decision_status}")

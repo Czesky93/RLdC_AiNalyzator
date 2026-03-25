@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session
 
 from backend.accounting import summarize_orders
 from backend.database import DecisionTrace, Experiment, ExperimentResult, Order, get_config_snapshot
+from backend.governance import enforce_pipeline_permission
 
 
 _RISK_ACTION_REASONS = {
@@ -339,6 +340,7 @@ def create_experiment(
     end_at: Optional[str] = None,
     notes: Optional[str] = None,
 ) -> Dict[str, Any]:
+    enforce_pipeline_permission(db, "experiment")
     start_dt = _parse_date(start_at)
     end_dt = _parse_date(end_at)
     comparison = compare_snapshots_for_experiment(

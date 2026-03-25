@@ -2358,3 +2358,141 @@ def test_governance_pipeline_status_reflects_freezes(client):
     # escalate blokuje promotion i experiment
     assert data.get("promotion_allowed") is False
     assert data.get("experiment_allowed") is False
+
+
+# =====================================================================
+# Pipeline Guard Integration – freeze-blocked operations → 403
+# =====================================================================
+
+def _ensure_blocking_policy_action(client):
+    """Upewnij się, że jest aktywna policy action blokująca promotions/experiments/recommendations."""
+    # Sprawdź czy coś już blokuje
+    resp = client.get("/api/account/analytics/pipeline-permission/promotion")
+    if resp.json().get("data", {}).get("allowed") is False:
+        return
+    # Dodaj blokującą z verdict_status=escalate
+    client.post(
+        "/api/account/analytics/policy-actions",
+        json={
+            "source_type": "promotion_monitoring",
+            "source_id": 9900,
+            "verdict_status": "escalate",
+            "reason_codes": ["FREEZE_GUARD_TEST"],
+        },
+    )
+
+
+def test_guard_experiment_blocked(client):
+    """Tworzenie eksperymentu zablokowane przez governance freeze → 403."""
+    _ensure_blocking_policy_action(client)
+    resp = client.post(
+        "/api/account/analytics/experiments",
+        json={
+            "name": "freeze-test-exp",
+            "baseline_snapshot_id": "nonexistent-base",
+            "candidate_snapshot_id": "nonexistent-cand",
+        },
+    )
+    assert resp.status_code == 403
+    detail = resp.json().get("detail") or {}
+    assert detail.get("error") == "pipeline_freeze"
+    assert detail.get("operation") == "experiment"
+    assert detail.get("blockers_count", 0) > 0
+    assert isinstance(detail.get("blocking_actions"), list)
+
+
+def test_guard_recommendation_blocked(client):
+    """Generowanie rekomendacji zablokowane przez governance freeze → 403."""
+    _ensure_blocking_policy_action(client)
+    resp = client.post(
+        "/api/account/analytics/recommendations",
+        json={"experiment_id": 999999},
+    )
+    assert resp.status_code == 403
+    detail = resp.json().get("detail") or {}
+    assert detail.get("error") == "pipeline_freeze"
+    assert detail.get("operation") == "recommendation"
+    assert detail.get("blockers_count", 0) > 0
+
+
+def test_guard_promotion_blocked(client):
+    """Tworzenie promocji zablokowane przez governance freeze → 403."""
+    _ensure_blocking_policy_action(client)
+    resp = client.post(
+        "/api/account/analytics/promotions",
+        json={
+            "recommendation_id": 999999,
+            "initiated_by": "guard-test",
+        },
+    )
+    assert resp.status_code == 403
+    detail = resp.json().get("detail") or {}
+    assert detail.get("error") == "pipeline_freeze"
+    assert detail.get("operation") == "promotion"
+    assert detail.get("blockers_count", 0) > 0
+
+
+def test_guard_rollback_blocked(client):
+    """Wykonanie rollbacku zablokowane przez governance freeze → 403."""
+    # Rollback wymaga specyficznej policy action blokującej rollback
+    # (escalate domyślnie: rollback_allowed=True, więc trzeba dodać akcję z rollback_allowed=False)
+    # Tworzymy dedykowaną policy action która blokuje rollbacki
+    from backend.database import SessionLocal, PolicyAction
+    db = SessionLocal()
+    try:
+        # Dodaj PA z rollback_allowed=False
+        pa = PolicyAction(
+            source_type="rollback_monitoring",
+            source_id=9901,
+            policy_action="rollback_freeze_test",
+            priority="critical",
+            promotion_allowed=True,
+            rollback_allowed=False,
+            experiments_allowed=True,
+            freeze_recommendations=False,
+            requires_human_review=True,
+            summary="Test: blokada rollbacku",
+            status="open",
+        )
+        db.add(pa)
+        db.commit()
+    finally:
+        db.close()
+
+    resp = client.post(
+        "/api/account/analytics/rollbacks/999999/execute",
+        json={"initiated_by": "guard-test"},
+    )
+    assert resp.status_code == 403
+    detail = resp.json().get("detail") or {}
+    assert detail.get("error") == "pipeline_freeze"
+    assert detail.get("operation") == "rollback"
+    assert detail.get("blockers_count", 0) > 0
+
+
+def test_guard_error_format_consistency(client):
+    """Spójny format błędu freeze we wszystkich operacjach."""
+    _ensure_blocking_policy_action(client)
+    required_keys = {"error", "operation", "message", "blocking_actions", "blockers_count"}
+
+    # Experiment
+    resp = client.post(
+        "/api/account/analytics/experiments",
+        json={
+            "name": "format-test",
+            "baseline_snapshot_id": "x",
+            "candidate_snapshot_id": "y",
+        },
+    )
+    assert resp.status_code == 403
+    detail = resp.json().get("detail") or {}
+    assert required_keys.issubset(detail.keys()), f"Brakujące klucze: {required_keys - detail.keys()}"
+
+    # Recommendation
+    resp2 = client.post(
+        "/api/account/analytics/recommendations",
+        json={"experiment_id": 1},
+    )
+    assert resp2.status_code == 403
+    detail2 = resp2.json().get("detail") or {}
+    assert required_keys.issubset(detail2.keys()), f"Brakujące klucze: {required_keys - detail2.keys()}"

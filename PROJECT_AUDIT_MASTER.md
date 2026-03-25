@@ -1,12 +1,12 @@
 # PROJECT AUDIT MASTER
 
 ## Audit State
-- Current stage: `ETAP 3 - GOVERNANCE IMPLEMENTED`
+- Current stage: `ETAP 4 - PIPELINE GUARD INTEGRATION`
 - Current file: `backend/governance.py`
-- Last completed file: `backend/governance.py`
+- Last completed file: `backend/governance.py` (enforce_pipeline_permission + PipelineFreezeError)
 - Next stage: `Telegram notification hooks / scheduled reevaluation worker`
-- Audit timestamp: `governance layer completed, 86 tests green`
-- Pipeline status: **FULL LOOP + GOVERNANCE OPERATIONAL**
+- Audit timestamp: `pipeline guard integration completed, 91 tests green`
+- Pipeline status: **FULL LOOP + GOVERNANCE ENFORCED**
 
 ## Scope
 This document is the single audit state file for the repository. It tracks:
@@ -19,6 +19,10 @@ This document is the single audit state file for the repository. It tracks:
 ## Executive Summary
 
 **Stan po ETAP 2:** Repozytorium posiada kompletny, zamknięty pipeline bezpieczeństwa konfiguracji od `config → experiment → recommendation → review → promotion → monitoring → rollback decision → rollback execution → post-rollback monitoring → policy`. Warstwa policy jest determinizna i przetestowana (71 testów). System jest gotowy do implementacji governance / operator workflow.
+
+**Stan po ETAP 3:** Warstwa governance (incidents, operator queue, SLA) działa. 86 testów green.
+
+**Stan po ETAP 4 (Pipeline Guard Integration):** Governance faktycznie egzekwuje blokady — `promote_recommendation()`, `execute_rollback()`, `create_experiment()` i `generate_recommendation()` wywołują `enforce_pipeline_permission()` przed jakąkolwiek logiką. Próba wykonania zablokowanej operacji zwraca HTTP 403 z pełnym opisem blokady (`PipelineFreezeError.to_dict()`). 91 testów green, w tym 5 dedykowanych testów guardów.
 
 **Pozostałe ryzyka (z pierwszego audytu, częściowo zmitigowane):**
 - ~~Trading logic, execution, data collection are coupled inside `backend/collector.py`.~~ Częściowo rozdzielone — central runtime settings, risk.py, accounting.py są wydzielone, ale collector nadal łączy zbyt wiele odpowiedzialności.
@@ -266,8 +270,8 @@ Status vocabulary:
 | `backend/post_rollback_monitoring.py` | post-rollback monitoring | `poprawiony` | stabilization verdict loop |
 | `backend/reporting.py` | reporting / analytics | `poprawiony` | central performance/cost/risk reporting |
 | `backend/policy_layer.py` | policy verdict→action | `poprawiony` | deterministic mappings, audit trail, supersede semantics |
-| `backend/governance.py` | governance / operator workflow | `poprawiony` | freeze enforcement, incident lifecycle, operator queue, SLA |
-| `tests/test_smoke.py` | smoke tests | `przetestowany` | 86 tests (54 base + 17 policy + 15 governance) |
+| `backend/governance.py` | governance / operator workflow | `poprawiony` | freeze enforcement, incident lifecycle, operator queue, SLA, pipeline guards |
+| `tests/test_smoke.py` | smoke tests | `przetestowany` | 91 tests (54 base + 17 policy + 15 governance + 5 guard) |
 | `telegram_bot/bot.py` | Telegram bot | `nieprzeanalizowany` | inspect after execution layer |
 | `telegram_bot/__init__.py` | package marker | `zatwierdzony` | no action needed |
 | `ai_trading/__init__.py` | placeholder package | `wymaga poprawy` | architecture placeholder only |
@@ -302,7 +306,7 @@ Status vocabulary:
 - Final result: `passed`
 - Command executed: `.venv/bin/pytest tests/test_smoke.py`
 - Initial outcome: `12 passed` (baseline)
-- Current outcome: `86 passed` (54 base + 17 policy + 15 governance)
+- Current outcome: `91 passed` (54 base + 17 policy + 15 governance + 5 guard integration)
 - Residual warning debt:
   - widespread `datetime.utcnow()` deprecations
   - SQLAlchemy `declarative_base()` deprecation path
@@ -775,6 +779,7 @@ Central capital-protection layer that consumes accounting rollups and runtime li
 - Rewire remaining account snapshot/KPI views to distinguish clearly between operational account state and analytics source-of-truth payloads. **Nadal do zrobienia.**
 - Remove remaining collector-local risk fallbacks and expose risk decisions in reporting/analytics. **Nadal do zrobienia.**
 - **NOWY:** Implementacja governance / operator workflow (patrz sekcja poniżej).
+- **NOWY:** ~~Pipeline Guard Integration — podpięcie enforce_pipeline_permission do promote_recommendation, execute_rollback, create_experiment, generate_recommendation.~~ **ZROBIONE** — guardy aktywne, PipelineFreezeError → 403, 5 nowych testów, 91 passed.
 
 ## File: backend/runtime_settings.py
 Status: corrected

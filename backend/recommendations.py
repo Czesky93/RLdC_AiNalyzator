@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 
 from backend.database import Recommendation, compare_config_snapshots
 from backend.experiments import get_experiment, list_experiments
+from backend.governance import enforce_pipeline_permission
 
 
 def _json_text(value: Any) -> str:
@@ -133,6 +134,7 @@ def evaluate_recommendation(experiment: Dict[str, Any], comparison: Dict[str, An
 
 
 def generate_recommendation(db: Session, experiment_id: int, notes: str | None = None) -> Dict[str, Any]:
+    enforce_pipeline_permission(db, "recommendation")
     experiment = get_experiment(db, experiment_id)
     comparison = compare_config_snapshots(
         db,

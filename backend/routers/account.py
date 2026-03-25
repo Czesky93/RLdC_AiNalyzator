@@ -61,6 +61,7 @@ from backend.policy_layer import (
     resolve_policy_action,
 )
 from backend.governance import (
+    PipelineFreezeError,
     check_pipeline_permission,
     create_incident,
     escalate_overdue_incidents,
@@ -711,6 +712,8 @@ async def create_experiment_endpoint(
             notes=payload.notes,
         )
         return {"success": True, "data": result}
+    except PipelineFreezeError as exc:
+        raise HTTPException(status_code=403, detail=exc.to_dict()) from exc
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except Exception as e:
@@ -764,6 +767,8 @@ async def create_recommendation_endpoint(
             "success": True,
             "data": generate_recommendation(db, payload.experiment_id, notes=payload.notes),
         }
+    except PipelineFreezeError as exc:
+        raise HTTPException(status_code=403, detail=exc.to_dict()) from exc
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except Exception as e:
@@ -912,6 +917,8 @@ async def create_config_promotion(
                 notes=payload.notes,
             ),
         }
+    except PipelineFreezeError as exc:
+        raise HTTPException(status_code=403, detail=exc.to_dict()) from exc
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except RuntimeSettingsError as exc:
@@ -1071,6 +1078,8 @@ async def execute_rollback_decision(
                 notes=payload.notes,
             ),
         }
+    except PipelineFreezeError as exc:
+        raise HTTPException(status_code=403, detail=exc.to_dict()) from exc
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except RuntimeSettingsError as exc:
