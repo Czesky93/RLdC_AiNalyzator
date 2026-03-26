@@ -3131,3 +3131,179 @@ def test_console_with_populated_data(client):
     system_events = data["sections"]["recent_system_events"]
     # Nie wymuszamy count > 0 bo worker loguje jako INFO, a system_events filtruje WARNING+
     assert isinstance(system_events["items"], list)
+
+
+# =====================================================================
+# ============ CORRELATION / INCIDENT INTELLIGENCE (ETAP 8) ===========
+# =====================================================================
+
+
+def _create_policy_action_and_incident(client):
+    """Helper: utwórz policy action + incident, zwróć (pa_id, incident_id)."""
+    # Utwórz policy action z escalate (wymaga review → incident)
+    resp = client.post(
+        "/api/account/analytics/policy-actions",
+        json={
+            "source_type": "promotion_monitoring",
+            "source_id": 8800,
+            "verdict_status": "rollback_candidate",
+            "reason_codes": ["CORR_TEST"],
+        },
+    )
+    assert resp.status_code == 200
+    pa_id = resp.json()["data"]["id"]
+
+    # Utwórz incident powiązany z PA
+    resp = client.post(
+        "/api/account/analytics/incidents",
+        json={"policy_action_id": pa_id},
+    )
+    assert resp.status_code == 200
+    incident_id = resp.json()["data"]["id"]
+
+    return pa_id, incident_id
+
+
+def test_correlation_incident_timeline(client):
+    """Oś czasu incydentu zawiera powiązane zdarzenia."""
+    pa_id, incident_id = _create_policy_action_and_incident(client)
+
+    resp = client.get(f"/api/account/analytics/incidents/{incident_id}/timeline")
+    assert resp.status_code == 200
+    data = resp.json()["data"]
+
+    assert data["incident_id"] == incident_id
+    assert data["event_count"] >= 2  # min: incident + policy_action
+    assert isinstance(data["timeline"], list)
+
+    # Timeline zawiera zdarzenie incydentu i policy action
+    event_types = {e["event_type"] for e in data["timeline"]}
+    assert "incident_created" in event_types
+    assert "policy_action_created" in event_types
+
+
+def test_correlation_incident_timeline_not_found(client):
+    """Timeline dla nieistniejącego incydentu → 404."""
+    resp = client.get("/api/account/analytics/incidents/999999/timeline")
+    assert resp.status_code == 404
+
+
+def test_correlation_incident_correlations(client):
+    """Korelacje incydentu zawierają policy action i source record."""
+    pa_id, incident_id = _create_policy_action_and_incident(client)
+
+    resp = client.get(f"/api/account/analytics/incidents/{incident_id}/correlations")
+    assert resp.status_code == 200
+    data = resp.json()["data"]
+
+    assert data["incident"]["id"] == incident_id
+    assert data["policy_action"] is not None
+    assert data["policy_action"]["id"] == pa_id
+    assert data["source_record"] is not None
+    assert isinstance(data["related_incidents"], list)
+
+
+def test_correlation_policy_action_chain(client):
+    """Łańcuch policy action zawiera PA + powiązany incident."""
+    pa_id, incident_id = _create_policy_action_and_incident(client)
+
+    resp = client.get(f"/api/account/analytics/policy-actions/{pa_id}/chain")
+    assert resp.status_code == 200
+    data = resp.json()["data"]
+
+    assert data["policy_action_id"] == pa_id
+    assert data["event_count"] >= 2  # PA + incident
+
+    event_types = {e["event_type"] for e in data["chain"]}
+    assert "policy_action_created" in event_types
+    assert "incident_created" in event_types
+
+
+def test_correlation_policy_action_chain_not_found(client):
+    """Chain dla nieistniejącej PA → 404."""
+    resp = client.get("/api/account/analytics/policy-actions/999999/chain")
+    assert resp.status_code == 404
+
+
+def test_correlation_why_blocked(client):
+    """Why-blocked wyjaśnia dlaczego operacja jest zablokowana."""
+    _ensure_blocking_policy_action(client)
+
+    resp = client.get("/api/account/analytics/why-blocked/promotion")
+    assert resp.status_code == 200
+    data = resp.json()["data"]
+
+    assert data["operation"] == "promotion"
+    assert data["blocked"] is True
+    assert data["blockers_count"] >= 1
+    assert isinstance(data["blockers"], list)
+
+    # Każdy bloker ma policy_action i source
+    for blocker in data["blockers"]:
+        assert "policy_action" in blocker
+        assert "source" in blocker
+        assert "incidents" in blocker
+
+
+def test_correlation_why_blocked_allowed(client):
+    """Why-blocked dla dozwolonej operacji (rollback powinien być allowed)."""
+    resp = client.get("/api/account/analytics/why-blocked/rollback")
+    assert resp.status_code == 200
+    data = resp.json()["data"]
+    assert data["operation"] == "rollback"
+    # Może być zablokowany lub nie, ale struktura musi być poprawna
+    assert "blocked" in data
+    assert "blockers" in data
+
+
+def test_correlation_why_blocked_invalid_operation(client):
+    """Why-blocked dla nieprawidłowej operacji → 400."""
+    resp = client.get("/api/account/analytics/why-blocked/invalid_op")
+    assert resp.status_code == 400
+
+
+def test_correlation_promotion_chain(client):
+    """Łańcuch promocji zawiera przynajmniej sam rekord promocji."""
+    from backend.database import SessionLocal, ConfigPromotion
+    # Znajdź dowolną promocję (z wcześniejszych testów)
+    db = SessionLocal()
+    try:
+        promo = db.query(ConfigPromotion).first()
+    finally:
+        db.close()
+
+    if promo is None:
+        # Brak promocji w bazie — pomijamy test
+        return
+
+    resp = client.get(f"/api/account/analytics/promotions/{promo.id}/chain")
+    assert resp.status_code == 200
+    data = resp.json()["data"]
+
+    assert data["promotion_id"] == promo.id
+    assert data["event_count"] >= 1
+    assert isinstance(data["chain"], list)
+
+    event_types = {e["event_type"] for e in data["chain"]}
+    assert "promotion_initiated" in event_types
+
+
+def test_correlation_promotion_chain_not_found(client):
+    """Chain dla nieistniejącej promocji → 404."""
+    resp = client.get("/api/account/analytics/promotions/999999/chain")
+    assert resp.status_code == 404
+
+
+def test_correlation_functions_directly():
+    """Bezpośrednie wywołanie funkcji korelacji działa poprawnie."""
+    from backend.database import SessionLocal
+    from backend.correlation import get_why_blocked
+
+    db = SessionLocal()
+    try:
+        result = get_why_blocked(db, "promotion")
+        assert "operation" in result
+        assert "blocked" in result
+        assert "blockers" in result
+    finally:
+        db.close()

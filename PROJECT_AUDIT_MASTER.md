@@ -1,12 +1,12 @@
 # PROJECT AUDIT MASTER
 
 ## Audit State
-- Current stage: `ETAP 7 - OPERATOR DASHBOARD / INCIDENT CONSOLE`
-- Current file: `backend/operator_console.py`
-- Last completed file: `backend/operator_console.py`
-- Next stage: `Event correlation / decision trace linking`
-- Audit timestamp: `operator console completed, 126 tests green`
-- Pipeline status: **FULL LOOP + GOVERNANCE + NOTIFICATIONS + WORKER + OPERATOR CONSOLE**
+- Current stage: `ETAP 8 - CORRELATION / INCIDENT INTELLIGENCE`
+- Current file: `backend/correlation.py`
+- Last completed file: `backend/correlation.py`
+- Next stage: `Cautious low-risk semi-automation`
+- Audit timestamp: `correlation completed, 137 tests green`
+- Pipeline status: **FULL LOOP + GOVERNANCE + NOTIFICATIONS + WORKER + CONSOLE + CORRELATION**
 
 ## Scope
 This document is the single audit state file for the repository. It tracks:
@@ -274,7 +274,8 @@ Status vocabulary:
 | `backend/notification_hooks.py` | notification dispatcher | `poprawiony` | event formatting, Telegram adapter, DB logging, priority filtering |
 | `backend/reevaluation_worker.py` | scheduled reevaluation worker | `poprawiony` | cykliczne odświeżanie governance/monitoring, daemon thread, manual trigger endpoint |
 | `backend/operator_console.py` | operator console / dashboard | `poprawiony` | 9 sekcji: incidents, policy_actions, pipeline_status, operator_queue, worker_status, monitoring_summary, notifications, blocked_ops, system_events |
-| `tests/test_smoke.py` | smoke tests | `przetestowany` | 126 tests (54 base + 17 policy + 15 governance + 5 guard + 12 notification + 9 worker + 14 console) |
+| `backend/correlation.py` | correlation / incident intelligence | `poprawiony` | 5 public: incident timeline, correlations, PA chain, promotion chain, why-blocked |
+| `tests/test_smoke.py` | smoke tests | `przetestowany` | 137 tests (54 base + 17 policy + 15 governance + 5 guard + 12 notification + 9 worker + 14 console + 11 correlation) |
 | `telegram_bot/bot.py` | Telegram bot | `poprawiony` | komendy tradingowe + governance (/governance, /freeze, /incidents) |
 | `telegram_bot/__init__.py` | package marker | `zatwierdzony` | no action needed |
 | `ai_trading/__init__.py` | placeholder package | `wymaga poprawy` | architecture placeholder only |
@@ -309,7 +310,7 @@ Status vocabulary:
 - Final result: `passed`
 - Command executed: `.venv/bin/pytest tests/test_smoke.py`
 - Initial outcome: `12 passed` (baseline)
-- Current outcome: `126 passed` (54 base + 17 policy + 15 governance + 5 guard + 12 notification + 9 worker + 14 console)
+- Current outcome: `137 passed` (54 base + 17 policy + 15 governance + 5 guard + 12 notification + 9 worker + 14 console + 11 correlation)
 - Residual warning debt:
   - widespread `datetime.utcnow()` deprecations
   - SQLAlchemy `declarative_base()` deprecation path
@@ -786,6 +787,7 @@ Central capital-protection layer that consumes accounting rollups and runtime li
 - **NOWY:** ~~Telegram / Notification Hooks — operacyjne powiadomienia o zdarzeniach governance.~~ **ZROBIONE** — notification_hooks.py, hooki w governance/policy, komendy Telegram, 103 passed.
 - **NOWY:** ~~Scheduled Reevaluation Worker — cykliczny mózg systemu odświeżający governance/monitoring.~~ **ZROBIONE** — reevaluation_worker.py, daemon thread w app.py, 2 endpointy (status + manual cycle), 112 passed.
 - **NOWY:** ~~Operator Dashboard / Incident Console — zagregowany widok stanu systemu dla operatora.~~ **ZROBIONE** — operator_console.py, 9 sekcji, bundle + per-section endpoints, 126 passed.
+- **NOWY:** ~~Correlation / Incident Intelligence — powiązanie zdarzeń w łańcuchy przyczynowe.~~ **ZROBIONE** — correlation.py, 5 endpointów (incident timeline, correlations, PA chain, promotion chain, why-blocked), 137 passed.
 
 ## File: backend/runtime_settings.py
 Status: corrected

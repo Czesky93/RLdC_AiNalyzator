@@ -84,6 +84,13 @@ from backend.operator_console import (
     get_console_section,
     get_operator_console,
 )
+from backend.correlation import (
+    get_incident_correlations,
+    get_incident_timeline,
+    get_policy_action_chain,
+    get_promotion_chain,
+    get_why_blocked,
+)
 from backend.runtime_settings import RuntimeSettingsError
 
 router = APIRouter()
@@ -1466,3 +1473,72 @@ async def operator_console_section(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     return {"success": True, "section": section, "data": data}
+
+
+# =====================================================================
+# ============ CORRELATION / INCIDENT INTELLIGENCE ====================
+# =====================================================================
+
+@router.get("/analytics/incidents/{incident_id}/timeline")
+async def incident_timeline(
+    incident_id: int,
+    db: Session = Depends(get_db),
+):
+    """Oś czasu incydentu — pełny łańcuch przyczynowy od monitoringu do notyfikacji."""
+    try:
+        data = get_incident_timeline(db, incident_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    return {"success": True, "data": data}
+
+
+@router.get("/analytics/incidents/{incident_id}/correlations")
+async def incident_correlations(
+    incident_id: int,
+    db: Session = Depends(get_db),
+):
+    """Skorelowane encje dla incydentu (policy action, monitoring, promotion, rollback)."""
+    try:
+        data = get_incident_correlations(db, incident_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    return {"success": True, "data": data}
+
+
+@router.get("/analytics/policy-actions/{pa_id}/chain")
+async def policy_action_chain(
+    pa_id: int,
+    db: Session = Depends(get_db),
+):
+    """\u0141a\u0144cuch zdarze\u0144 powi\u0105zanych z policy action."""
+    try:
+        data = get_policy_action_chain(db, pa_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    return {"success": True, "data": data}
+
+
+@router.get("/analytics/promotions/{promotion_id}/chain")
+async def promotion_chain(
+    promotion_id: int,
+    db: Session = Depends(get_db),
+):
+    """Pełny lifecycle promocji — od inicjacji przez monitoring do rollbacku."""
+    try:
+        data = get_promotion_chain(db, promotion_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    return {"success": True, "data": data}
+
+
+@router.get("/analytics/why-blocked/{operation}")
+async def why_blocked(
+    operation: str,
+    db: Session = Depends(get_db),
+):
+    """Wyja\u015bnij dlaczego operacja jest zablokowana (pe\u0142ny \u0142a\u0144cuch przyczynowy)."""
+    try:
+        data = get_why_blocked(db, operation)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return {"success": True, "data": data}
