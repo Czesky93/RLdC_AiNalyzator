@@ -2733,3 +2733,212 @@ def test_notification_hook_on_blocked_operation(client):
         db.close()
 
     assert after_count > before_count, "Pipeline blocked notification powinien zapisać log"
+
+
+# =====================================================================
+# ============ REEVALUATION WORKER (ETAP 6) ===========================
+# =====================================================================
+
+
+def test_worker_status_endpoint(client):
+    """GET /analytics/worker/status zwraca status workera."""
+    resp = client.get("/api/account/analytics/worker/status")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["success"] is True
+    status = data["data"]
+    assert "enabled" in status
+    assert "running" in status
+    assert "interval_seconds" in status
+
+
+def test_worker_manual_cycle_endpoint(client):
+    """POST /analytics/worker/cycle ręcznie uruchamia cykl workera."""
+    resp = client.post("/api/account/analytics/worker/cycle")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["success"] is True
+    summary = data["data"]
+    assert "cycle_start" in summary
+    assert "cycle_end" in summary
+    assert "duration_seconds" in summary
+    assert "steps" in summary
+    assert "errors" in summary
+
+
+def test_worker_cycle_runs_all_steps(client):
+    """Worker cycle wykonuje wszystkie 5 kroków bez błędów."""
+    resp = client.post("/api/account/analytics/worker/cycle")
+    data = resp.json()["data"]
+    steps = data["steps"]
+
+    assert "escalate_overdue" in steps
+    assert "reevaluate_promotion_monitoring" in steps
+    assert "reevaluate_rollback_monitoring" in steps
+    assert "operator_queue" in steps
+    assert "pipeline_status" in steps
+
+    # Żaden krok nie powinien być "error" na czystej bazie
+    for step_name, step_data in steps.items():
+        assert step_data.get("status") == "ok", f"Krok {step_name} zwrócił error: {step_data}"
+
+    # Brak błędów krytycznych
+    assert len(data["errors"]) == 0
+
+
+def test_worker_cycle_function_directly():
+    """Bezpośrednie wywołanie run_worker_cycle() działa poprawnie."""
+    from backend.reevaluation_worker import run_worker_cycle
+
+    summary = run_worker_cycle()
+
+    assert "cycle_start" in summary
+    assert "cycle_end" in summary
+    assert "steps" in summary
+    assert len(summary.get("errors", [])) == 0
+
+    # Wszystkie kroki status=ok
+    for step_name, step_data in summary["steps"].items():
+        assert step_data.get("status") == "ok", f"{step_name}: {step_data}"
+
+
+def test_worker_cycle_escalation_with_overdue_incident(client):
+    """Worker eskaluje incydenty z przekroczonym SLA."""
+    from backend.database import SessionLocal, Incident
+    from datetime import datetime, timedelta
+
+    # Stwórz incydent z przeterminowanym SLA
+    db = SessionLocal()
+    try:
+        old_incident = Incident(
+            policy_action_id=0,
+            priority="high",
+            status="open",
+            sla_deadline=datetime.utcnow() - timedelta(hours=1),
+        )
+        db.add(old_incident)
+        db.commit()
+        incident_id = old_incident.id
+    finally:
+        db.close()
+
+    # Uruchom cykl workera
+    resp = client.post("/api/account/analytics/worker/cycle")
+    data = resp.json()["data"]
+
+    escalated = data["steps"]["escalate_overdue"]
+    assert escalated["status"] == "ok"
+    # Nasz incydent powinien trafić do eskalowanych
+    assert escalated["escalated_count"] >= 1
+
+
+def test_worker_cycle_logs_to_system_log(client):
+    """Worker zapisuje podsumowanie cyklu w system_log."""
+    from backend.database import SessionLocal, SystemLog
+
+    db = SessionLocal()
+    try:
+        before_count = db.query(SystemLog).filter(
+            SystemLog.module == "reevaluation_worker",
+        ).count()
+    finally:
+        db.close()
+
+    client.post("/api/account/analytics/worker/cycle")
+
+    db = SessionLocal()
+    try:
+        after_count = db.query(SystemLog).filter(
+            SystemLog.module == "reevaluation_worker",
+        ).count()
+    finally:
+        db.close()
+
+    assert after_count > before_count, "Worker powinien logować cykl do system_log"
+
+
+def test_worker_get_worker_status():
+    """get_worker_status() zwraca poprawną strukturę."""
+    from backend.reevaluation_worker import get_worker_status
+
+    status = get_worker_status()
+    assert isinstance(status, dict)
+    assert "enabled" in status
+    assert "running" in status
+    assert isinstance(status["interval_seconds"], int)
+
+
+def test_worker_start_stop():
+    """start_worker / stop_worker działają poprawnie."""
+    from backend.reevaluation_worker import (
+        get_worker_status,
+        start_worker,
+        stop_worker,
+    )
+    import time
+
+    # Upewnij się że worker nie działa
+    stop_worker()
+    assert get_worker_status()["running"] is False
+
+    # Start z krótkim interwałem
+    started = start_worker(interval_seconds=9999)
+    assert started is True
+    assert get_worker_status()["running"] is True
+
+    # Próba ponownego startu (powinno zwrócić False)
+    started_again = start_worker(interval_seconds=9999)
+    assert started_again is False
+
+    # Stop
+    stopped = stop_worker()
+    assert stopped is True
+    assert get_worker_status()["running"] is False
+
+    # Stop gdy już nie działa
+    stopped_again = stop_worker()
+    assert stopped_again is False
+
+
+def test_worker_cycle_with_active_promotion_monitoring(client):
+    """Worker re-ewaluuje aktywne monitoringi post-promotion."""
+    from backend.database import SessionLocal, ConfigPromotion, ConfigSnapshot
+    import hashlib, json
+
+    # Utwórz snapshot + promotion z aktywnym monitoringiem
+    db = SessionLocal()
+    try:
+        payload = {"key": "value"}
+        payload_json = json.dumps(payload, sort_keys=True)
+        snap_id = "worker-test-" + hashlib.sha256(payload_json.encode()).hexdigest()[:16]
+        snapshot = ConfigSnapshot(
+            id=snap_id,
+            config_hash=hashlib.sha256(payload_json.encode()).hexdigest(),
+            payload_json=payload_json,
+            source="unit_test",
+        )
+        db.add(snapshot)
+        db.flush()
+
+        promo = ConfigPromotion(
+            recommendation_id=0,
+            review_id=0,
+            from_snapshot_id=snap_id,
+            to_snapshot_id=snap_id,
+            status="applied",
+            initiated_by="test",
+            post_promotion_monitoring_status="pending",
+        )
+        db.add(promo)
+        db.commit()
+        promo_id = promo.id
+    finally:
+        db.close()
+
+    # Uruchom cykl
+    resp = client.post("/api/account/analytics/worker/cycle")
+    data = resp.json()["data"]
+
+    promo_step = data["steps"]["reevaluate_promotion_monitoring"]
+    assert promo_step["status"] == "ok"
+    assert promo_step["active_count"] >= 1

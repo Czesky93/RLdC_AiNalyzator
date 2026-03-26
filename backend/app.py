@@ -19,6 +19,7 @@ from backend.database import init_db
 # Import routers
 from backend.routers import market, portfolio, orders, signals, account, positions, blog, control
 from backend.collector import DataCollector
+from backend.reevaluation_worker import start_worker, stop_worker
 
 _ENV_PATH = os.path.join(os.path.dirname(__file__), "..", ".env")
 load_dotenv(dotenv_path=_ENV_PATH, override=False)
@@ -38,9 +39,18 @@ async def lifespan(app: FastAPI):
         app.state.collector = collector
         collector_thread = threading.Thread(target=collector.start, daemon=True)
         collector_thread.start()
+    # Auto-start reevaluation worker
+    worker_started = False
+    if not disable_collector:
+        worker_started = start_worker()
     print("✅ API gotowe do użycia")
     yield
     # Shutdown
+    if worker_started:
+        try:
+            stop_worker()
+        except Exception:
+            pass
     if collector is not None:
         try:
             collector.stop()

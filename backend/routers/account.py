@@ -76,6 +76,10 @@ from backend.notification_hooks import (
     send_telegram_message,
     _get_config as _get_notification_config,
 )
+from backend.reevaluation_worker import (
+    get_worker_status,
+    run_worker_cycle,
+)
 from backend.runtime_settings import RuntimeSettingsError
 
 router = APIRouter()
@@ -1415,3 +1419,22 @@ async def test_notification(
     """Wyślij testowe powiadomienie (do weryfikacji konfiguracji Telegram)."""
     result = dispatch_notification("test", payload.message, priority="high")
     return {"success": True, "data": result}
+
+
+# =====================================================================
+# ============ REEVALUATION WORKER ====================================
+# =====================================================================
+
+@router.get("/analytics/worker/status")
+async def worker_status():
+    """Aktualny stan reevaluation workera."""
+    return {"success": True, "data": get_worker_status()}
+
+
+@router.post("/analytics/worker/cycle")
+async def worker_manual_cycle(
+    admin: None = Depends(require_admin),
+):
+    """Ręcznie uruchom jeden cykl reewaluacji (debug / test)."""
+    summary = run_worker_cycle()
+    return {"success": True, "data": summary}

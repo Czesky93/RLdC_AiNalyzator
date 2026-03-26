@@ -1,12 +1,12 @@
 # PROJECT AUDIT MASTER
 
 ## Audit State
-- Current stage: `ETAP 5 - TELEGRAM / NOTIFICATION HOOKS`
-- Current file: `backend/notification_hooks.py`
-- Last completed file: `backend/notification_hooks.py` + `telegram_bot/bot.py`
-- Next stage: `Scheduled reevaluation worker`
-- Audit timestamp: `notification hooks completed, 103 tests green`
-- Pipeline status: **FULL LOOP + GOVERNANCE ENFORCED + NOTIFICATIONS**
+- Current stage: `ETAP 6 - SCHEDULED REEVALUATION WORKER`
+- Current file: `backend/reevaluation_worker.py`
+- Last completed file: `backend/reevaluation_worker.py`
+- Next stage: `Observability / healthcheck dashboard`
+- Audit timestamp: `reevaluation worker completed, 112 tests green`
+- Pipeline status: **FULL LOOP + GOVERNANCE + NOTIFICATIONS + SCHEDULED WORKER**
 
 ## Scope
 This document is the single audit state file for the repository. It tracks:
@@ -272,7 +272,8 @@ Status vocabulary:
 | `backend/policy_layer.py` | policy verdict→action | `poprawiony` | deterministic mappings, audit trail, supersede semantics, notification hook |
 | `backend/governance.py` | governance / operator workflow | `poprawiony` | freeze enforcement, incident lifecycle, operator queue, SLA, pipeline guards, notification hooks |
 | `backend/notification_hooks.py` | notification dispatcher | `poprawiony` | event formatting, Telegram adapter, DB logging, priority filtering |
-| `tests/test_smoke.py` | smoke tests | `przetestowany` | 103 tests (54 base + 17 policy + 15 governance + 5 guard + 12 notification) |
+| `backend/reevaluation_worker.py` | scheduled reevaluation worker | `poprawiony` | cykliczne odświeżanie governance/monitoring, daemon thread, manual trigger endpoint |
+| `tests/test_smoke.py` | smoke tests | `przetestowany` | 112 tests (54 base + 17 policy + 15 governance + 5 guard + 12 notification + 9 worker) |
 | `telegram_bot/bot.py` | Telegram bot | `poprawiony` | komendy tradingowe + governance (/governance, /freeze, /incidents) |
 | `telegram_bot/__init__.py` | package marker | `zatwierdzony` | no action needed |
 | `ai_trading/__init__.py` | placeholder package | `wymaga poprawy` | architecture placeholder only |
@@ -307,7 +308,7 @@ Status vocabulary:
 - Final result: `passed`
 - Command executed: `.venv/bin/pytest tests/test_smoke.py`
 - Initial outcome: `12 passed` (baseline)
-- Current outcome: `103 passed` (54 base + 17 policy + 15 governance + 5 guard + 12 notification)
+- Current outcome: `112 passed` (54 base + 17 policy + 15 governance + 5 guard + 12 notification + 9 worker)
 - Residual warning debt:
   - widespread `datetime.utcnow()` deprecations
   - SQLAlchemy `declarative_base()` deprecation path
@@ -782,6 +783,7 @@ Central capital-protection layer that consumes accounting rollups and runtime li
 - **NOWY:** Implementacja governance / operator workflow (patrz sekcja poniżej).
 - **NOWY:** ~~Pipeline Guard Integration — podpięcie enforce_pipeline_permission do promote_recommendation, execute_rollback, create_experiment, generate_recommendation.~~ **ZROBIONE** — guardy aktywne, PipelineFreezeError → 403, 5 nowych testów, 91 passed.
 - **NOWY:** ~~Telegram / Notification Hooks — operacyjne powiadomienia o zdarzeniach governance.~~ **ZROBIONE** — notification_hooks.py, hooki w governance/policy, komendy Telegram, 103 passed.
+- **NOWY:** ~~Scheduled Reevaluation Worker — cykliczny mózg systemu odświeżający governance/monitoring.~~ **ZROBIONE** — reevaluation_worker.py, daemon thread w app.py, 2 endpointy (status + manual cycle), 112 passed.
 
 ## File: backend/runtime_settings.py
 Status: corrected
@@ -1117,7 +1119,7 @@ Status: corrected
 - Post-promotion monitoring service evaluating whether a promoted snapshot remains healthy after deployment, using cost-aware accounting and risk outputs instead of ad hoc runtime heuristics.
 
 ### Current problems (post_promotion_monitoring.py)
-- Monitoring is still pull-based; there is no scheduler or periodic evaluation worker yet.
+- Monitoring is now both pull-based (API endpoints) and push-based (reevaluation worker daemon thread, configurable interval via WORKER_INTERVAL_SECONDS).
 - ~~Rollback can now be decided, executed, and evaluated after rollback, but there is still no higher-level escalation policy spanning both monitoring layers.~~ **ZROBIONE** — `policy_layer.py` zamyka tę lukę.
 - Minimum sample and time gates are controlled by environment variables rather than central runtime settings.
 
@@ -1364,7 +1366,7 @@ Status: corrected
 - Post-rollback monitoring service evaluating whether a rollback actually stabilized the system after config reversion, using the same accounting/risk/reporting-derived metrics as the rest of the safety pipeline.
 
 ### Current problems (post_rollback_monitoring.py)
-- Monitoring is still pull-based; there is no scheduler or automatic reevaluation loop yet.
+- Monitoring is now both pull-based and push-based (reevaluation worker handles periodic re-evaluation).
 - Thresholds for sample/time gates remain in environment variables instead of central runtime settings.
 - ~~Verdicts stop at `escalate`; there is still no policy layer telling the operator or system what intervention should follow.~~ **ZROBIONE** — `policy_layer.py`.
 
