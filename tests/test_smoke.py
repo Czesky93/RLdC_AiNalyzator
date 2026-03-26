@@ -2503,7 +2503,7 @@ def test_guard_error_format_consistency(client):
 # =====================================================================
 
 def test_notification_format_incident_created():
-    """Format incydentu zawiera priorytet, PA id, SLA."""
+    """Format incydentu zawiera priorytet po polsku, PA id, szczegóły."""
     from backend.notification_hooks import format_incident_created
     incident = {
         "id": 42,
@@ -2519,13 +2519,13 @@ def test_notification_format_incident_created():
     }
     text = format_incident_created(incident, pa)
     assert "#42" in text
-    assert "critical" in text
+    assert "krytyczn" in text.lower()  # "krytyczna" pilność
     assert "#7" in text
-    assert "SLA" in text.upper() or "sla" in text.lower() or "SLA" in text
+    assert "Co zrobić" in text
 
 
 def test_notification_format_incident_escalated():
-    """Format eskalacji zawiera ostrzeżenie i SLA."""
+    """Format eskalacji zawiera ostrzeżenie i termin."""
     from backend.notification_hooks import format_incident_escalated
     incident = {
         "id": 5,
@@ -2535,11 +2535,11 @@ def test_notification_format_incident_escalated():
     }
     text = format_incident_escalated(incident)
     assert "#5" in text
-    assert "ESKALACJA" in text
+    assert "Eskalacja" in text
 
 
 def test_notification_format_policy_action_created():
-    """Format policy action zawiera akcję, priorytet, opis."""
+    """Format policy action zawiera akcję po polsku, priorytet, opis."""
     from backend.notification_hooks import format_policy_action_created
     pa = {
         "id": 10,
@@ -2555,21 +2555,20 @@ def test_notification_format_policy_action_created():
     }
     text = format_policy_action_created(pa)
     assert "#10" in text
-    assert "hold_new_promotions" in text
-    assert "zablokowana" in text
-    assert "operatora" in text.lower()
+    assert "Zablokowano" in text or "zablokowano" in text
+    assert "Co zrobić" in text or "przejrzyj" in text.lower()
 
 
 def test_notification_format_pipeline_blocked():
-    """Format blokady pipeline zawiera operację i blokery."""
+    """Format blokady pipeline zawiera operację po polsku i blokery."""
     from backend.notification_hooks import format_pipeline_blocked
     text = format_pipeline_blocked("promotion", [
         {"policy_action_id": 1, "priority": "critical"},
         {"policy_action_id": 2, "priority": "high"},
     ])
-    assert "promotion" in text
-    assert "PA#1" in text
-    assert "PA#2" in text
+    assert "wdrożeni" in text.lower()  # "wdrożenia nowych ustawień"
+    assert "#1" in text
+    assert "#2" in text
     assert "2" in text  # count
 
 
@@ -2582,7 +2581,7 @@ def test_notification_format_sla_breach():
     ]
     text = format_sla_breach(escalated)
     assert "2" in text
-    assert "SLA" in text
+    assert "termin" in text.lower() or "przekroczony" in text.lower()
 
 
 def test_notification_dispatch_logs_to_db():
@@ -3794,3 +3793,90 @@ def test_conflict_detection_directly():
     conflicts = detect_conflicts([remove, limit])
     assert len(conflicts) >= 1
     assert conflicts[0]["candidate_a"] == "sym_remove_X"
+
+
+# ============ EXIT QUALITY (ETAP B) ====================================
+
+def test_exit_quality_model_creation():
+    """ExitQuality — zapis rekordu do DB i odczyt."""
+    from backend.database import ExitQuality, SessionLocal
+    db = SessionLocal()
+    try:
+        eq = ExitQuality(
+            symbol="BTCUSDT", mode="demo", side="BUY",
+            entry_price=50000.0, exit_price=51000.0, quantity=0.01,
+            planned_tp=52000.0, planned_sl=49000.0,
+            mfe_price=51500.0, mae_price=49800.0,
+            gross_pnl=10.0, net_pnl=8.0, total_cost=2.0,
+            mfe_pnl=15.0, mae_pnl=-2.0,
+            gave_back_pct=46.67, tp_hit=False,
+            tp_near_miss_pct=75.0, sl_hit=False,
+            expected_rr=2.0, realized_rr=0.8,
+            edge_vs_cost=4.0, duration_seconds=3600.0,
+        )
+        db.add(eq)
+        db.commit()
+        db.refresh(eq)
+        assert eq.id is not None
+        assert eq.symbol == "BTCUSDT"
+        assert eq.gave_back_pct == 46.67
+    finally:
+        db.close()
+
+
+def test_exit_quality_report_empty():
+    """exit_quality_report zwraca pusty raport gdy brak danych."""
+    from backend.trading_effectiveness import exit_quality_report
+    from backend.database import SessionLocal
+    db = SessionLocal()
+    try:
+        result = exit_quality_report(db, mode="nonexistent_mode")
+        assert result["total_exits"] == 0
+    finally:
+        db.close()
+
+
+def test_exit_quality_report_with_data():
+    """exit_quality_report — poprawne agregaty z istniejących rekordów."""
+    from backend.trading_effectiveness import exit_quality_report
+    from backend.database import ExitQuality, SessionLocal
+    db = SessionLocal()
+    try:
+        # Wstaw dwa rekordy testowe
+        for i, (sym, tp_hit, sl_hit, gave, rr) in enumerate([
+            ("ETHUSDT", True, False, 20.0, 1.5),
+            ("ETHUSDT", False, True, 80.0, -0.5),
+        ]):
+            eq = ExitQuality(
+                symbol=sym, mode="demo_eqtest", side="BUY",
+                entry_price=3000.0, exit_price=3100.0, quantity=0.1,
+                planned_tp=3200.0, planned_sl=2900.0,
+                mfe_price=3150.0, mae_price=2950.0,
+                gross_pnl=10.0, net_pnl=8.0, total_cost=2.0,
+                mfe_pnl=15.0, mae_pnl=-5.0,
+                gave_back_pct=gave, tp_hit=tp_hit,
+                tp_near_miss_pct=75.0, sl_hit=sl_hit,
+                expected_rr=2.0, realized_rr=rr,
+                edge_vs_cost=4.0, duration_seconds=1800.0,
+            )
+            db.add(eq)
+        db.commit()
+
+        result = exit_quality_report(db, mode="demo_eqtest")
+        assert result["total_exits"] == 2
+        assert result["tp_hit_rate"] == 50.0
+        assert result["sl_hit_rate"] == 50.0
+        assert result["avg_gave_back_pct"] == 50.0
+        assert len(result["by_symbol"]) == 1
+        assert result["by_symbol"][0]["symbol"] == "ETHUSDT"
+    finally:
+        db.close()
+
+
+def test_exit_quality_endpoint(client):
+    """Endpoint /api/account/analytics/exit-quality zwraca sukces."""
+    resp = client.get("/api/account/analytics/exit-quality?mode=demo")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["success"] is True
+    assert "total_exits" in data["data"]

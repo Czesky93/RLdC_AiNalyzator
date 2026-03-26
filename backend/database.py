@@ -124,6 +124,47 @@ class Position(Base):
     mode = Column(String(10), nullable=False)  # demo, live
     opened_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    # Exit quality tracking (MFE/MAE)
+    planned_tp = Column(Float)       # TP ustawiony przy wejściu
+    planned_sl = Column(Float)       # SL ustawiony przy wejściu
+    mfe_price = Column(Float)        # Maximum Favorable Excursion — najlepsza cena od wejścia
+    mae_price = Column(Float)        # Maximum Adverse Excursion — najgorsza cena od wejścia
+    mfe_pnl = Column(Float)          # PnL w momencie MFE
+    mae_pnl = Column(Float)          # PnL w momencie MAE
+
+
+class ExitQuality(Base):
+    """Podsumowanie jakości trade'u — tworzone przy zamknięciu pozycji."""
+    __tablename__ = "exit_quality"
+
+    id = Column(Integer, primary_key=True, index=True)
+    symbol = Column(String(20), index=True, nullable=False)
+    mode = Column(String(10), nullable=False, index=True)
+    side = Column(String(10), nullable=False)
+    entry_price = Column(Float, nullable=False)
+    exit_price = Column(Float, nullable=False)
+    quantity = Column(Float, nullable=False)
+    planned_tp = Column(Float)
+    planned_sl = Column(Float)
+    mfe_price = Column(Float)
+    mae_price = Column(Float)
+    gross_pnl = Column(Float)
+    net_pnl = Column(Float)
+    total_cost = Column(Float)
+    # Metryki diagnostyczne
+    mfe_pnl = Column(Float)           # max zysk osiągnięty w trakcie pozycji
+    mae_pnl = Column(Float)           # max strata osiągnięta w trakcie pozycji
+    gave_back_pct = Column(Float)     # % zysku oddanego po MFE: (mfe_pnl - net_pnl) / mfe_pnl * 100
+    tp_hit = Column(Boolean)          # czy cena dotarła do TP
+    tp_near_miss_pct = Column(Float)  # jak blisko TP dotarł MFE: (mfe - entry) / (tp - entry) * 100
+    sl_hit = Column(Boolean)          # czy cena dotarła do SL
+    expected_rr = Column(Float)       # planowany R:R = (tp-entry) / (entry-sl)
+    realized_rr = Column(Float)       # zrealizowany R:R = net_pnl / |planned_risk|
+    edge_vs_cost = Column(Float)      # net_pnl / total_cost — >1 = edge pokrył koszty
+    duration_seconds = Column(Float)  # czas trwania pozycji
+    config_snapshot_id = Column(String(64), index=True)
+    exit_reason_code = Column(String(80))
+    closed_at = Column(DateTime, default=datetime.utcnow, index=True)
 
 
 class AccountSnapshot(Base):

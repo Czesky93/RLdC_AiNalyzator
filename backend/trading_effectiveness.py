@@ -38,6 +38,7 @@ from backend.accounting import (
 from backend.database import (
     CostLedger,
     DecisionTrace,
+    ExitQuality,
     Order,
     Position,
     Signal,
@@ -677,7 +678,78 @@ def effectiveness_bundle(db: Session, mode: str = "demo") -> Dict[str, Any]:
         "overtrading": overtrading_analysis(db, mode),
         "filters": filter_effectiveness(db, mode),
         "edge": edge_analysis(db, mode),
+        "exit_quality": exit_quality_report(db, mode),
         "suggestions": improvement_suggestions(db, mode),
+    }
+
+
+# ---------------------------------------------------------------------------
+# X.  Jakość wyjść — analiza MFE/MAE i TP/SL
+# ---------------------------------------------------------------------------
+
+def exit_quality_report(db: Session, mode: str = "demo") -> Dict[str, Any]:
+    """Raport jakości zamknięć: gave_back, TP/SL hit rate, RR, edge vs cost."""
+    rows = db.query(ExitQuality).filter(ExitQuality.mode == mode).all()
+    if not rows:
+        return {"total_exits": 0, "message": "Brak danych exit quality"}
+
+    total = len(rows)
+
+    def _safe(vals):
+        clean = [v for v in vals if v is not None]
+        return clean if clean else [0.0]
+
+    gave_back = _safe([r.gave_back_pct for r in rows])
+    realized_rr = _safe([r.realized_rr for r in rows])
+    expected_rr = _safe([r.expected_rr for r in rows])
+    edge_cost = _safe([r.edge_vs_cost for r in rows])
+    durations = _safe([r.duration_seconds for r in rows])
+
+    tp_hits = sum(1 for r in rows if r.tp_hit)
+    sl_hits = sum(1 for r in rows if r.sl_hit)
+
+    near_miss = _safe([r.tp_near_miss_pct for r in rows if r.tp_near_miss_pct is not None])
+
+    # Per-symbol breakdown
+    by_symbol: Dict[str, Dict[str, Any]] = defaultdict(lambda: {
+        "count": 0, "gave_back_sum": 0.0, "tp_hits": 0, "sl_hits": 0,
+        "net_pnl_sum": 0.0, "rr_sum": 0.0,
+    })
+    for r in rows:
+        sym = (r.symbol or "?").upper()
+        by_symbol[sym]["count"] += 1
+        by_symbol[sym]["gave_back_sum"] += float(r.gave_back_pct or 0)
+        by_symbol[sym]["net_pnl_sum"] += float(r.net_pnl or 0)
+        by_symbol[sym]["rr_sum"] += float(r.realized_rr or 0)
+        if r.tp_hit:
+            by_symbol[sym]["tp_hits"] += 1
+        if r.sl_hit:
+            by_symbol[sym]["sl_hits"] += 1
+
+    symbol_details = []
+    for sym, d in sorted(by_symbol.items(), key=lambda x: x[1]["count"], reverse=True):
+        cnt = d["count"]
+        symbol_details.append({
+            "symbol": sym,
+            "exits": cnt,
+            "avg_gave_back_pct": _round_metric(d["gave_back_sum"] / cnt),
+            "tp_hit_rate": _round_metric(d["tp_hits"] / cnt * 100),
+            "sl_hit_rate": _round_metric(d["sl_hits"] / cnt * 100),
+            "total_net_pnl": _round_metric(d["net_pnl_sum"]),
+            "avg_realized_rr": _round_metric(d["rr_sum"] / cnt),
+        })
+
+    return {
+        "total_exits": total,
+        "avg_gave_back_pct": _round_metric(sum(gave_back) / len(gave_back)),
+        "tp_hit_rate": _round_metric(tp_hits / total * 100),
+        "sl_hit_rate": _round_metric(sl_hits / total * 100),
+        "avg_tp_near_miss_pct": _round_metric(sum(near_miss) / len(near_miss)),
+        "avg_realized_rr": _round_metric(sum(realized_rr) / len(realized_rr)),
+        "avg_expected_rr": _round_metric(sum(expected_rr) / len(expected_rr)),
+        "avg_edge_vs_cost": _round_metric(sum(edge_cost) / len(edge_cost)),
+        "avg_duration_seconds": _round_metric(sum(durations) / len(durations)),
+        "by_symbol": symbol_details,
     }
 
 

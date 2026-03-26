@@ -389,31 +389,39 @@ async def governance_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         status = get_pipeline_status(db)
         queue = get_operator_queue(db)
 
-        promo_icon = "✅" if status.get("promotion_allowed") else "🚫"
-        rollback_icon = "✅" if status.get("rollback_allowed") else "🚫"
-        exp_icon = "✅" if status.get("experiment_allowed") else "🚫"
-        rec_icon = "✅" if status.get("recommendation_allowed") else "🚫"
+        promo_ok = status.get("promotion_allowed")
+        rollback_ok = status.get("rollback_allowed")
+        exp_ok = status.get("experiment_allowed")
+        rec_ok = status.get("recommendation_allowed")
 
-        lines = [
-            "🏛️ Governance — stan pipeline",
-            f"{promo_icon} Promocja (blokery: {status.get('promotion_blockers_count', 0)})",
-            f"{rollback_icon} Rollback (blokery: {status.get('rollback_blockers_count', 0)})",
-            f"{exp_icon} Eksperymenty (blokery: {status.get('experiment_blockers_count', 0)})",
-            f"{rec_icon} Rekomendacje (blokery: {status.get('recommendation_blockers_count', 0)})",
-            "",
-            f"Operator queue: {len(queue)} elementów",
-        ]
+        all_ok = promo_ok and rollback_ok and exp_ok and rec_ok
+
+        if all_ok:
+            lines = ["✅ Pipeline otwarty — wszystko działa normalnie"]
+        else:
+            lines = ["🟠 Pipeline częściowo zablokowany"]
+            if not promo_ok:
+                lines.append(f"  🚫 Wdrożenia zablokowane ({status.get('promotion_blockers_count', 0)} alertów)")
+            if not rollback_ok:
+                lines.append(f"  🚫 Cofanie zmian zablokowane ({status.get('rollback_blockers_count', 0)} alertów)")
+            if not exp_ok:
+                lines.append(f"  🚫 Eksperymenty zablokowane ({status.get('experiment_blockers_count', 0)} alertów)")
+            if not rec_ok:
+                lines.append(f"  🚫 Rekomendacje zablokowane ({status.get('recommendation_blockers_count', 0)} alertów)")
+
         if queue:
+            lines.append(f"\nDo przejrzenia: {len(queue)} spraw")
             for item in queue[:5]:
-                item_type = item.get("type", "?")
                 prio = item.get("priority", "?")
                 summary = (item.get("summary") or "-")[:60]
-                sla_info = ""
-                if item.get("sla_breached"):
-                    sla_info = " ⚠️ SLA!"
-                lines.append(f"  • [{prio}] {item_type}: {summary}{sla_info}")
+                sla_info = " ⏰ PILNE!" if item.get("sla_breached") else ""
+                lines.append(f"  • [{prio}] {summary}{sla_info}")
             if len(queue) > 5:
                 lines.append(f"  … i {len(queue) - 5} więcej")
+        elif all_ok:
+            pass
+        else:
+            lines.append("\nBrak spraw w kolejce operatora.")
 
         text = "\n".join(lines)
     except Exception as exc:
@@ -431,24 +439,33 @@ async def freeze_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         from backend.governance import check_pipeline_permission
 
         operations = ["promotion", "rollback", "experiment", "recommendation"]
-        lines = ["🧊 Aktywne blokady freeze:"]
         any_blocked = False
+        lines = []
+        op_labels = {
+            "promotion": "Wdrożenia",
+            "rollback": "Cofanie zmian",
+            "experiment": "Eksperymenty",
+            "recommendation": "Rekomendacje",
+        }
         for op in operations:
             result = check_pipeline_permission(db, op)
             if not result["allowed"]:
                 any_blocked = True
                 blockers = result["blocking_actions"]
-                lines.append(f"\n🚫 {op.upper()} — {len(blockers)} blokad:")
+                op_pl = op_labels.get(op, op)
+                lines.append(f"\n🚫 {op_pl} — zablokowane ({len(blockers)} alertów)")
                 for b in blockers[:3]:
-                    lines.append(
-                        f"  PA#{b['policy_action_id']} {b['policy_action']} "
-                        f"({b['priority']})"
-                    )
+                    pa_id = b.get("policy_action_id", "?")
+                    prio = b.get("priority", "?")
+                    lines.append(f"  • alert #{pa_id} (pilność: {prio})")
                 if len(blockers) > 3:
                     lines.append(f"  … i {len(blockers) - 3} więcej")
 
         if not any_blocked:
-            lines.append("✅ Brak aktywnych blokad — pipeline otwarty")
+            lines = ["✅ Brak blokad — pipeline otwarty, wszystko działa normalnie"]
+        else:
+            lines.insert(0, "🔒 Aktywne blokady:")
+            lines.append("\nCo zrobić: przejrzyj alerty komendą /incidents")
 
         text = "\n".join(lines)
     except Exception as exc:
@@ -469,19 +486,19 @@ async def incidents_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         active = [i for i in active if i.get("status") != "resolved"]
 
         if not active:
-            text = "✅ Brak aktywnych incydentów"
+            text = "✅ Brak aktywnych incydentów — wszystko w porządku"
         else:
-            lines = [f"🔔 Aktywne incydenty ({len(active)}):"]
+            prio_labels = {"critical": "krytyczna", "high": "wysoka", "medium": "średnia", "low": "niska"}
+            lines = [f"🔔 Aktywne incydenty: {len(active)}"]
             for inc in active[:10]:
                 inc_id = inc.get("id", "?")
                 prio = inc.get("priority", "?")
-                status = inc.get("status", "?")
-                pa_id = inc.get("policy_action_id", "?")
-                sla = inc.get("sla_deadline", "brak")
+                prio_pl = prio_labels.get(prio, prio)
                 icon = "🔴" if prio == "critical" else "🟠" if prio == "high" else "🟡"
-                lines.append(f"{icon} #{inc_id} [{status}] priorytet={prio}, PA#{pa_id}, SLA={sla}")
+                lines.append(f"{icon} #{inc_id} — pilność: {prio_pl}")
             if len(active) > 10:
                 lines.append(f"… i {len(active) - 10} więcej")
+            lines.append("\nCo zrobić: przejrzyj i zamknij nieaktualne incydenty")
             text = "\n".join(lines)
     except Exception as exc:
         text = f"❌ Błąd incidents: {exc}"

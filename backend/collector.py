@@ -26,6 +26,7 @@ from backend.database import (
     Signal,
     PendingOrder,
     AccountSnapshot,
+    ExitQuality,
     attach_costs_to_order,
     save_cost_entry,
     save_decision_trace,
@@ -416,6 +417,20 @@ class DataCollector:
                 )
 
                 if pending.side == "BUY":
+                    # Wylicz TP/SL z ATR na potrzeby exit quality tracking
+                    _planned_tp = None
+                    _planned_sl = None
+                    try:
+                        _ctx = get_live_context(db, pending.symbol, timeframe="1h", limit=120)
+                        if _ctx and _ctx.get("atr") and float(_ctx["atr"]) > 0:
+                            _atr = float(_ctx["atr"])
+                            _atr_take = float(config.get("atr_take_mult", 2.2))
+                            _atr_stop = float(config.get("atr_stop_mult", 1.3))
+                            _planned_tp = exec_price + _atr * _atr_take
+                            _planned_sl = exec_price - _atr * _atr_stop
+                    except Exception:
+                        pass
+
                     if not position:
                         position = Position(
                             symbol=pending.symbol,
@@ -434,6 +449,12 @@ class DataCollector:
                             entry_reason_code="pending_confirmed_execution",
                             mode="demo",
                             opened_at=datetime.utcnow(),
+                            planned_tp=_planned_tp,
+                            planned_sl=_planned_sl,
+                            mfe_price=exec_price,
+                            mae_price=exec_price,
+                            mfe_pnl=0.0,
+                            mae_pnl=0.0,
                         )
                         db.add(position)
                     else:
@@ -466,6 +487,8 @@ class DataCollector:
                         position.net_pnl = float(position.gross_pnl or 0.0) - float(position.total_cost or 0.0)
                         position.exit_reason_code = "pending_confirmed_execution"
                         if float(position.quantity) <= 0:
+                            # --- Exit Quality snapshot ---
+                            self._save_exit_quality(db, position, exec_price, config)
                             db.delete(position)
                     else:
                         # Brak pozycji — zapisujemy zlecenie, ale bez zmian pozycji.
@@ -547,6 +570,94 @@ class DataCollector:
         if executed_count:
             logger.info(f"✅ Wykonano potwierdzone transakcje DEMO: {executed_count}")
 
+    def _save_exit_quality(self, db: Session, position, exit_price: float, config: dict) -> None:
+        """Zapisz ExitQuality snapshot przy zamknięciu pozycji."""
+        try:
+            entry = float(position.entry_price or 0)
+            qty = float(position.quantity or 0) if float(position.quantity or 0) > 0 else float(getattr(position, "_orig_qty", 0) or 0)
+            # qty może być 0 bo już odjęto — weźmy z gross_pnl / move
+            move = exit_price - entry
+            if qty <= 0 and move != 0 and position.gross_pnl:
+                qty = abs(float(position.gross_pnl) / move)
+
+            gross = float(position.gross_pnl or 0)
+            total_cost = float(position.total_cost or 0)
+            net = gross - total_cost
+            mfe_pnl = float(position.mfe_pnl or 0)
+            mae_pnl = float(position.mae_pnl or 0)
+            planned_tp = getattr(position, "planned_tp", None)
+            planned_sl = getattr(position, "planned_sl", None)
+
+            # Czy dotarło do TP?
+            tp_hit = False
+            tp_near_miss_pct = None
+            if planned_tp is not None and entry > 0:
+                tp_range = planned_tp - entry
+                if tp_range > 0 and position.mfe_price is not None:
+                    mfe_above_entry = float(position.mfe_price) - entry
+                    tp_near_miss_pct = (mfe_above_entry / tp_range) * 100.0
+                    tp_hit = tp_near_miss_pct >= 100.0
+
+            # Czy dotarło do SL?
+            sl_hit = False
+            if planned_sl is not None and position.mae_price is not None:
+                sl_hit = float(position.mae_price) <= float(planned_sl)
+
+            # R:R
+            expected_rr = None
+            realized_rr = None
+            if planned_tp is not None and planned_sl is not None and entry > 0:
+                risk = entry - float(planned_sl)
+                reward = float(planned_tp) - entry
+                if risk > 0:
+                    expected_rr = reward / risk
+                    realized_rr = net / (risk * max(qty, 1e-12))
+
+            # Oddany zysk
+            gave_back_pct = None
+            if mfe_pnl > 0:
+                gave_back_pct = ((mfe_pnl - net) / mfe_pnl) * 100.0
+
+            # Edge vs cost
+            edge_vs_cost = (net / total_cost) if total_cost > 0 else None
+
+            # Czas trwania
+            duration_seconds = None
+            if position.opened_at:
+                duration_seconds = (datetime.utcnow() - position.opened_at).total_seconds()
+
+            eq = ExitQuality(
+                symbol=position.symbol,
+                mode=position.mode or "demo",
+                side=position.side or "LONG",
+                entry_price=entry,
+                exit_price=exit_price,
+                quantity=qty,
+                planned_tp=planned_tp,
+                planned_sl=planned_sl,
+                mfe_price=float(position.mfe_price) if position.mfe_price else None,
+                mae_price=float(position.mae_price) if position.mae_price else None,
+                gross_pnl=gross,
+                net_pnl=net,
+                total_cost=total_cost,
+                mfe_pnl=mfe_pnl,
+                mae_pnl=mae_pnl,
+                gave_back_pct=gave_back_pct,
+                tp_hit=tp_hit,
+                tp_near_miss_pct=tp_near_miss_pct,
+                sl_hit=sl_hit,
+                expected_rr=expected_rr,
+                realized_rr=realized_rr,
+                edge_vs_cost=edge_vs_cost,
+                duration_seconds=duration_seconds,
+                config_snapshot_id=position.config_snapshot_id,
+                exit_reason_code=position.exit_reason_code,
+                closed_at=datetime.utcnow(),
+            )
+            db.add(eq)
+        except Exception as exc:
+            log_exception("exit_quality", "Błąd zapisu ExitQuality", exc, db=db)
+
     def _mark_to_market_positions(self, db: Session, mode: str = "demo") -> None:
         """
         Aktualizuj `current_price` i `unrealized_pnl` dla otwartych pozycji na bazie ostatnich MarketData.
@@ -593,10 +704,28 @@ class DataCollector:
                 if p.entry_price is not None and p.quantity is not None:
                     entry = float(p.entry_price)
                     qty = float(p.quantity)
-                    if (p.side or "").upper() == "SHORT":
+                    is_short = (p.side or "").upper() == "SHORT"
+                    if is_short:
                         p.unrealized_pnl = (entry - price) * qty
                     else:
                         p.unrealized_pnl = (price - entry) * qty
+
+                    # --- MFE / MAE tracking ---
+                    cur_pnl = float(p.unrealized_pnl)
+                    if is_short:
+                        if p.mfe_price is None or price < p.mfe_price:
+                            p.mfe_price = price
+                            p.mfe_pnl = cur_pnl
+                        if p.mae_price is None or price > p.mae_price:
+                            p.mae_price = price
+                            p.mae_pnl = cur_pnl
+                    else:
+                        if p.mfe_price is None or price > p.mfe_price:
+                            p.mfe_price = price
+                            p.mfe_pnl = cur_pnl
+                        if p.mae_price is None or price < p.mae_price:
+                            p.mae_price = price
+                            p.mae_pnl = cur_pnl
                 updated += 1
 
             if updated:
@@ -965,13 +1094,16 @@ class DataCollector:
                     strategy_name="demo_collector",
                 )
                 msg = (
-                    "DEMO — Potwierdzenie transakcji\n"
-                    f"Para: {sym}\n"
-                    "Akcja: SPRZEDAJ (zamknięcie pozycji)\n"
+                    f"🟡 Zamknięcie pozycji — {sym}\n"
+                    f"\n"
+                    f"Co się stało: cena osiągnęła poziom wyjścia (TP lub SL)\n"
                     f"Cena teraz: {price}\n"
-                    f"TP (cel): {take:.6f}\n"
-                    f"SL (limit straty): {stop:.6f}\n"
-                    f"Potwierdź: /confirm {pending_id}   Odrzuć: /reject {pending_id}"
+                    f"Cel (TP): {take:.6f}\n"
+                    f"Limit straty (SL): {stop:.6f}\n"
+                    f"\n"
+                    f"Co zrobić:\n"
+                    f"/confirm {pending_id} — potwierdź sprzedaż\n"
+                    f"/reject {pending_id} — odrzuć"
                 )
                 self._send_telegram_alert("DEMO: EXIT", msg, force_send=True)
                 db.add(
@@ -993,7 +1125,7 @@ class DataCollector:
                 if drawdown_pct <= -max_drawdown_pct:
                     if not self.last_risk_alert_ts or (now - self.last_risk_alert_ts).total_seconds() > 900:
                         self.last_risk_alert_ts = now
-                        msg = f"Pozycja {p.symbol} przekroczyła DD {max_drawdown_pct}% ({drawdown_pct:.2f}%)."
+                        msg = f"🔴 Pozycja {p.symbol} traci za dużo ({drawdown_pct:.1f}%, limit: {max_drawdown_pct}%).\nSystem ograniczył ryzyko na tym symbolu.\nCo zrobić: rozważ zamknięcie pozycji."
                         log_to_db("WARNING", "demo_trading", msg, db=db)
                         self._send_telegram_alert("RISK: Drawdown", msg, force_send=True)
                         db.add(
@@ -1166,8 +1298,10 @@ class DataCollector:
                 if not self.last_crash_alert_ts or (now - self.last_crash_alert_ts).total_seconds() > 1800:
                     self.last_crash_alert_ts = now
                     msg = (
-                        f"Crash mode: {symbol} spadek > {crash_drop_pct}% w {crash_window_minutes} min. "
-                        "DEMO: ograniczenie ryzyka, bez wyłączania."
+                        f"🔴 Gwałtowny spadek: {symbol}\n"
+                        f"Spadek > {crash_drop_pct}% w ciągu {crash_window_minutes} min.\n"
+                        f"System: ograniczenie ryzyka, bot nadal działa.\n"
+                        f"Co zrobić: obserwuj sytuację, nie otwieraj nowych pozycji ręcznie."
                     )
                     log_to_db("WARNING", "demo_trading", msg, db=db)
                     self._send_telegram_alert("RISK: Crash mode", msg, force_send=True)
@@ -1379,17 +1513,22 @@ class DataCollector:
 
             buy_rng = f"{r.get('buy_low')} – {r.get('buy_high')}"
             sell_rng = f"{r.get('sell_low')} – {r.get('sell_high')}"
+            action_emoji = "🟢" if side == "BUY" else "🔴"
             msg = (
-                "DEMO — Potwierdzenie transakcji\n"
-                f"Para: {symbol}\n"
-                f"Akcja: {action_pl} TERAZ\n"
+                f"{action_emoji} Nowa transakcja — {symbol}\n"
+                f"\n"
+                f"Kierunek: {action_pl}\n"
                 f"Cena teraz: {price}\n"
-                f"TP (cel): {tp:.6f}\n"
-                f"SL (limit straty): {sl:.6f}\n"
-                f"Zakresy AI: BUY {buy_rng} | SELL {sell_rng}\n"
-                f"Dlaczego: {why}\n"
+                f"Cel (TP): {tp:.6f}\n"
+                f"Limit straty (SL): {sl:.6f}\n"
                 f"Pewność AI: {int(float(sig.confidence)*100)}% | Ocena: {rating}/5\n"
-                f"Potwierdź: /confirm {pending_id}   Odrzuć: /reject {pending_id}"
+                f"Dlaczego: {why}\n"
+                f"\n"
+                f"Zakresy AI: KUP {buy_rng} | SPRZEDAJ {sell_rng}\n"
+                f"\n"
+                f"Co zrobić:\n"
+                f"/confirm {pending_id} — potwierdź\n"
+                f"/reject {pending_id} — odrzuć"
             )
             self._send_telegram_alert("DEMO: POTWIERDŹ", msg, force_send=True)
             db.add(
@@ -1423,7 +1562,7 @@ class DataCollector:
             state["loss_streak"] = min(int(state.get("loss_streak", 0)) + 1, loss_streak_limit)
             state["cooldown"] = min(base_cooldown * (1 + int(state["loss_streak"])), 3600)
             self.demo_state[sym] = state
-        msg = "Limit dziennej straty osiągnięty — ograniczam ryzyko (DEMO), bez wyłączania bota."
+        msg = "🟠 Dzienny limit straty osiągnięty\nSystem ograniczył ryzyko na wszystkich symbolach.\nBot nadal działa, ale nowe transakcje są wstrzymane.\nCo zrobić: poczekaj na następny dzień lub przejrzyj otwarte pozycje."
         log_to_db("WARNING", "demo_trading", msg, db=db)
         self._send_telegram_alert("RISK: Daily loss", msg, force_send=True)
 

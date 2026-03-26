@@ -93,6 +93,7 @@ from backend.correlation import (
 )
 from backend.trading_effectiveness import (
     effectiveness_bundle,
+    exit_quality_report,
     symbol_effectiveness,
     reason_code_effectiveness,
     strategy_effectiveness,
@@ -1593,6 +1594,16 @@ async def trading_effectiveness_strategies(
 ):
     """Skuteczność per strategia — expectancy, edge gap, cost leakage."""
     data = strategy_effectiveness(db, mode=mode)
+    return {"success": True, "data": data}
+
+
+@router.get("/analytics/exit-quality")
+async def get_exit_quality(
+    mode: str = "demo",
+    db: Session = Depends(get_db),
+):
+    """Jakość wyjść z pozycji — gave_back, TP/SL hit rate, RR, edge vs cost."""
+    data = exit_quality_report(db, mode=mode)
     return {"success": True, "data": data}
 
 

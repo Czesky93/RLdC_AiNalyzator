@@ -48,96 +48,198 @@ EVENT_SLA_BREACH = "sla_breach"
 
 
 # ---------------------------------------------------------------------------
+# Mapowanie akcji → opis po polsku
+# ---------------------------------------------------------------------------
+
+_ACTION_LABELS: dict[str, str] = {
+    "REQUIRE_MANUAL_REVIEW": "Wymagany ręczny przegląd",
+    "ESCALATE_TO_OPERATOR": "Eskalacja do operatora",
+    "PREPARE_ROLLBACK": "Przygotowanie cofnięcia zmian",
+    "BLOCK_PIPELINE": "Blokada pipeline",
+    "AUTO_FREEZE": "Automatyczne zamrożenie",
+}
+
+_SOURCE_LABELS: dict[str, str] = {
+    "promotion_monitoring": "monitoring po wdrożeniu",
+    "rollback_monitoring": "monitoring po cofnięciu",
+    "post_promotion_monitoring": "monitoring po wdrożeniu",
+    "post_rollback_monitoring": "monitoring po cofnięciu",
+    "reevaluation_worker": "cykliczna rewaluacja",
+    "trading_effectiveness": "diagnostyka skuteczności",
+    "risk": "moduł ryzyka",
+}
+
+_REASON_LABELS: dict[str, str] = {
+    "POST_PROMOTION_NET_PNL_DEGRADATION": "po wdrożeniu ustawień wynik netto się pogorszył",
+    "POST_PROMOTION_RISK_PRESSURE_INCREASED": "po wdrożeniu wzrosło ciśnienie ryzyka",
+    "POST_ROLLBACK_RISK_PRESSURE_PERSISTENT": "po cofnięciu zmian ryzyko nadal jest wysokie",
+    "NET_PNL_NEGATIVE": "wynik netto jest ujemny",
+    "COST_LEAKAGE_HIGH": "koszty transakcyjne są za wysokie",
+    "OVERTRADING_DETECTED": "wykryto za dużo transakcji",
+}
+
+_PRIORITY_LABELS: dict[str, str] = {
+    "critical": "krytyczna",
+    "high": "wysoka",
+    "medium": "średnia",
+    "low": "niska",
+}
+
+
+def _human_source(source_type: str | None) -> str:
+    return _SOURCE_LABELS.get(source_type or "", source_type or "nieznane")
+
+
+def _human_action(action: str | None) -> str:
+    return _ACTION_LABELS.get(action or "", action or "nieznana")
+
+
+def _human_priority(prio: str | None) -> str:
+    return _PRIORITY_LABELS.get(prio or "", prio or "?")
+
+
+def _human_reasons(summary: str | None) -> str:
+    if not summary:
+        return ""
+    for code, label in _REASON_LABELS.items():
+        if code in (summary or ""):
+            return label
+    return summary or ""
+
+
+# ---------------------------------------------------------------------------
 # Formattery (czyste funkcje → str)
 # ---------------------------------------------------------------------------
 
 def format_incident_created(incident: Dict[str, Any], policy_action: Dict[str, Any] | None = None) -> str:
     """Formatuj powiadomienie o nowym incydencie."""
-    priority = incident.get("priority", "?")
+    priority = incident.get("priority", "medium")
+    icon = "🔴" if priority == "critical" else "🟠" if priority == "high" else "🟡"
+    prio_pl = _human_priority(priority)
+
+    source_desc = ""
+    reason_desc = ""
+    if policy_action:
+        source_desc = _human_source(policy_action.get("source_type"))
+        reason_desc = _human_reasons(policy_action.get("summary"))
+
+    lines = [f"{icon} Nowy incydent"]
+
+    if reason_desc:
+        lines.append(f"Co się stało: {reason_desc}")
+    elif source_desc:
+        lines.append(f"Źródło: {source_desc}")
+
+    lines.append(f"Pilność: {prio_pl}")
+
+    if policy_action:
+        action_pl = _human_action(policy_action.get("policy_action"))
+        lines.append(f"System: {action_pl}")
+
+    if priority == "critical":
+        lines.append("Co zrobić: natychmiast sprawdź sytuację")
+    elif priority == "high":
+        lines.append("Co zrobić: przejrzyj i podejmij decyzję")
+    else:
+        lines.append("Co zrobić: weź pod uwagę przy następnej kontroli")
+
     inc_id = incident.get("id", "?")
     pa_id = incident.get("policy_action_id", "?")
-    sla = incident.get("sla_deadline", "brak")
-
-    icon = "🔴" if priority == "critical" else "🟠" if priority == "high" else "🟡"
-    lines = [
-        f"{icon} NOWY INCYDENT #{inc_id}",
-        f"Priorytet: {priority}",
-        f"Policy Action: #{pa_id}",
-    ]
-    if policy_action:
-        lines.append(f"Akcja: {policy_action.get('policy_action', '?')}")
-        lines.append(f"Źródło: {policy_action.get('source_type', '?')}/{policy_action.get('source_id', '?')}")
-        lines.append(f"Opis: {policy_action.get('summary', '-')}")
-    if sla and sla != "brak":
-        lines.append(f"SLA deadline: {sla}")
+    lines.append(f"\nSzczegóły: incydent #{inc_id}, PA #{pa_id}")
     return "\n".join(lines)
 
 
 def format_incident_escalated(incident: Dict[str, Any]) -> str:
     """Formatuj powiadomienie o eskalacji incydentu (SLA breach)."""
     inc_id = incident.get("id", "?")
-    pa_id = incident.get("policy_action_id", "?")
-    priority = incident.get("priority", "?")
-    sla = incident.get("sla_deadline", "?")
+    priority = incident.get("priority", "high")
+    prio_pl = _human_priority(priority)
     return (
-        f"⚠️ ESKALACJA INCYDENTU #{inc_id}\n"
-        f"Priorytet: {priority}\n"
-        f"Policy Action: #{pa_id}\n"
-        f"SLA deadline przekroczony: {sla}\n"
-        f"Wymagana natychmiastowa reakcja operatora!"
+        f"⚠️ Eskalacja — incydent #{inc_id}\n"
+        f"Termin (SLA) został przekroczony.\n"
+        f"Pilność: {prio_pl}\n"
+        f"Co zrobić: natychmiast sprawdź i zamknij ten incydent"
     )
 
 
 def format_policy_action_created(policy_action: Dict[str, Any]) -> str:
     """Formatuj powiadomienie o nowej policy action."""
-    pa_id = policy_action.get("id", "?")
-    action = policy_action.get("policy_action", "?")
-    priority = policy_action.get("priority", "?")
-    source = f"{policy_action.get('source_type', '?')}/{policy_action.get('source_id', '?')}"
-    summary = policy_action.get("summary", "-")
-
-    promo = "zablokowana" if not policy_action.get("promotion_allowed", True) else "dozwolona"
-    rollback = "dozwolony" if policy_action.get("rollback_allowed", True) else "zablokowany"
-    experiments = "dozwolone" if policy_action.get("experiments_allowed", True) else "zablokowane"
-
+    priority = policy_action.get("priority", "medium")
     icon = "🔴" if priority == "critical" else "🟠" if priority == "high" else "🟡"
-    lines = [
-        f"{icon} NOWA POLICY ACTION #{pa_id}",
-        f"Akcja: {action}",
-        f"Priorytet: {priority}",
-        f"Źródło: {source}",
-        f"Opis: {summary}",
-        f"Promocja: {promo} | Rollback: {rollback} | Eksperymenty: {experiments}",
-    ]
+    prio_pl = _human_priority(priority)
+    action_pl = _human_action(policy_action.get("policy_action"))
+    source_pl = _human_source(policy_action.get("source_type"))
+    reason_pl = _human_reasons(policy_action.get("summary"))
+
+    lines = [f"{icon} {action_pl}"]
+
+    if reason_pl:
+        lines.append(f"Co się stało: {reason_pl}")
+    else:
+        lines.append(f"Źródło: {source_pl}")
+
+    lines.append(f"Pilność: {prio_pl}")
+
+    blocked_parts = []
+    if not policy_action.get("promotion_allowed", True):
+        blocked_parts.append("promocje")
+    if not policy_action.get("experiments_allowed", True):
+        blocked_parts.append("eksperymenty")
+    if not policy_action.get("rollback_allowed", True):
+        blocked_parts.append("rollback")
+    if blocked_parts:
+        lines.append(f"Zablokowano: {', '.join(blocked_parts)}")
+
     if policy_action.get("requires_human_review"):
-        lines.append("👤 Wymaga przeglądu operatora")
+        lines.append("Co zrobić: przejrzyj sytuację i potwierdź")
+    elif priority in ("critical", "high"):
+        lines.append("Co zrobić: sprawdź ostatnie zmiany konfiguracji")
+
+    pa_id = policy_action.get("id", "?")
+    source_id = policy_action.get("source_id", "?")
+    lines.append(f"\nSzczegóły: PA #{pa_id}, źródło {policy_action.get('source_type', '?')}/{source_id}")
     return "\n".join(lines)
 
 
 def format_pipeline_blocked(operation: str, blocking_actions: list) -> str:
     """Formatuj powiadomienie o zablokowanej operacji pipeline."""
-    blockers_desc = ", ".join(
-        f"PA#{b.get('policy_action_id', '?')} ({b.get('priority', '?')})"
-        for b in blocking_actions[:5]
-    )
-    return (
-        f"🚫 OPERACJA ZABLOKOWANA\n"
-        f"Operacja: {operation}\n"
-        f"Blokery: {blockers_desc}\n"
-        f"Liczba blokad: {len(blocking_actions)}"
-    )
+    op_labels = {
+        "promotion": "wdrożenia nowych ustawień",
+        "experiment": "uruchomienia eksperymentu",
+        "rollback": "cofnięcia zmian",
+        "recommendation": "zastosowania rekomendacji",
+    }
+    op_pl = op_labels.get(operation, operation)
+    count = len(blocking_actions)
+
+    lines = [
+        f"🔒 Nie można wykonać: {op_pl}",
+        f"System zablokował tę operację, bo są aktywne alerty bezpieczeństwa ({count}).",
+        "Co zrobić: najpierw zamknij lub przejrzyj aktywne alerty",
+    ]
+    for b in blocking_actions[:3]:
+        pa_id = b.get("policy_action_id", "?")
+        prio = _human_priority(b.get("priority"))
+        lines.append(f"  • alert #{pa_id} (pilność: {prio})")
+    if count > 3:
+        lines.append(f"  … i {count - 3} więcej")
+    return "\n".join(lines)
 
 
 def format_sla_breach(escalated: List[Dict[str, Any]]) -> str:
     """Formatuj powiadomienie o naruszeniu SLA (batch)."""
-    lines = [f"⏰ NARUSZENIE SLA — {len(escalated)} incydent(ów) eskalowanych:"]
-    for inc in escalated[:10]:
+    count = len(escalated)
+    lines = [
+        f"⏰ Przekroczony termin reakcji — {count} incydent(ów)",
+        "Nie zareagowano w wymaganym czasie. Wymagana natychmiastowa uwaga.",
+    ]
+    for inc in escalated[:5]:
         inc_id = inc.get("id", "?")
-        priority = inc.get("priority", "?")
-        sla = inc.get("sla_deadline", "?")
-        lines.append(f"  • Incydent #{inc_id} (priorytet: {priority}, SLA: {sla})")
-    if len(escalated) > 10:
-        lines.append(f"  … i {len(escalated) - 10} więcej")
+        prio_pl = _human_priority(inc.get("priority"))
+        lines.append(f"  • incydent #{inc_id} (pilność: {prio_pl})")
+    if count > 5:
+        lines.append(f"  … i {count - 5} więcej")
+    lines.append("Co zrobić: przejrzyj i zamknij zaległe incydenty")
     return "\n".join(lines)
 
 
