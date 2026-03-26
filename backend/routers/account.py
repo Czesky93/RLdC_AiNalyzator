@@ -98,6 +98,7 @@ from backend.trading_effectiveness import (
     strategy_effectiveness,
 )
 from backend.tuning_insights import generate_tuning_candidates, tuning_summary
+from backend.candidate_validation import generate_experiment_feed, experiment_feed_summary
 from backend.runtime_settings import RuntimeSettingsError
 
 router = APIRouter()
@@ -1615,4 +1616,27 @@ async def tuning_insights_summary(
 ):
     """Skrócone podsumowanie + top 5 akcji do podjęcia."""
     data = tuning_summary(db, mode=mode)
+    return {"success": True, "data": data}
+
+
+# ============ CANDIDATE VALIDATION / EXPERIMENT FEED (ETAP Z) ============
+
+
+@router.get("/analytics/experiment-feed")
+async def experiment_feed(
+    mode: str = "demo",
+    db: Session = Depends(get_db),
+):
+    """Pełny pipeline: kandydaci → klasyfikacja → konflikty → paczki eksperymentalne."""
+    data = generate_experiment_feed(db, mode=mode)
+    return {"success": True, "data": data}
+
+
+@router.get("/analytics/experiment-feed/summary")
+async def experiment_feed_summary_endpoint(
+    mode: str = "demo",
+    db: Session = Depends(get_db),
+):
+    """Skrót: ile paczek gotowych, ile konfliktów, ile czeka na dane."""
+    data = experiment_feed_summary(db, mode=mode)
     return {"success": True, "data": data}

@@ -3635,3 +3635,162 @@ def test_tuning_insights_confidence_range(client):
         assert 0.0 <= c["confidence"] <= 1.0, (
             f"Confidence poza zakresem: {c['confidence']}"
         )
+
+
+# ============ CANDIDATE VALIDATION / EXPERIMENT FEED (ETAP Z) ============
+
+
+def test_experiment_feed_endpoint(client):
+    """Endpoint GET /analytics/experiment-feed zwraca pełny pipeline."""
+    _ensure_effectiveness_data()
+    resp = client.get("/api/account/analytics/experiment-feed")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["success"] is True
+    data = body["data"]
+    assert "total_candidates" in data
+    assert "classification" in data
+    assert "conflicts" in data
+    assert "bundles" in data
+    assert "needs_more_data" in data
+    assert "info_only" in data
+    assert isinstance(data["bundles"], list)
+    assert isinstance(data["conflicts"], list)
+
+
+def test_experiment_feed_classification(client):
+    """Classification rozdziela kandydatów na actionable / needs_more_data / info_only."""
+    resp = client.get("/api/account/analytics/experiment-feed")
+    cls = resp.json()["data"]["classification"]
+    assert "actionable" in cls
+    assert "needs_more_data" in cls
+    assert "info_only" in cls
+    total = cls["actionable"] + cls["needs_more_data"] + cls["info_only"]
+    assert total == resp.json()["data"]["total_candidates"]
+
+
+def test_experiment_feed_bundles_structure(client):
+    """Każda paczka ma wymagane pola."""
+    resp = client.get("/api/account/analytics/experiment-feed")
+    bundles = resp.json()["data"]["bundles"]
+    for b in bundles:
+        for key in ("name", "scope", "priority", "avg_confidence",
+                     "candidates_count", "settings_affected", "candidates"):
+            assert key in b, f"Brak pola {key} w paczce {b.get('name')}"
+        assert isinstance(b["candidates"], list)
+        assert len(b["candidates"]) > 0
+        assert len(b["candidates"]) <= 4  # MAX_CANDIDATES_PER_BUNDLE
+
+
+def test_experiment_feed_bundle_priorities(client):
+    """Priorytety paczek muszą być poprawne."""
+    resp = client.get("/api/account/analytics/experiment-feed")
+    valid = {"wysoki", "średni", "niski", "informacyjny"}
+    for b in resp.json()["data"]["bundles"]:
+        assert b["priority"] in valid
+
+
+def test_experiment_feed_bundles_limit(client):
+    """Nie więcej niż MAX_BUNDLES paczek."""
+    resp = client.get("/api/account/analytics/experiment-feed")
+    bundles = resp.json()["data"]["bundles"]
+    assert len(bundles) <= 5  # MAX_BUNDLES
+
+
+def test_experiment_feed_conflicts_structure(client):
+    """Konflikty mają wymagane pola."""
+    resp = client.get("/api/account/analytics/experiment-feed")
+    for conflict in resp.json()["data"]["conflicts"]:
+        assert "candidate_a" in conflict
+        assert "candidate_b" in conflict
+        assert "reason" in conflict
+        assert "resolution" in conflict
+
+
+def test_experiment_feed_summary_endpoint(client):
+    """Endpoint GET /analytics/experiment-feed/summary zwraca skrót."""
+    resp = client.get("/api/account/analytics/experiment-feed/summary")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["success"] is True
+    data = body["data"]
+    assert "total_candidates" in data
+    assert "classification" in data
+    assert "bundles_ready" in data
+    assert "conflicts_count" in data
+    assert "top_bundles" in data
+    assert isinstance(data["top_bundles"], list)
+
+
+def test_experiment_feed_summary_top_bundles_limit(client):
+    """Top bundles — max 3 pozycji."""
+    resp = client.get("/api/account/analytics/experiment-feed/summary")
+    top = resp.json()["data"]["top_bundles"]
+    assert len(top) <= 3
+
+
+def test_experiment_feed_functions_directly():
+    """Bezpośredni test generate_experiment_feed."""
+    from backend.candidate_validation import generate_experiment_feed
+
+    db = SessionLocal()
+    try:
+        feed = generate_experiment_feed(db, mode="demo")
+        assert isinstance(feed, dict)
+        assert "total_candidates" in feed
+        assert "bundles" in feed
+        assert feed["bundles_count"] == len(feed["bundles"])
+    finally:
+        db.close()
+
+
+def test_candidate_classification_directly():
+    """Bezpośredni test classify_candidates."""
+    from backend.candidate_validation import classify_candidates
+
+    # Kandydat actionable (wysoki priorytet, wysoka confidence)
+    high = {
+        "id": "test_high", "category": "symbol_filter",
+        "priority": "wysoki", "action": "test", "setting_key": "watchlist",
+        "target": "TESTSYM", "confidence": 0.8, "reason": "test",
+    }
+    # Kandydat needs_more_data (za mała confidence)
+    low_conf = {
+        "id": "test_low", "category": "symbol_filter",
+        "priority": "wysoki", "action": "test", "setting_key": "watchlist",
+        "target": "LOWSYM", "confidence": 0.1, "reason": "test",
+    }
+    # Kandydat info_only
+    info = {
+        "id": "test_info", "category": "cost_optimization",
+        "priority": "informacyjny", "action": "test", "setting_key": None,
+        "target": "global", "confidence": 0.5, "reason": "test",
+    }
+
+    result = classify_candidates([high, low_conf, info])
+    assert len(result["actionable"]) == 1
+    assert len(result["needs_more_data"]) == 1
+    assert len(result["info_only"]) == 1
+    assert result["actionable"][0]["id"] == "test_high"
+
+
+def test_conflict_detection_directly():
+    """Bezpośredni test detect_conflicts."""
+    from backend.candidate_validation import detect_conflicts
+
+    # Dwa kandydaty: usunięcie z watchlist + zmiana per-hour dla tego samego symbolu
+    remove = {
+        "id": "sym_remove_X", "category": "symbol_filter",
+        "priority": "wysoki", "action": "usuń_z_watchlist",
+        "setting_key": "watchlist", "target": "XSYM", "confidence": 0.8,
+    }
+    limit = {
+        "id": "sym_limit_X", "category": "activity_limit",
+        "priority": "średni", "action": "ogranicz_aktywność",
+        "setting_key": "max_trades_per_hour_per_symbol", "target": "XSYM",
+        "confidence": 0.5,
+    }
+
+    conflicts = detect_conflicts([remove, limit])
+    assert len(conflicts) >= 1
+    assert conflicts[0]["candidate_a"] == "sym_remove_X"
