@@ -1,7 +1,7 @@
 'use client'
 
-import React, { useEffect, useState } from 'react'
 import { X } from 'lucide-react'
+import { useEffect, useState } from 'react'
 import { API_BASE } from '../../lib/api'
 
 interface Position {

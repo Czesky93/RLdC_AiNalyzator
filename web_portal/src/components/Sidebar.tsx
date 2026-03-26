@@ -1,23 +1,19 @@
 'use client'
 
-import React from 'react'
 import {
-  LayoutDashboard,
-  TrendingUp,
-  Target,
-  Wallet,
-  Layers,
-  Activity,
-  BarChart3,
-  TestTube,
-  Bell,
-  Newspaper,
-  BarChart2,
-  FileText,
-  Settings,
-  Terminal,
-  Users,
-  Shield,
+    Activity,
+    BarChart2,
+    BarChart3,
+    Bell,
+    FileText,
+    Layers,
+    LayoutDashboard,
+    Newspaper,
+    Settings,
+    Shield,
+    Target,
+    TestTube,
+    Wallet
 } from 'lucide-react'
 
 interface SidebarProps {

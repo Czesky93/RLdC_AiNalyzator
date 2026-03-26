@@ -645,6 +645,10 @@ class DataCollector:
                 pass
             log_exception("collector", "Błąd zapisu AccountSnapshot (DEMO)", exc, db=db)
 
+    # ------------------------------------------------------------------
+    # _demo_trading — orkiestrator (wydzielone etapy)
+    # ------------------------------------------------------------------
+
     def _demo_trading(self, db: Session):
         runtime_ctx = self._runtime_context(db)
         config = runtime_ctx["config"]
@@ -658,6 +662,32 @@ class DataCollector:
             return
 
         now = datetime.utcnow()
+        tc = self._load_trading_config(db, config, runtime_ctx, now)
+        if tc is None:
+            return
+
+        # 1) Exit management — TP/SL/trailing
+        self._check_exits(db, tc)
+
+        # 2) Nowe wejścia — screening + gating
+        self._screen_entry_candidates(db, tc)
+
+        # 3) Globalny hamulec strat
+        self._apply_daily_loss_brake(db, tc)
+
+        try:
+            db.commit()
+        except Exception as exc:
+            db.rollback()
+            log_exception("demo_trading", "Błąd commit demo_trading", exc, db=db)
+            return
+
+    # ------------------------------------------------------------------
+    # Etap 0: ładowanie konfiguracji tradingowej
+    # ------------------------------------------------------------------
+
+    def _load_trading_config(self, db: Session, config: dict, runtime_ctx: dict, now) -> dict | None:
+        """Zwraca spłaszczony dict z parametrami do _demo_trading, lub None jeśli brak danych."""
         demo_quote_ccy = get_demo_quote_ccy()
         account_state = compute_demo_account_state(db, quote_ccy=demo_quote_ccy, now=now)
         initial_balance = float(account_state.get("initial_balance") or float(os.getenv("DEMO_INITIAL_BALANCE", "10000")))
@@ -704,26 +734,26 @@ class DataCollector:
         min_order_notional = float(config.get("min_order_notional", 25.0))
         loss_streak_limit = int(config.get("loss_streak_limit", 3))
 
-        # Legacy fallbacks not yet migrated into runtime settings
-        base_qty = float(os.getenv("DEMO_ORDER_QTY", "0.01"))
-        base_min_confidence = float(os.getenv("DEMO_MIN_SIGNAL_CONFIDENCE", "0.75"))
-        max_signal_age = int(os.getenv("DEMO_MAX_SIGNAL_AGE_SECONDS", "3600"))
+        # Trading-core settings (migrated from env)
+        base_qty = float(config.get("demo_order_qty", 0.01))
+        base_min_confidence = float(config.get("demo_min_signal_confidence", 0.75))
+        max_signal_age = int(config.get("demo_max_signal_age_seconds", 3600))
         min_klines = int(os.getenv("DEMO_MIN_KLINES", "60"))
 
-        crash_window_minutes = int(os.getenv("CRASH_WINDOW_MINUTES", "60"))
-        crash_drop_pct = float(os.getenv("CRASH_DROP_PERCENT", "6.0"))
-        crash_cooldown_seconds = int(os.getenv("CRASH_COOLDOWN_SECONDS", "7200"))
+        crash_window_minutes = int(config.get("crash_window_minutes", 60))
+        crash_drop_pct = float(config.get("crash_drop_percent", 6.0))
+        crash_cooldown_seconds = int(config.get("crash_cooldown_seconds", 7200))
 
-        atr_stop_mult = float(os.getenv("ATR_STOP_MULT", "1.3"))
-        atr_take_mult = float(os.getenv("ATR_TAKE_MULT", "2.2"))
-        trail_mult = float(os.getenv("ATR_TRAIL_MULT", "1.0"))
+        atr_stop_mult = float(config.get("atr_stop_mult", 1.3))
+        atr_take_mult = float(config.get("atr_take_mult", 2.2))
+        trail_mult = float(config.get("atr_trail_mult", 1.0))
 
-        extreme_margin_pct = float(os.getenv("EXTREME_RANGE_MARGIN_PCT", "0.02"))
-        extreme_min_conf = float(os.getenv("EXTREME_MIN_CONFIDENCE", "0.85"))
-        extreme_min_rating = int(os.getenv("EXTREME_MIN_RATING", "4"))
+        extreme_margin_pct = float(config.get("extreme_range_margin_pct", 0.02))
+        extreme_min_conf = float(config.get("extreme_min_confidence", 0.85))
+        extreme_min_rating = int(config.get("extreme_min_rating", 4))
 
-        max_qty = float(os.getenv("DEMO_MAX_POSITION_QTY", "1.0"))
-        min_qty = float(os.getenv("DEMO_MIN_POSITION_QTY", "0.001"))
+        max_qty = float(config.get("demo_max_position_qty", 1.0))
+        min_qty = float(config.get("demo_min_position_qty", 0.001))
 
         # Maksymalna pewność = mniej transakcji, wyższe progi, dłuższy cooldown.
         if max_certainty_mode:
@@ -735,9 +765,54 @@ class DataCollector:
             base_cooldown = max(base_cooldown, 3600)
             base_risk_per_trade = min(base_risk_per_trade, 0.002)
 
-        pending_cooldown_seconds = int(os.getenv("PENDING_ORDER_COOLDOWN_SECONDS", "3600"))
-        now = datetime.utcnow()
+        pending_cooldown_seconds = int(config.get("pending_order_cooldown_seconds", 3600))
 
+        # Zakresy z bloga (OpenAI/heurystyka)
+        range_map: dict[str, dict] = {}
+        max_ai_age_seconds = int(config.get("max_ai_insights_age_seconds", 7200))
+        try:
+            from backend.database import BlogPost
+
+            latest_blog = db.query(BlogPost).order_by(BlogPost.created_at.desc()).first()
+            if latest_blog and latest_blog.created_at:
+                age_s = (now - latest_blog.created_at).total_seconds()
+                if age_s > max_ai_age_seconds:
+                    if not self.last_stale_ai_log_ts or (now - self.last_stale_ai_log_ts).total_seconds() > 300:
+                        self.last_stale_ai_log_ts = now
+                        log_to_db(
+                            "ERROR",
+                            "demo_trading",
+                            f"Zakresy AI są nieaktualne (ostatnia analiza {int(age_s)}s temu) — pomijam decyzje DEMO.",
+                            db=db,
+                        )
+                    return None
+            if latest_blog and latest_blog.market_insights:
+                insights = json.loads(latest_blog.market_insights)
+                for ins in insights:
+                    if ins.get("range") and ins.get("symbol"):
+                        range_map[str(ins.get("symbol"))] = ins.get("range")
+        except Exception as exc:
+            log_exception("demo_trading", "Błąd odczytu zakresów OpenAI z bloga", exc, db=db)
+            range_map = {}
+
+        if not range_map:
+            log_to_db("ERROR", "demo_trading", "Brak zakresów AI — pomijam decyzje DEMO", db=db)
+            return None
+
+        # Ryzyko (dzienny limit + drawdown)
+        unrealized_pnl = float(account_state.get("unrealized_pnl") or 0.0)
+        realized_pnl_24h = float(account_state.get("realized_pnl_24h") or 0.0)
+        daily_loss_limit = -(initial_balance * max_daily_loss_pct / 100)
+        daily_loss_triggered = (realized_pnl_24h + unrealized_pnl) <= daily_loss_limit
+
+        positions_all = db.query(Position).filter(Position.mode == "demo").all()
+        positions = [
+            p
+            for p in positions_all
+            if (p.symbol or "").strip().upper().replace("/", "").replace("-", "").endswith(demo_quote_ccy)
+        ]
+
+        # Helpers for pending order checks
         def _has_active_pending(sym: str) -> bool:
             return (
                 db.query(PendingOrder)
@@ -761,77 +836,72 @@ class DataCollector:
                 return False
             return (now - last.created_at).total_seconds() < float(pending_cooldown_seconds)
 
-        # Zakresy z bloga (OpenAI) są wymagane — bez nich brak decyzji.
-        range_map: dict[str, dict] = {}
-        max_ai_age_seconds = int(os.getenv("MAX_AI_INSIGHTS_AGE_SECONDS", "7200"))
-        try:
-            from backend.database import BlogPost
+        return {
+            "now": now,
+            "config": config,
+            "runtime_ctx": runtime_ctx,
+            "demo_quote_ccy": demo_quote_ccy,
+            "initial_balance": initial_balance,
+            "equity": equity,
+            "available_cash": available_cash,
+            "max_daily_loss_pct": max_daily_loss_pct,
+            "max_drawdown_pct": max_drawdown_pct,
+            "base_risk_per_trade": base_risk_per_trade,
+            "max_trades_per_day": max_trades_per_day,
+            "max_open_positions": max_open_positions,
+            "base_cooldown": base_cooldown,
+            "loss_streak_limit": loss_streak_limit,
+            "maker_fee_rate": maker_fee_rate,
+            "taker_fee_rate": taker_fee_rate,
+            "slippage_bps": slippage_bps,
+            "spread_buffer_bps": spread_buffer_bps,
+            "min_edge_multiplier": min_edge_multiplier,
+            "min_expected_rr": min_expected_rr,
+            "min_order_notional": min_order_notional,
+            "base_qty": base_qty,
+            "base_min_confidence": base_min_confidence,
+            "max_signal_age": max_signal_age,
+            "min_klines": min_klines,
+            "crash_window_minutes": crash_window_minutes,
+            "crash_drop_pct": crash_drop_pct,
+            "crash_cooldown_seconds": crash_cooldown_seconds,
+            "atr_stop_mult": atr_stop_mult,
+            "atr_take_mult": atr_take_mult,
+            "trail_mult": trail_mult,
+            "extreme_margin_pct": extreme_margin_pct,
+            "extreme_min_conf": extreme_min_conf,
+            "extreme_min_rating": extreme_min_rating,
+            "max_qty": max_qty,
+            "min_qty": min_qty,
+            "pending_cooldown_seconds": pending_cooldown_seconds,
+            "range_map": range_map,
+            "daily_loss_triggered": daily_loss_triggered,
+            "daily_loss_limit": daily_loss_limit,
+            "positions": positions,
+            "_has_active_pending": _has_active_pending,
+            "_pending_in_cooldown": _pending_in_cooldown,
+        }
 
-            latest_blog = db.query(BlogPost).order_by(BlogPost.created_at.desc()).first()
-            if latest_blog and latest_blog.created_at:
-                age_s = (now - latest_blog.created_at).total_seconds()
-                if age_s > max_ai_age_seconds:
-                    if not self.last_stale_ai_log_ts or (now - self.last_stale_ai_log_ts).total_seconds() > 300:
-                        self.last_stale_ai_log_ts = now
-                        log_to_db(
-                            "ERROR",
-                            "demo_trading",
-                            f"Zakresy AI są nieaktualne (ostatnia analiza {int(age_s)}s temu) — pomijam decyzje DEMO.",
-                            db=db,
-                        )
-                    return
-            if latest_blog and latest_blog.market_insights:
-                insights = json.loads(latest_blog.market_insights)
-                for ins in insights:
-                    if ins.get("range") and ins.get("symbol"):
-                        range_map[str(ins.get("symbol"))] = ins.get("range")
-        except Exception as exc:
-            log_exception("demo_trading", "Błąd odczytu zakresów OpenAI z bloga", exc, db=db)
-            range_map = {}
+    # ------------------------------------------------------------------
+    # Etap 1: zarządzanie wyjściami (TP / SL / trailing)
+    # ------------------------------------------------------------------
 
-        if not range_map:
-            log_to_db("ERROR", "demo_trading", "Brak zakresów AI — pomijam decyzje DEMO", db=db)
-            return
+    def _check_exits(self, db: Session, tc: dict):
+        now = tc["now"]
+        runtime_ctx = tc["runtime_ctx"]
+        config = tc["config"]
+        positions = tc["positions"]
+        atr_stop_mult = tc["atr_stop_mult"]
+        atr_take_mult = tc["atr_take_mult"]
+        trail_mult = tc["trail_mult"]
+        min_klines = tc["min_klines"]
+        daily_loss_triggered = tc["daily_loss_triggered"]
+        base_cooldown = tc["base_cooldown"]
+        loss_streak_limit = tc["loss_streak_limit"]
+        max_drawdown_pct = tc["max_drawdown_pct"]
+        _has_active_pending = tc["_has_active_pending"]
+        _pending_in_cooldown = tc["_pending_in_cooldown"]
 
-        # Ryzyko (dzienny limit + drawdown)
-        since = now - timedelta(hours=24)
-        positions_all = db.query(Position).filter(Position.mode == "demo").all()
-        positions = [
-            p
-            for p in positions_all
-            if (p.symbol or "").strip().upper().replace("/", "").replace("-", "").endswith(demo_quote_ccy)
-        ]
-        unrealized_pnl = float(account_state.get("unrealized_pnl") or 0.0)
-        realized_pnl_24h = float(account_state.get("realized_pnl_24h") or 0.0)
-        daily_loss_limit = -(initial_balance * max_daily_loss_pct / 100)
-        daily_loss_triggered = (realized_pnl_24h + unrealized_pnl) <= daily_loss_limit
-
-        for p in positions:
-            if p.entry_price and p.current_price and p.entry_price > 0:
-                drawdown_pct = ((p.current_price - p.entry_price) / p.entry_price) * 100
-                if drawdown_pct <= -max_drawdown_pct:
-                    if not self.last_risk_alert_ts or (now - self.last_risk_alert_ts).total_seconds() > 900:
-                        self.last_risk_alert_ts = now
-                        msg = f"Pozycja {p.symbol} przekroczyła DD {max_drawdown_pct}% ({drawdown_pct:.2f}%)."
-                        log_to_db("WARNING", "demo_trading", msg, db=db)
-                        self._send_telegram_alert("RISK: Drawdown", msg, force_send=True)
-                        db.add(
-                            Alert(
-                                alert_type="RISK",
-                                severity="WARNING",
-                                title="Drawdown",
-                                message=msg,
-                                symbol=p.symbol,
-                                is_sent=True,
-                                timestamp=now,
-                            )
-                        )
-                        state = self.demo_state.get(p.symbol, {"loss_streak": 0, "cooldown": base_cooldown})
-                        state["loss_streak"] = min(state.get("loss_streak", 0) + 1, loss_streak_limit)
-                        state["cooldown"] = min(base_cooldown * (1 + state["loss_streak"]), 3600)
-                        self.demo_state[p.symbol] = state
-
-        # 1) Najpierw: jeśli otwarta pozycja osiągnęła TP/SL — przygotuj EXIT (pending)
         for pos in positions:
             sym = pos.symbol
             if not sym or float(pos.quantity or 0) <= 0:
@@ -868,23 +938,23 @@ class DataCollector:
                 if trail > stop:
                     stop = trail
 
-                if price <= stop or price >= take:
-                    self._trace_decision(
-                        db,
-                        symbol=sym,
-                        action="CREATE_PENDING_EXIT",
-                        reason_code="tp_sl_exit_triggered",
-                        runtime_ctx=runtime_ctx,
-                        mode="demo",
-                        signal_summary={"source": "position_management", "atr": atr, "entry_price": entry, "price": price},
-                        risk_check={"daily_loss_triggered": daily_loss_triggered, "kill_switch_enabled": bool(config.get("kill_switch_enabled"))},
-                        cost_check={"eligible": True, "note": "exit path does not yet price explicit costs"},
-                        execution_check={"eligible": True, "has_active_pending": False},
-                        details={"take": take, "stop": stop, "quantity": float(pos.quantity)},
-                    )
-                    sell_qty = float(pos.quantity)
-                    pending_id = self._create_pending_order(
-                        db=db,
+            if price <= stop or price >= take:
+                self._trace_decision(
+                    db,
+                    symbol=sym,
+                    action="CREATE_PENDING_EXIT",
+                    reason_code="tp_sl_exit_triggered",
+                    runtime_ctx=runtime_ctx,
+                    mode="demo",
+                    signal_summary={"source": "position_management", "atr": atr, "entry_price": entry, "price": price},
+                    risk_check={"daily_loss_triggered": daily_loss_triggered, "kill_switch_enabled": bool(config.get("kill_switch_enabled"))},
+                    cost_check={"eligible": True, "note": "exit path does not yet price explicit costs"},
+                    execution_check={"eligible": True, "has_active_pending": False},
+                    details={"take": take, "stop": stop, "quantity": float(pos.quantity)},
+                )
+                sell_qty = float(pos.quantity)
+                pending_id = self._create_pending_order(
+                    db=db,
                     symbol=sym,
                     side="SELL",
                     price=price,
@@ -916,7 +986,72 @@ class DataCollector:
                     )
                 )
 
-        # 2) Nowe decyzje (entry/exit) — TYLKO w skrajnych momentach + TYLKO po potwierdzeniu (pending)
+        # Drawdown alerts
+        for p in positions:
+            if p.entry_price and p.current_price and p.entry_price > 0:
+                drawdown_pct = ((p.current_price - p.entry_price) / p.entry_price) * 100
+                if drawdown_pct <= -max_drawdown_pct:
+                    if not self.last_risk_alert_ts or (now - self.last_risk_alert_ts).total_seconds() > 900:
+                        self.last_risk_alert_ts = now
+                        msg = f"Pozycja {p.symbol} przekroczyła DD {max_drawdown_pct}% ({drawdown_pct:.2f}%)."
+                        log_to_db("WARNING", "demo_trading", msg, db=db)
+                        self._send_telegram_alert("RISK: Drawdown", msg, force_send=True)
+                        db.add(
+                            Alert(
+                                alert_type="RISK",
+                                severity="WARNING",
+                                title="Drawdown",
+                                message=msg,
+                                symbol=p.symbol,
+                                is_sent=True,
+                                timestamp=now,
+                            )
+                        )
+                        state = self.demo_state.get(p.symbol, {"loss_streak": 0, "cooldown": base_cooldown})
+                        state["loss_streak"] = min(state.get("loss_streak", 0) + 1, loss_streak_limit)
+                        state["cooldown"] = min(base_cooldown * (1 + state["loss_streak"]), 3600)
+                        self.demo_state[p.symbol] = state
+
+    # ------------------------------------------------------------------
+    # Etap 2: screening kandydatów wejścia + gating
+    # ------------------------------------------------------------------
+
+    def _screen_entry_candidates(self, db: Session, tc: dict):
+        now = tc["now"]
+        config = tc["config"]
+        runtime_ctx = tc["runtime_ctx"]
+        demo_quote_ccy = tc["demo_quote_ccy"]
+        equity = tc["equity"]
+        base_qty = tc["base_qty"]
+        base_min_confidence = tc["base_min_confidence"]
+        max_signal_age = tc["max_signal_age"]
+        min_klines = tc["min_klines"]
+        atr_stop_mult = tc["atr_stop_mult"]
+        atr_take_mult = tc["atr_take_mult"]
+        base_risk_per_trade = tc["base_risk_per_trade"]
+        base_cooldown = tc["base_cooldown"]
+        crash_window_minutes = tc["crash_window_minutes"]
+        crash_drop_pct = tc["crash_drop_pct"]
+        crash_cooldown_seconds = tc["crash_cooldown_seconds"]
+        extreme_margin_pct = tc["extreme_margin_pct"]
+        extreme_min_conf = tc["extreme_min_conf"]
+        extreme_min_rating = tc["extreme_min_rating"]
+        max_qty = tc["max_qty"]
+        min_qty = tc["min_qty"]
+        pending_cooldown_seconds = tc["pending_cooldown_seconds"]
+        range_map = tc["range_map"]
+        maker_fee_rate = tc["maker_fee_rate"]
+        taker_fee_rate = tc["taker_fee_rate"]
+        slippage_bps = tc["slippage_bps"]
+        spread_buffer_bps = tc["spread_buffer_bps"]
+        min_edge_multiplier = tc["min_edge_multiplier"]
+        min_expected_rr = tc["min_expected_rr"]
+        min_order_notional = tc["min_order_notional"]
+        _has_active_pending = tc["_has_active_pending"]
+        _pending_in_cooldown = tc["_pending_in_cooldown"]
+
+        available_cash = tc["available_cash"]
+
         for symbol in self.watchlist:
             if not symbol:
                 continue
@@ -966,7 +1101,7 @@ class DataCollector:
                 .first()
             )
 
-            # Cooldown po ostatniej wykonanej transakcji (nie po pending)
+            # Cooldown po ostatniej wykonanej transakcji
             last_order = (
                 db.query(Order)
                 .filter(Order.symbol == symbol, Order.mode == "demo")
@@ -1005,25 +1140,15 @@ class DataCollector:
             min_confidence = max(base_min_confidence, float(params.get("min_confidence", base_min_confidence)))
             if float(sig.confidence) < float(min_confidence):
                 self._trace_decision(
-                    db,
-                    symbol=symbol,
-                    action="SKIP",
-                    reason_code="signal_confidence_too_low",
-                    runtime_ctx=runtime_ctx,
-                    mode="demo",
-                    signal_summary=signal_summary,
+                    db, symbol=symbol, action="SKIP", reason_code="signal_confidence_too_low",
+                    runtime_ctx=runtime_ctx, mode="demo", signal_summary=signal_summary,
                     risk_check={"min_confidence": min_confidence},
                 )
                 continue
             if (now - sig.timestamp).total_seconds() > float(max_signal_age):
                 self._trace_decision(
-                    db,
-                    symbol=symbol,
-                    action="SKIP",
-                    reason_code="signal_too_old",
-                    runtime_ctx=runtime_ctx,
-                    mode="demo",
-                    signal_summary=signal_summary,
+                    db, symbol=symbol, action="SKIP", reason_code="signal_too_old",
+                    runtime_ctx=runtime_ctx, mode="demo", signal_summary=signal_summary,
                     risk_check={"max_signal_age_seconds": max_signal_age},
                 )
                 continue
@@ -1034,8 +1159,7 @@ class DataCollector:
 
             crash = self._detect_crash(db, symbol, crash_window_minutes, crash_drop_pct)
             if crash:
-                min_conf_crash = float(os.getenv("CRASH_MIN_CONFIDENCE", "0.85"))
-                if float(sig.confidence) < min_conf_crash:
+                if float(sig.confidence) < extreme_min_conf:
                     continue
                 state["cooldown"] = max(int(state.get("cooldown", base_cooldown)), crash_cooldown_seconds)
                 self.demo_state[symbol] = state
@@ -1082,41 +1206,26 @@ class DataCollector:
 
             if side is None:
                 self._trace_decision(
-                    db,
-                    symbol=symbol,
-                    action="SKIP",
-                    reason_code="signal_filters_not_met",
-                    runtime_ctx=runtime_ctx,
-                    mode="demo",
-                    signal_summary=signal_summary,
+                    db, symbol=symbol, action="SKIP", reason_code="signal_filters_not_met",
+                    runtime_ctx=runtime_ctx, mode="demo", signal_summary=signal_summary,
                     risk_check={"ema20": ema20, "ema50": ema50, "rsi": rsi},
                     details={"range": r},
                 )
                 continue
 
-            # DEMO: bez shortów; SELL tylko jeśli mamy pozycję, BUY tylko jeśli brak pozycji (konserwatywnie)
             if side == "BUY" and position is not None:
                 self._trace_decision(
-                    db,
-                    symbol=symbol,
-                    action="SKIP",
-                    reason_code="buy_blocked_existing_position",
-                    runtime_ctx=runtime_ctx,
-                    mode="demo",
-                    signal_summary=signal_summary,
+                    db, symbol=symbol, action="SKIP", reason_code="buy_blocked_existing_position",
+                    runtime_ctx=runtime_ctx, mode="demo", signal_summary=signal_summary,
                 )
                 continue
             if side == "SELL" and position is None:
                 self._trace_decision(
-                    db,
-                    symbol=symbol,
-                    action="SKIP",
-                    reason_code="sell_blocked_no_position",
-                    runtime_ctx=runtime_ctx,
-                    mode="demo",
-                    signal_summary=signal_summary,
+                    db, symbol=symbol, action="SKIP", reason_code="sell_blocked_no_position",
+                    runtime_ctx=runtime_ctx, mode="demo", signal_summary=signal_summary,
                 )
                 continue
+
             # Pozycjonowanie wg ATR (risk per trade)
             loss_streak = int(state.get("loss_streak", 0))
             win_streak = int(state.get("win_streak", 0))
@@ -1131,24 +1240,18 @@ class DataCollector:
             if side == "SELL" and position is not None:
                 qty = min(float(position.quantity), qty)
             if side == "BUY":
-                # DEMO: nie twórz BUY, jeśli nie stać — clamp po cash.
                 if price > 0:
                     max_affordable = available_cash / float(price)
                     qty = min(qty, max_affordable)
                 if qty < min_qty:
                     self._trace_decision(
-                        db,
-                        symbol=symbol,
-                        action="SKIP",
-                        reason_code="insufficient_cash_or_qty_below_min",
-                        runtime_ctx=runtime_ctx,
-                        mode="demo",
-                        signal_summary=signal_summary,
+                        db, symbol=symbol, action="SKIP", reason_code="insufficient_cash_or_qty_below_min",
+                        runtime_ctx=runtime_ctx, mode="demo", signal_summary=signal_summary,
                         execution_check={"eligible": False, "available_cash": available_cash, "min_qty": min_qty},
                     )
                     continue
 
-            # Rating decyzji 1–5
+            # Rating decyzji 1-5
             rating = 1
             if float(sig.confidence) >= 0.85:
                 rating += 2
@@ -1160,7 +1263,7 @@ class DataCollector:
                     rating += 1
             rating = min(rating, 5)
 
-            # Tylko skrajne momenty zakresu + wysokie confidence/rating
+            # Extreme entry filter
             is_extreme = False
             if all(k in r for k in ["buy_low", "buy_high", "sell_low", "sell_high"]):
                 buy_low = float(r.get("buy_low"))
@@ -1179,13 +1282,8 @@ class DataCollector:
 
             if not is_extreme:
                 self._trace_decision(
-                    db,
-                    symbol=symbol,
-                    action="SKIP",
-                    reason_code="extreme_entry_filter_failed",
-                    runtime_ctx=runtime_ctx,
-                    mode="demo",
-                    signal_summary=signal_summary,
+                    db, symbol=symbol, action="SKIP", reason_code="extreme_entry_filter_failed",
+                    runtime_ctx=runtime_ctx, mode="demo", signal_summary=signal_summary,
                     risk_check={"rating": rating, "extreme_min_rating": extreme_min_rating},
                 )
                 continue
@@ -1213,12 +1311,8 @@ class DataCollector:
                 "min_order_notional": min_order_notional,
             }
             risk_context = build_risk_context(
-                db,
-                symbol=symbol,
-                side=side,
-                notional=notional,
-                strategy_name="demo_collector",
-                mode="demo",
+                db, symbol=symbol, side=side, notional=notional,
+                strategy_name="demo_collector", mode="demo",
                 runtime_config=config,
                 config_snapshot_id=runtime_ctx.get("snapshot_id"),
                 signal_summary=signal_summary,
@@ -1228,14 +1322,10 @@ class DataCollector:
 
             if not risk_decision.allowed:
                 self._trace_decision(
-                    db,
-                    symbol=symbol,
-                    action="SKIP",
+                    db, symbol=symbol, action="SKIP",
                     reason_code=risk_decision.reason_codes[0],
-                    runtime_ctx=runtime_ctx,
-                    mode="demo",
-                    signal_summary=signal_summary,
-                    risk_check=risk_check,
+                    runtime_ctx=runtime_ctx, mode="demo",
+                    signal_summary=signal_summary, risk_check=risk_check,
                 )
                 continue
 
@@ -1246,58 +1336,36 @@ class DataCollector:
 
             if not cost_gate_pass:
                 self._trace_decision(
-                    db,
-                    symbol=symbol,
-                    action="SKIP",
-                    reason_code="cost_gate_failed",
-                    runtime_ctx=runtime_ctx,
-                    mode="demo",
-                    signal_summary=signal_summary,
-                    risk_check=risk_check,
-                    cost_check=cost_check,
-                    execution_check=execution_check,
+                    db, symbol=symbol, action="SKIP", reason_code="cost_gate_failed",
+                    runtime_ctx=runtime_ctx, mode="demo", signal_summary=signal_summary,
+                    risk_check=risk_check, cost_check=cost_check, execution_check=execution_check,
                 )
                 continue
 
             if not execution_check["eligible"]:
                 self._trace_decision(
-                    db,
-                    symbol=symbol,
-                    action="SKIP",
-                    reason_code="min_notional_guard",
-                    runtime_ctx=runtime_ctx,
-                    mode="demo",
-                    signal_summary=signal_summary,
-                    risk_check=risk_check,
-                    cost_check=cost_check,
-                    execution_check=execution_check,
+                    db, symbol=symbol, action="SKIP", reason_code="min_notional_guard",
+                    runtime_ctx=runtime_ctx, mode="demo", signal_summary=signal_summary,
+                    risk_check=risk_check, cost_check=cost_check, execution_check=execution_check,
                 )
                 continue
 
-            # Utwórz pending i wyślij czytelną wiadomość
+            # Utwórz pending i wyślij wiadomość
             tp = price + float(atr) * atr_take_mult
             sl = price - float(atr) * atr_stop_mult
             action_pl = "KUP" if side == "BUY" else "SPRZEDAJ"
             why = ", ".join(reasons) if reasons else "Sygnał + zakresy OpenAI + filtry ryzyka"
             self._trace_decision(
-                db,
-                symbol=symbol,
+                db, symbol=symbol,
                 action="CREATE_PENDING_ENTRY" if side == "BUY" else "CREATE_PENDING_EXIT",
                 reason_code="all_gates_passed",
-                runtime_ctx=runtime_ctx,
-                mode="demo",
-                signal_summary=signal_summary,
-                risk_check=risk_check,
-                cost_check=cost_check,
-                execution_check=execution_check,
+                runtime_ctx=runtime_ctx, mode="demo",
+                signal_summary=signal_summary, risk_check=risk_check,
+                cost_check=cost_check, execution_check=execution_check,
                 details={"side": side, "qty": qty, "price": price, "rating": rating, "why": why},
             )
             pending_id = self._create_pending_order(
-                db=db,
-                symbol=symbol,
-                side=side,
-                price=price,
-                qty=qty,
+                db=db, symbol=symbol, side=side, price=price, qty=qty,
                 mode="demo",
                 reason=f"{why}. Pewność {int(float(sig.confidence)*100)}%, rating {rating}/5.",
                 config_snapshot_id=runtime_ctx.get("snapshot_id"),
@@ -1336,26 +1404,28 @@ class DataCollector:
                 )
             )
 
-        # Globalny hamulec (bez wyłączania): wydłuż cooldown dla wszystkich symboli
-        if daily_loss_triggered:
-            for sym in self.watchlist:
-                sym_norm = (sym or "").strip().upper().replace("/", "").replace("-", "")
-                if not sym_norm.endswith(demo_quote_ccy):
-                    continue
-                state = self.demo_state.get(sym, {"loss_streak": 0, "cooldown": base_cooldown})
-                state["loss_streak"] = min(int(state.get("loss_streak", 0)) + 1, loss_streak_limit)
-                state["cooldown"] = min(base_cooldown * (1 + int(state["loss_streak"])), 3600)
-                self.demo_state[sym] = state
-            msg = "Limit dziennej straty osiągnięty — ograniczam ryzyko (DEMO), bez wyłączania bota."
-            log_to_db("WARNING", "demo_trading", msg, db=db)
-            self._send_telegram_alert("RISK: Daily loss", msg, force_send=True)
+    # ------------------------------------------------------------------
+    # Etap 3: globalny hamulec strat
+    # ------------------------------------------------------------------
 
-        try:
-            db.commit()
-        except Exception as exc:
-            db.rollback()
-            log_exception("demo_trading", "Błąd commit demo_trading", exc, db=db)
+    def _apply_daily_loss_brake(self, db: Session, tc: dict):
+        daily_loss_triggered = tc["daily_loss_triggered"]
+        if not daily_loss_triggered:
             return
+        demo_quote_ccy = tc["demo_quote_ccy"]
+        base_cooldown = tc["base_cooldown"]
+        loss_streak_limit = tc["loss_streak_limit"]
+        for sym in self.watchlist:
+            sym_norm = (sym or "").strip().upper().replace("/", "").replace("-", "")
+            if not sym_norm.endswith(demo_quote_ccy):
+                continue
+            state = self.demo_state.get(sym, {"loss_streak": 0, "cooldown": base_cooldown})
+            state["loss_streak"] = min(int(state.get("loss_streak", 0)) + 1, loss_streak_limit)
+            state["cooldown"] = min(base_cooldown * (1 + int(state["loss_streak"])), 3600)
+            self.demo_state[sym] = state
+        msg = "Limit dziennej straty osiągnięty — ograniczam ryzyko (DEMO), bez wyłączania bota."
+        log_to_db("WARNING", "demo_trading", msg, db=db)
+        self._send_telegram_alert("RISK: Daily loss", msg, force_send=True)
 
     def _detect_crash(self, db: Session, symbol: str, window_minutes: int, drop_pct: float) -> bool:
         """

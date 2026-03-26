@@ -1,9 +1,11 @@
 # PROGRAM REVIEW — Rdzeń tradingowy vs Warstwa kontrolna
 
-**Data:** 2025-07  
+**Data:** 2025-07 (aktualizacja: 2026-03)  
 **Wersja:** v0.7-beta  
 **Commit bazowy:** `c0eac1f` (167 testów)  
 **Autor przeglądu:** GitHub Copilot (Claude Opus 4.6)
+
+> **Aktualizacja 2026-03:** P1 (env→runtime_settings) i P2 (refaktor _demo_trading) zakończone. Sekcje 2.1 i 2.3 domknięte.
 
 ---
 
@@ -30,7 +32,7 @@ System posiada **jeden z najbardziej rozbudowanych frameworków kontroli zmian**
 
 | Moduł | Linie | Co robi |
 |---|---|---|
-| `runtime_settings.py` | 817 | ~30 tunowalnych parametrów z walidacją, snapshotami, API |
+| `runtime_settings.py` | ~870 | ~45 tunowalnych parametrów z walidacją, snapshotami, API |
 | `risk.py` | 227 | 10 bram ryzyka (drawdown, exposure, loss streak, kill switch, leakage, expectancy) |
 | `experiments.py` | 457 | A/B framework z metrykami, promocją, wycofywaniem |
 | `candidate_validation.py` | 514 | Walidacja kandydatów zmian, detekcja konfliktów, pakowanie bundli |
@@ -103,20 +105,16 @@ To prosty ale działający mechanizm adaptacji.
 
 ## SEKCJA 2 — Co jest średnie lub niezweryfikowane ⚠️
 
-### 2.1 Monolityczna `_demo_trading()` — ~700 linii w jednej metodzie
+### 2.1 ~~Monolityczna `_demo_trading()`~~ → ✅ DOMKNIĘTE (P2)
 
-**Problem:** Cała logika tradingowa (wyjścia TP/SL, filtrowanie sygnałów, position sizing, cost gate, risk gate, pending order) jest w jednej metodzie `_demo_trading()` w `collector.py`.
+**Było:** ~700 linii w jednej metodzie.  
+**Zrobione:** Wydzielono 4 metody:
+- `_load_trading_config()` — konfiguracja + stan konta + zakresy AI
+- `_check_exits()` — TP/SL/trailing + alerty drawdown
+- `_screen_entry_candidates()` — screening + gating (7 bramek)
+- `_apply_daily_loss_brake()` — globalny hamulec strat
 
-**Konsekwencje:**
-- Nie da się testować fragmentów w izolacji
-- Każda zmiana w entry logic dotyka tego samego 700-liniowego bloku
-- Ryzyko efektów ubocznych przy refactorze
-
-**Rekomendacja:** Wydzielić do osobnych metod:
-- `_screen_entry_signals()` → filtrowanie i rating
-- `_compute_position_size()` → sizing
-- `_check_exits()` → TP/SL/trailing
-- `_create_pending_entry()` → tworzenie pending order
+`_demo_trading()` jest teraz ~35-liniowym orkiestratorem. Testy 167/167 zielone.
 
 ### 2.2 Jedna strategia: "demo_collector"
 
@@ -132,33 +130,13 @@ To prosty ale działający mechanizm adaptacji.
 
 **Rekomendacja:** Minimum viable: choćby dwa warianty entry logic (np. "conservative" vs "aggressive") z różnymi progami extreme_min_conf / rating.
 
-### 2.3 ~20 env vars w collector NIE przeniesione do runtime_settings
+### 2.3 ~~env vars w collector NIE przeniesione do runtime_settings~~ → ✅ DOMKNIĘTE (P1)
 
-**Stan obecny:** `collector.py` czyta ~20 parametrów z `os.getenv()` zamiast z `runtime_settings`:
-
-| Env var | Domyślna | Powinien być w runtime_settings? |
-|---|---|---|
-| `DEMO_ORDER_QTY` | 0.01 | ✅ TAK — krytyczny |
-| `DEMO_MIN_SIGNAL_CONFIDENCE` | 0.75 | ✅ TAK — krytyczny |
-| `DEMO_MAX_SIGNAL_AGE_SECONDS` | 3600 | ✅ TAK |
-| `DEMO_MIN_KLINES` | 60 | Opcjonalnie |
-| `ATR_STOP_MULT` | 1.3 | ✅ TAK — krytyczny |
-| `ATR_TAKE_MULT` | 2.2 | ✅ TAK — krytyczny |
-| `ATR_TRAIL_MULT` | 1.0 | ✅ TAK — krytyczny |
-| `EXTREME_RANGE_MARGIN_PCT` | 0.02 | ✅ TAK |
-| `EXTREME_MIN_CONFIDENCE` | 0.85 | ✅ TAK |
-| `EXTREME_MIN_RATING` | 4 | ✅ TAK |
-| `CRASH_WINDOW_MINUTES` | 60 | Opcjonalnie |
-| `CRASH_DROP_PERCENT` | 6.0 | Opcjonalnie |
-| `CRASH_COOLDOWN_SECONDS` | 7200 | Opcjonalnie |
-| `CRASH_MIN_CONFIDENCE` | 0.85 | Opcjonalnie |
-| `PENDING_ORDER_COOLDOWN_SECONDS` | 3600 | ✅ TAK |
-| `MAX_AI_INSIGHTS_AGE_SECONDS` | 7200 | ✅ TAK |
-| `DEMO_MAX_POSITION_QTY` | 1.0 | ✅ TAK |
-| `DEMO_MIN_POSITION_QTY` | 0.001 | ✅ TAK |
-| `DEMO_INITIAL_BALANCE` | 10000 | Opcjonalnie |
-
-**Wpływ:** Te parametry **nie mogą być zmieniane bez restartu bota**. Runtime settings + experiments pipeline ich nie widzi. Tuning insights nie może generować dla nich kandydatów zmian.
+**Było:** ~15 krytycznych parametrów tradingowych w `os.getenv()`.  
+**Zrobione:** Dodano 15 nowych `SettingSpec` w `runtime_settings.py` (sekcje execution/ai/risk) i zmieniono collector na `config.get()`.  
+Migrowane: `atr_stop_mult`, `atr_take_mult`, `atr_trail_mult`, `extreme_range_margin_pct`, `extreme_min_confidence`, `extreme_min_rating`, `demo_min_signal_confidence`, `demo_max_signal_age_seconds`, `demo_order_qty`, `demo_max_position_qty`, `demo_min_position_qty`, `pending_order_cooldown_seconds`, `max_ai_insights_age_seconds`, `crash_window_minutes`, `crash_drop_percent`, `crash_cooldown_seconds`.  
+Dodana walidacja krzyżowa: `atr_take_mult > atr_stop_mult`.  
+Pozostałe `os.getenv()` to parametry infrastrukturalne (klucze API, interwały kolekcji, watchlist refresh).
 
 ### 2.4 Model kosztowy — szacunkowy, nie zmierzony
 
@@ -317,13 +295,13 @@ Plus skalowanie:
 
 ## TOP 5 AKCJI — posortowane wg wpływu na PnL
 
-| # | Akcja | Wpływ PnL | Pracochłonność |
+| # | Akcja | Wpływ PnL | Status |
 |---|---|---|---|
-| 1 | **Migracja env vars → runtime_settings** (ATR_*, EXTREME_*, cooldowns) | 🔴 Wysoki | Niska (rejestracja + `effective_float`) |
-| 2 | **Wydzielenie _demo_trading() na metody** (screen, size, exit, entry) | 🟡 Średni (umożliwia testing/A-B) | Średnia |
-| 3 | **Partial exits** (TP1 / TP2 split) | 🔴 Wysoki | Średnia |
-| 4 | **Range accuracy tracking** (hit rate AI vs heuristic) | 🟡 Średni | Niska |
-| 5 | **Execution layer stub** (live order + fill measurement) | 🔴 Wysoki (dla live) | Wysoka |
+| 1 | ~~Migracja env vars → runtime_settings~~ | 🔴 Wysoki | ✅ P1 |
+| 2 | ~~Wydzielenie _demo_trading() na metody~~ | 🟡 Średni | ✅ P2 |
+| 3 | **Exit quality / MFE-MAE / partial exits** | 🔴 Wysoki | ⬜ NASTĘPNY |
+| 4 | **Symbol selection / ranking netto** | 🟡 Średni | ⬜ |
+| 5 | **Activity control (max trades/h, anty-overtrading)** | 🟡 Średni | ⬜ |
 
 ---
 
@@ -347,7 +325,7 @@ Plus skalowanie:
 
 ### E) Czy runtime_settings obejmuje krytyczne parametry?
 
-**CZĘŚCIOWO.** runtime_settings pokrywa ~30 parametrów (głównie risk/cost), ale ~15 krytycznych parametrów tradingowych (ATR mults, extreme filters, cooldowns) wciąż jest w `os.getenv()` — niewidoczne dla tuning insights i experiments pipeline.
+**✅ TAK (po P1).** runtime_settings pokrywa ~45 parametrów. Krytyczne parametry tradingowe (ATR mults, extreme filters, cooldowns, demo sizing) przeniesione z `os.getenv()` do `config.get()`. Widoczne dla tuning insights i experiments pipeline.
 
 ### F) Czy decision trace daje wystarczającą obserwabilność?
 
@@ -361,12 +339,12 @@ Plus skalowanie:
 >
 > Rdzeń tradingowy *działa* i ma solidne filtry wejściowe + position sizing, ale jest architektonicznie monolityczny (jedna metoda, jedna strategia, brak live execution).
 >
-> **Najważniejsza kolejność działań:**
-> 1. Migracja env vars → runtime_settings (niski koszt, duży wpływ — odblokuje tuning pipeline)
-> 2. Refaktor _demo_trading() na osobne metody (odblokuje testing i multi-strategy)
-> 3. Partial exits (bezpośredni wpływ na PnL)
-> 4. Range accuracy tracking (meta-diagnostyka jakości AI)
-> 5. Live execution stub (prereq dla prawdziwego tradingu)
+> **Najważniejsza kolejność działań (aktualizacja 2026-03):**
+> 1. ~~Migracja env vars → runtime_settings~~ ✅
+> 2. ~~Refaktor _demo_trading() na osobne metody~~ ✅
+> 3. Exit quality: MFE/MAE, range accuracy, partial exit analysis ← NASTĘPNY
+> 4. Symbol selection: ranking netto po kosztach, blacklista
+> 5. Activity control: max trades/h, cooldown per setup, anty-overtrading gate
 
 ---
 

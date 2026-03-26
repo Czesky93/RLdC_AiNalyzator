@@ -1,7 +1,6 @@
 'use client'
 
-import React from 'react'
-import { TrendingUp, TrendingDown } from 'lucide-react'
+import { TrendingDown, TrendingUp } from 'lucide-react'
 
 interface AccountMetricsProps {
   equity?: number
