@@ -1,12 +1,12 @@
 # PROJECT AUDIT MASTER
 
 ## Audit State
-- Current stage: `ETAP X - TRADING EFFECTIVENESS REVIEW`
-- Current file: `backend/trading_effectiveness.py`
-- Last completed file: `backend/trading_effectiveness.py`
-- Next stage: `Adaptive improvement / parameter tuning`
-- Audit timestamp: `trading effectiveness completed, 148 tests green`
-- Pipeline status: **FULL LOOP + GOVERNANCE + NOTIFICATIONS + WORKER + CONSOLE + CORRELATION + TRADING EFFECTIVENESS**
+- Current stage: `ETAP Y - TUNING INSIGHTS`
+- Current file: `backend/tuning_insights.py`
+- Last completed file: `backend/tuning_insights.py`
+- Next stage: `Parameter change proposals / auto-tuning`
+- Audit timestamp: `tuning insights completed, 156 tests green`
+- Pipeline status: **FULL LOOP + GOVERNANCE + NOTIFICATIONS + WORKER + CONSOLE + CORRELATION + TRADING EFFECTIVENESS + TUNING INSIGHTS**
 
 ## Scope
 This document is the single audit state file for the repository. It tracks:
@@ -276,7 +276,8 @@ Status vocabulary:
 | `backend/operator_console.py` | operator console / dashboard | `poprawiony` | 9 sekcji: incidents, policy_actions, pipeline_status, operator_queue, worker_status, monitoring_summary, notifications, blocked_ops, system_events |
 | `backend/correlation.py` | correlation / incident intelligence | `poprawiony` | 5 public: incident timeline, correlations, PA chain, promotion chain, why-blocked |
 | `backend/trading_effectiveness.py` | trading effectiveness diagnostics | `poprawiony` | 10 public: summary, symbol/reason/strategy effectiveness, cost leakage, overtrading, filters, edge, suggestions, bundle |
-| `tests/test_smoke.py` | smoke tests | `przetestowany` | 148 tests (54 base + 17 policy + 15 governance + 5 guard + 12 notification + 9 worker + 14 console + 11 correlation + 11 effectiveness) |
+| `backend/tuning_insights.py` | bridge: diagnostics → tuning candidates | `poprawiony` | 2 public: generate_tuning_candidates, tuning_summary; 6 internal generators (symbol/reason/strategy/cost/activity/risk_gate) |
+| `tests/test_smoke.py` | smoke tests | `przetestowany` | 156 tests (54 base + 17 policy + 15 governance + 5 guard + 12 notification + 9 worker + 14 console + 11 correlation + 11 effectiveness + 8 tuning_insights) |
 | `telegram_bot/bot.py` | Telegram bot | `poprawiony` | komendy tradingowe + governance (/governance, /freeze, /incidents) |
 | `telegram_bot/__init__.py` | package marker | `zatwierdzony` | no action needed |
 | `ai_trading/__init__.py` | placeholder package | `wymaga poprawy` | architecture placeholder only |

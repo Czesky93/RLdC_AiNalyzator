@@ -97,6 +97,7 @@ from backend.trading_effectiveness import (
     reason_code_effectiveness,
     strategy_effectiveness,
 )
+from backend.tuning_insights import generate_tuning_candidates, tuning_summary
 from backend.runtime_settings import RuntimeSettingsError
 
 router = APIRouter()
@@ -1591,4 +1592,27 @@ async def trading_effectiveness_strategies(
 ):
     """Skuteczność per strategia — expectancy, edge gap, cost leakage."""
     data = strategy_effectiveness(db, mode=mode)
+    return {"success": True, "data": data}
+
+
+# ============ TUNING INSIGHTS (ETAP Y) ============
+
+
+@router.get("/analytics/tuning-insights")
+async def tuning_insights_candidates(
+    mode: str = "demo",
+    db: Session = Depends(get_db),
+):
+    """Pełna lista kandydatów zmian parametrów — pomost diagnostyka → tuning."""
+    data = generate_tuning_candidates(db, mode=mode)
+    return {"success": True, "data": data}
+
+
+@router.get("/analytics/tuning-insights/summary")
+async def tuning_insights_summary(
+    mode: str = "demo",
+    db: Session = Depends(get_db),
+):
+    """Skrócone podsumowanie + top 5 akcji do podjęcia."""
+    data = tuning_summary(db, mode=mode)
     return {"success": True, "data": data}

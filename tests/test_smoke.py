@@ -3529,3 +3529,109 @@ def test_effectiveness_functions_directly():
         assert "net_expectancy" in result
     finally:
         db.close()
+
+
+# ============ TUNING INSIGHTS (ETAP Y) ============
+
+
+def test_tuning_insights_endpoint(client):
+    """Endpoint GET /analytics/tuning-insights zwraca kandydatów."""
+    _ensure_effectiveness_data()
+    resp = client.get("/api/account/analytics/tuning-insights")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["success"] is True
+    data = body["data"]
+    assert "candidates" in data
+    assert "candidates_count" in data
+    assert "by_priority" in data
+    assert "by_category" in data
+    assert "affected_settings" in data
+    assert isinstance(data["candidates"], list)
+    # Każdy kandydat musi mieć wymagane pola
+    for c in data["candidates"]:
+        for key in ("id", "category", "priority", "action", "setting_key", "confidence"):
+            assert key in c, f"Brak pola {key} w kandydacie"
+
+
+def test_tuning_insights_summary_endpoint(client):
+    """Endpoint GET /analytics/tuning-insights/summary zwraca podsumowanie."""
+    resp = client.get("/api/account/analytics/tuning-insights/summary")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["success"] is True
+    data = body["data"]
+    assert "candidates_count" in data
+    assert "high_priority_count" in data
+    assert "top_actions" in data
+    assert "trading_verdict" in data
+    assert isinstance(data["top_actions"], list)
+
+
+def test_tuning_insights_candidate_priorities(client):
+    """Kandydaci mają prawidłowe priorytety."""
+    resp = client.get("/api/account/analytics/tuning-insights")
+    candidates = resp.json()["data"]["candidates"]
+    valid = {"wysoki", "średni", "niski", "informacyjny"}
+    for c in candidates:
+        assert c["priority"] in valid, f"Nieprawidłowy priorytet: {c['priority']}"
+
+
+def test_tuning_insights_candidate_categories(client):
+    """Kandydaci mają prawidłowe kategorie."""
+    resp = client.get("/api/account/analytics/tuning-insights")
+    candidates = resp.json()["data"]["candidates"]
+    valid = {
+        "symbol_filter", "entry_filter", "strategy_filter",
+        "cost_optimization", "activity_limit", "execution_quality",
+        "risk_discipline",
+    }
+    for c in candidates:
+        assert c["category"] in valid, f"Nieprawidłowa kategoria: {c['category']}"
+
+
+def test_tuning_insights_summary_top_actions_limit(client):
+    """Top actions — max 5 pozycji."""
+    resp = client.get("/api/account/analytics/tuning-insights/summary")
+    top = resp.json()["data"]["top_actions"]
+    assert len(top) <= 5
+
+
+def test_tuning_insights_functions_directly():
+    """Bezpośredni test generate_tuning_candidates i tuning_summary."""
+    from backend.tuning_insights import generate_tuning_candidates, tuning_summary
+
+    db = SessionLocal()
+    try:
+        result = generate_tuning_candidates(db, mode="demo")
+        assert isinstance(result, dict)
+        assert "candidates" in result
+        assert result["candidates_count"] == len(result["candidates"])
+
+        summary = tuning_summary(db, mode="demo")
+        assert "candidates_count" in summary
+        assert "high_priority_count" in summary
+        assert "top_actions" in summary
+        assert "trading_verdict" in summary
+    finally:
+        db.close()
+
+
+def test_tuning_insights_setting_keys_non_empty(client):
+    """Każdy kandydat ma niepusty setting_key lub target."""
+    resp = client.get("/api/account/analytics/tuning-insights")
+    candidates = resp.json()["data"]["candidates"]
+    for c in candidates:
+        assert c.get("setting_key") or c.get("target"), (
+            f"Kandydat {c['id']} nie ma setting_key ani target"
+        )
+
+
+def test_tuning_insights_confidence_range(client):
+    """Confidence musi być w zakresie 0.0-1.0."""
+    resp = client.get("/api/account/analytics/tuning-insights")
+    candidates = resp.json()["data"]["candidates"]
+    for c in candidates:
+        assert 0.0 <= c["confidence"] <= 1.0, (
+            f"Confidence poza zakresem: {c['confidence']}"
+        )
