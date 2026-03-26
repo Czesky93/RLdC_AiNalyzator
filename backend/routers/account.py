@@ -80,6 +80,10 @@ from backend.reevaluation_worker import (
     get_worker_status,
     run_worker_cycle,
 )
+from backend.operator_console import (
+    get_console_section,
+    get_operator_console,
+)
 from backend.runtime_settings import RuntimeSettingsError
 
 router = APIRouter()
@@ -1438,3 +1442,27 @@ async def worker_manual_cycle(
     """Ręcznie uruchom jeden cykl reewaluacji (debug / test)."""
     summary = run_worker_cycle()
     return {"success": True, "data": summary}
+
+
+# =====================================================================
+# ============ OPERATOR CONSOLE =======================================
+# =====================================================================
+
+@router.get("/analytics/console")
+async def operator_console_bundle(db: Session = Depends(get_db)):
+    """Pełny zagregowany widok konsoli operatora — jeden endpoint, pełny obraz."""
+    data = get_operator_console(db)
+    return {"success": True, "data": data}
+
+
+@router.get("/analytics/console/{section}")
+async def operator_console_section(
+    section: str,
+    db: Session = Depends(get_db),
+):
+    """Pojedyncza sekcja konsoli operatora (np. incidents, pipeline_status)."""
+    try:
+        data = get_console_section(db, section)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return {"success": True, "section": section, "data": data}

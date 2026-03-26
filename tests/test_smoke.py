@@ -2942,3 +2942,192 @@ def test_worker_cycle_with_active_promotion_monitoring(client):
     promo_step = data["steps"]["reevaluate_promotion_monitoring"]
     assert promo_step["status"] == "ok"
     assert promo_step["active_count"] >= 1
+
+
+# =====================================================================
+# ============ OPERATOR CONSOLE (ETAP 7) ==============================
+# =====================================================================
+
+
+def test_console_bundle_endpoint(client):
+    """GET /analytics/console zwraca pełny bundle konsoli operatora."""
+    resp = client.get("/api/account/analytics/console")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["success"] is True
+
+    console = data["data"]
+    assert "generated_at" in console
+    assert "sections" in console
+
+    expected_sections = {
+        "incidents",
+        "policy_actions",
+        "pipeline_status",
+        "operator_queue",
+        "worker_status",
+        "monitoring_summary",
+        "recent_notifications",
+        "recent_blocked_operations",
+        "recent_system_events",
+    }
+    assert expected_sections == set(console["sections"].keys())
+
+
+def test_console_no_section_errors(client):
+    """Żadna sekcja konsoli nie powinna zwracać błędu na czystej bazie."""
+    resp = client.get("/api/account/analytics/console")
+    data = resp.json()["data"]
+
+    for section_name, section_data in data["sections"].items():
+        assert "error" not in section_data, (
+            f"Sekcja '{section_name}' zwróciła błąd: {section_data.get('error')}"
+        )
+
+
+def test_console_incidents_structure(client):
+    """Sekcja incidents ma poprawną strukturę."""
+    resp = client.get("/api/account/analytics/console/incidents")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["success"] is True
+    assert data["section"] == "incidents"
+
+    section = data["data"]
+    assert "total_active" in section
+    assert "items" in section
+    assert "by_status" in section
+    assert "by_priority" in section
+
+
+def test_console_policy_actions_structure(client):
+    """Sekcja policy_actions ma poprawną strukturę."""
+    resp = client.get("/api/account/analytics/console/policy_actions")
+    assert resp.status_code == 200
+    section = resp.json()["data"]
+
+    assert "total_open" in section
+    assert "requiring_review" in section
+    assert "items" in section
+    assert "summary" in section
+    assert "open_count" in section["summary"]
+
+
+def test_console_pipeline_status_structure(client):
+    """Sekcja pipeline_status ma poprawną strukturę."""
+    resp = client.get("/api/account/analytics/console/pipeline_status")
+    assert resp.status_code == 200
+    section = resp.json()["data"]
+
+    assert "promotion_allowed" in section
+    assert "rollback_allowed" in section
+    assert "experiment_allowed" in section
+    assert "recommendation_allowed" in section
+    assert "any_freeze_active" in section
+
+
+def test_console_operator_queue_structure(client):
+    """Sekcja operator_queue ma poprawną strukturę."""
+    resp = client.get("/api/account/analytics/console/operator_queue")
+    assert resp.status_code == 200
+    section = resp.json()["data"]
+
+    assert "queue_size" in section
+    assert "critical_count" in section
+    assert "sla_breached_count" in section
+    assert "items" in section
+
+
+def test_console_worker_status_structure(client):
+    """Sekcja worker_status ma poprawną strukturę."""
+    resp = client.get("/api/account/analytics/console/worker_status")
+    assert resp.status_code == 200
+    section = resp.json()["data"]
+
+    assert "enabled" in section
+    assert "running" in section
+    assert "interval_seconds" in section
+
+
+def test_console_monitoring_summary_structure(client):
+    """Sekcja monitoring_summary ma poprawną strukturę."""
+    resp = client.get("/api/account/analytics/console/monitoring_summary")
+    assert resp.status_code == 200
+    section = resp.json()["data"]
+
+    assert "promotion_monitoring" in section
+    assert "rollback_monitoring" in section
+    assert "active_count" in section["promotion_monitoring"]
+    assert "active_count" in section["rollback_monitoring"]
+
+
+def test_console_recent_notifications(client):
+    """Sekcja recent_notifications zwraca dane z system_logs."""
+    resp = client.get("/api/account/analytics/console/recent_notifications")
+    assert resp.status_code == 200
+    section = resp.json()["data"]
+
+    assert "count" in section
+    assert "items" in section
+    assert isinstance(section["items"], list)
+
+
+def test_console_recent_blocked_operations(client):
+    """Sekcja recent_blocked_operations zwraca dane o blokadach."""
+    resp = client.get("/api/account/analytics/console/recent_blocked_operations")
+    assert resp.status_code == 200
+    section = resp.json()["data"]
+
+    assert "count" in section
+    assert "items" in section
+
+
+def test_console_recent_system_events(client):
+    """Sekcja recent_system_events zwraca WARNING+ logi."""
+    resp = client.get("/api/account/analytics/console/recent_system_events")
+    assert resp.status_code == 200
+    section = resp.json()["data"]
+
+    assert "count" in section
+    assert "items" in section
+
+
+def test_console_invalid_section(client):
+    """Nieznana sekcja konsoli zwraca 400."""
+    resp = client.get("/api/account/analytics/console/nonexistent_section")
+    assert resp.status_code == 400
+
+
+def test_console_bundle_function_directly():
+    """Bezpośrednie wywołanie get_operator_console() działa poprawnie."""
+    from backend.operator_console import get_operator_console
+    from backend.database import SessionLocal
+
+    db = SessionLocal()
+    try:
+        console = get_operator_console(db)
+    finally:
+        db.close()
+
+    assert "generated_at" in console
+    assert "sections" in console
+    assert len(console["sections"]) == 9
+
+    # Żadna sekcja nie powinna mieć klucza "error"
+    for name, section in console["sections"].items():
+        assert "error" not in section, f"Sekcja '{name}': {section.get('error')}"
+
+
+def test_console_with_populated_data(client):
+    """Konsola poprawnie agreguje dane po wykonaniu cyklu workera."""
+    # Uruchom worker cycle żeby wygenerować dane w system_logs
+    client.post("/api/account/analytics/worker/cycle")
+
+    # Teraz konsola powinna mieć dane w recent_system_events
+    resp = client.get("/api/account/analytics/console")
+    data = resp.json()["data"]
+
+    # Worker cycle powinien zapisać log do system_log
+    system_events = data["sections"]["recent_system_events"]
+    # Nie wymuszamy count > 0 bo worker loguje jako INFO, a system_events filtruje WARNING+
+    assert isinstance(system_events["items"], list)
