@@ -7,19 +7,19 @@ AKTUALNY PRIORYTET:
 Trading core, nie governance.
 
 CO JEST DOMKNIĘTE:
-accounting, risk, reporting, policy, governance, notifications, worker, operator console, env→runtime_settings (P1), refaktor _demo_trading (P2).
+accounting, risk, reporting, policy, governance, notifications, worker, operator console, env→runtime_settings (P1), refaktor _demo_trading (P2), exit quality (ETAP B), telegram rewrite.
 
 CZEGO TERAZ NIE RUSZAĆ:
 policy/governance/worker/console, chyba że jest bug.
 
 AKTUALNIE PRACUJEMY NAD:
-collector.py / entry-exit quality / symbol selection / activity limits.
+symbol selection / activity limits.
 
 OSTATNI ZAKOŃCZONY KROK:
-Refaktor _demo_trading() na etapy + migracja 15 env→runtime_settings, testy 167/167 zielone.
+ETAP B: ExitQuality model + MFE/MAE tracking + exit_quality_report + Telegram rewrite (operator-friendly). Testy 171/171 zielone. Commit da39fd8.
 
 NASTĘPNY KROK:
-Pomiar jakości wyjść i range accuracy (ETAP B / P3).
+Symbol selection: ranking netto po kosztach, black/whitelista (ETAP C).
 
 ---
 
@@ -28,7 +28,7 @@ Pomiar jakości wyjść i range accuracy (ETAP B / P3).
 | # | Zadanie | Status |
 |---|---|---|
 | A | Checkpoint: commit P1+P2, aktualizacja docs | ✅ |
-| B | Exit quality: MFE/MAE, range accuracy, partial exit analysis | ⬜ NASTĘPNY |
-| C | Symbol selection: ranking netto po kosztach, black/whitelista | ⬜ |
+| B | Exit quality: MFE/MAE, range accuracy, Telegram rewrite | ✅ |
+| C | Symbol selection: ranking netto po kosztach, black/whitelista | ⬜ NASTĘPNY |
 | D | Activity control: max trades/h, cooldown per setup, gate anty-overtrading | ⬜ |
 | E | Przeniesienie reszty env do runtime_settings (infrastrukturalne) | ⬜ |
