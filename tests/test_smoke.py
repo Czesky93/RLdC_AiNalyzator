@@ -3307,3 +3307,225 @@ def test_correlation_functions_directly():
         assert "blockers" in result
     finally:
         db.close()
+
+
+# =====================================================================
+# ============ TRADING EFFECTIVENESS REVIEW (ETAP X) ==================
+# =====================================================================
+
+def _seed_effectiveness_data():
+    """Seed: buy+sell pair z kosztami, decision trace ze strategią i reason_code."""
+    db = SessionLocal()
+    try:
+        # Buy order
+        buy = Order(
+            symbol="EFFEUR",
+            side="BUY",
+            order_type="MARKET",
+            price=100.0,
+            quantity=1.0,
+            status="FILLED",
+            mode="demo",
+            executed_price=100.0,
+            executed_quantity=1.0,
+            entry_reason_code="rsi_oversold",
+        )
+        db.add(buy)
+        db.commit()
+        db.refresh(buy)
+        save_cost_entry(db, symbol="EFFEUR", cost_type="taker_fee", order_id=buy.id,
+                        actual_value=0.10, expected_value=0.10)
+        attach_costs_to_order(db, order=buy, gross_pnl=0.0,
+                              config_snapshot_id="eff-snap", entry_reason_code="rsi_oversold")
+
+        # Sell order (profitable gross, but costs eat some)
+        sell = Order(
+            symbol="EFFEUR",
+            side="SELL",
+            order_type="MARKET",
+            price=102.0,
+            quantity=1.0,
+            status="FILLED",
+            mode="demo",
+            executed_price=102.0,
+            executed_quantity=1.0,
+            expected_edge=1.5,
+            realized_rr=1.2,
+            entry_reason_code="rsi_oversold",
+        )
+        db.add(sell)
+        db.commit()
+        db.refresh(sell)
+        save_cost_entry(db, symbol="EFFEUR", cost_type="taker_fee", order_id=sell.id,
+                        actual_value=0.10, expected_value=0.10)
+        save_cost_entry(db, symbol="EFFEUR", cost_type="slippage", order_id=sell.id,
+                        actual_value=0.05, expected_value=0.05)
+        attach_costs_to_order(db, order=sell, gross_pnl=2.0,
+                              config_snapshot_id="eff-snap", exit_reason_code="take_profit")
+
+        # DecisionTrace for strategy attribution
+        save_decision_trace(
+            db,
+            symbol="EFFEUR",
+            mode="demo",
+            action_type="EXECUTE",
+            reason_code="rsi_oversold",
+            strategy_name="mean_reversion",
+            timeframe="1h",
+            signal_summary={"signal": "BUY"},
+            risk_gate_result={"allowed": True},
+            cost_gate_result={"eligible": True},
+            execution_gate_result={"eligible": True},
+            config_snapshot_id="eff-snap",
+            payload={"source": "test"},
+            order_id=sell.id,
+        )
+
+        # Blocked decision trace (for filter effectiveness)
+        save_decision_trace(
+            db,
+            symbol="EFFEUR",
+            mode="demo",
+            action_type="BLOCK",
+            reason_code="leakage_gate_symbol",
+            strategy_name="mean_reversion",
+            timeframe="1h",
+            signal_summary={"signal": "BUY"},
+            risk_gate_result={"allowed": False},
+            cost_gate_result={"eligible": True},
+            execution_gate_result={"eligible": True},
+            config_snapshot_id="eff-snap",
+            payload={"source": "test"},
+        )
+
+        db.commit()
+        return sell.id
+    finally:
+        db.close()
+
+
+_eff_seeded = False
+
+
+def _ensure_effectiveness_data():
+    """Seed raz (lazy — po stworzeniu tabel przez fixture client)."""
+    global _eff_seeded
+    if not _eff_seeded:
+        _seed_effectiveness_data()
+        _eff_seeded = True
+
+
+def test_effectiveness_summary_endpoint(client):
+    """Endpoint GET /analytics/trading-effectiveness zwraca pełny bundle."""
+    _ensure_effectiveness_data()
+    resp = client.get("/api/account/analytics/trading-effectiveness")
+    assert resp.status_code == 200
+    data = resp.json()["data"]
+    assert "summary" in data
+    assert "by_symbol" in data
+    assert "by_reason_code" in data
+    assert "by_strategy" in data
+    assert "cost_leakage" in data
+    assert "overtrading" in data
+    assert "filters" in data
+    assert "edge" in data
+    assert "suggestions" in data
+
+
+def test_effectiveness_summary_has_verdict(client):
+    """Summary zawiera verdict i kluczowe metryki."""
+    resp = client.get("/api/account/analytics/trading-effectiveness")
+    summary = resp.json()["data"]["summary"]
+    assert "verdict" in summary
+    assert "verdict_reason" in summary
+    assert "net_expectancy" in summary
+    assert "cost_leakage_ratio" in summary
+    assert "cost_killed_trades" in summary
+    assert summary["closed_trades"] > 0
+
+
+def test_effectiveness_symbols_endpoint(client):
+    """Endpoint symbols zwraca listę z verdict per symbol."""
+    resp = client.get("/api/account/analytics/trading-effectiveness/symbols")
+    assert resp.status_code == 200
+    data = resp.json()["data"]
+    assert isinstance(data, list)
+    # Powinien być co najmniej EFFEUR
+    symbols = {s["symbol"] for s in data}
+    assert "EFFEUR" in symbols
+    eff = next(s for s in data if s["symbol"] == "EFFEUR")
+    assert "verdict" in eff
+    assert "net_expectancy" in eff
+    assert "overtrading_score" in eff
+
+
+def test_effectiveness_reasons_endpoint(client):
+    """Endpoint reasons zwraca skuteczność per entry_reason_code."""
+    resp = client.get("/api/account/analytics/trading-effectiveness/reasons")
+    assert resp.status_code == 200
+    data = resp.json()["data"]
+    assert isinstance(data, list)
+
+
+def test_effectiveness_strategies_endpoint(client):
+    """Endpoint strategies zwraca diagnostykę per strategia."""
+    resp = client.get("/api/account/analytics/trading-effectiveness/strategies")
+    assert resp.status_code == 200
+    data = resp.json()["data"]
+    assert isinstance(data, list)
+
+
+def test_effectiveness_cost_leakage(client):
+    """Cost leakage analysis w bundle."""
+    resp = client.get("/api/account/analytics/trading-effectiveness")
+    leakage = resp.json()["data"]["cost_leakage"]
+    assert "dominant_cost_type" in leakage
+    assert "cost_breakdown" in leakage
+
+
+def test_effectiveness_edge_analysis(client):
+    """Edge analysis — expected vs realized."""
+    resp = client.get("/api/account/analytics/trading-effectiveness")
+    edge = resp.json()["data"]["edge"]
+    assert "trades_with_edge" in edge
+    assert "avg_expected_edge" in edge
+    assert "avg_realized_rr" in edge
+    assert "edge_hit_rate" in edge
+
+
+def test_effectiveness_filter_analysis(client):
+    """Filter/gate effectiveness analysis."""
+    resp = client.get("/api/account/analytics/trading-effectiveness")
+    filters = resp.json()["data"]["filters"]
+    assert "gates" in filters
+    assert "total_blocked" in filters
+    assert "total_executed" in filters
+
+
+def test_effectiveness_overtrading(client):
+    """Overtrading detection."""
+    resp = client.get("/api/account/analytics/trading-effectiveness")
+    overtrading = resp.json()["data"]["overtrading"]
+    assert "overtrade_symbols" in overtrading
+    assert "overtrade_strategies" in overtrading
+
+
+def test_effectiveness_suggestions(client):
+    """Improvement suggestions — lista sugestii."""
+    resp = client.get("/api/account/analytics/trading-effectiveness")
+    suggestions = resp.json()["data"]["suggestions"]
+    assert isinstance(suggestions, list)
+
+
+def test_effectiveness_functions_directly():
+    """Bezpośredni test funkcji trading_effectiveness."""
+    from backend.trading_effectiveness import trading_effectiveness_summary
+
+    db = SessionLocal()
+    try:
+        result = trading_effectiveness_summary(db, mode="demo")
+        assert "verdict" in result
+        assert "net_pnl" in result
+        assert "net_expectancy" in result
+    finally:
+        db.close()

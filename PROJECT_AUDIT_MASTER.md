@@ -1,12 +1,12 @@
 # PROJECT AUDIT MASTER
 
 ## Audit State
-- Current stage: `ETAP 8 - CORRELATION / INCIDENT INTELLIGENCE`
-- Current file: `backend/correlation.py`
-- Last completed file: `backend/correlation.py`
-- Next stage: `Cautious low-risk semi-automation`
-- Audit timestamp: `correlation completed, 137 tests green`
-- Pipeline status: **FULL LOOP + GOVERNANCE + NOTIFICATIONS + WORKER + CONSOLE + CORRELATION**
+- Current stage: `ETAP X - TRADING EFFECTIVENESS REVIEW`
+- Current file: `backend/trading_effectiveness.py`
+- Last completed file: `backend/trading_effectiveness.py`
+- Next stage: `Adaptive improvement / parameter tuning`
+- Audit timestamp: `trading effectiveness completed, 148 tests green`
+- Pipeline status: **FULL LOOP + GOVERNANCE + NOTIFICATIONS + WORKER + CONSOLE + CORRELATION + TRADING EFFECTIVENESS**
 
 ## Scope
 This document is the single audit state file for the repository. It tracks:
@@ -275,7 +275,8 @@ Status vocabulary:
 | `backend/reevaluation_worker.py` | scheduled reevaluation worker | `poprawiony` | cykliczne odświeżanie governance/monitoring, daemon thread, manual trigger endpoint |
 | `backend/operator_console.py` | operator console / dashboard | `poprawiony` | 9 sekcji: incidents, policy_actions, pipeline_status, operator_queue, worker_status, monitoring_summary, notifications, blocked_ops, system_events |
 | `backend/correlation.py` | correlation / incident intelligence | `poprawiony` | 5 public: incident timeline, correlations, PA chain, promotion chain, why-blocked |
-| `tests/test_smoke.py` | smoke tests | `przetestowany` | 137 tests (54 base + 17 policy + 15 governance + 5 guard + 12 notification + 9 worker + 14 console + 11 correlation) |
+| `backend/trading_effectiveness.py` | trading effectiveness diagnostics | `poprawiony` | 10 public: summary, symbol/reason/strategy effectiveness, cost leakage, overtrading, filters, edge, suggestions, bundle |
+| `tests/test_smoke.py` | smoke tests | `przetestowany` | 148 tests (54 base + 17 policy + 15 governance + 5 guard + 12 notification + 9 worker + 14 console + 11 correlation + 11 effectiveness) |
 | `telegram_bot/bot.py` | Telegram bot | `poprawiony` | komendy tradingowe + governance (/governance, /freeze, /incidents) |
 | `telegram_bot/__init__.py` | package marker | `zatwierdzony` | no action needed |
 | `ai_trading/__init__.py` | placeholder package | `wymaga poprawy` | architecture placeholder only |

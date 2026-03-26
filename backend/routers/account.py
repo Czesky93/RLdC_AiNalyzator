@@ -91,6 +91,12 @@ from backend.correlation import (
     get_promotion_chain,
     get_why_blocked,
 )
+from backend.trading_effectiveness import (
+    effectiveness_bundle,
+    symbol_effectiveness,
+    reason_code_effectiveness,
+    strategy_effectiveness,
+)
 from backend.runtime_settings import RuntimeSettingsError
 
 router = APIRouter()
@@ -1541,4 +1547,48 @@ async def why_blocked(
         data = get_why_blocked(db, operation)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+    return {"success": True, "data": data}
+
+
+# =====================================================================
+# ============ TRADING EFFECTIVENESS REVIEW ===========================
+# =====================================================================
+
+@router.get("/analytics/trading-effectiveness")
+async def trading_effectiveness(
+    mode: str = "demo",
+    db: Session = Depends(get_db),
+):
+    """Pełny raport skuteczności tradingu — summary, symbole, strategie, koszty, sugestie."""
+    data = effectiveness_bundle(db, mode=mode)
+    return {"success": True, "data": data}
+
+
+@router.get("/analytics/trading-effectiveness/symbols")
+async def trading_effectiveness_symbols(
+    mode: str = "demo",
+    db: Session = Depends(get_db),
+):
+    """Skuteczność per symbol — które zarabiają netto, które przepalają."""
+    data = symbol_effectiveness(db, mode=mode)
+    return {"success": True, "data": data}
+
+
+@router.get("/analytics/trading-effectiveness/reasons")
+async def trading_effectiveness_reasons(
+    mode: str = "demo",
+    db: Session = Depends(get_db),
+):
+    """Skuteczność per entry reason code — które wejścia tracą po kosztach."""
+    data = reason_code_effectiveness(db, mode=mode)
+    return {"success": True, "data": data}
+
+
+@router.get("/analytics/trading-effectiveness/strategies")
+async def trading_effectiveness_strategies(
+    mode: str = "demo",
+    db: Session = Depends(get_db),
+):
+    """Skuteczność per strategia — expectancy, edge gap, cost leakage."""
+    data = strategy_effectiveness(db, mode=mode)
     return {"success": True, "data": data}
