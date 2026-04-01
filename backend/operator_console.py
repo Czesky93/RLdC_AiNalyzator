@@ -22,9 +22,6 @@ from typing import Any, Dict, List, Optional
 from sqlalchemy.orm import Session
 
 from backend.database import (
-    ConfigPromotion,
-    ConfigRollback,
-    DecisionTrace,
     Incident,
     PolicyAction,
     PromotionMonitoring,
