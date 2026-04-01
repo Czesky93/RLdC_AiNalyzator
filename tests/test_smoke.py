@@ -13,6 +13,8 @@ os.environ["DEMO_INITIAL_BALANCE"] = "10000"
 os.environ["DEMO_TRADING_ENABLED"] = "true"
 os.environ["WS_ENABLED"] = "true"
 os.environ["MAX_CERTAINTY_MODE"] = "false"
+os.environ["TRADING_MODE"] = "demo"
+os.environ["ALLOW_LIVE_TRADING"] = "false"
 
 # Isolated DB per test run
 _tmp_db = tempfile.NamedTemporaryFile(prefix="rldc_test_", suffix=".db", delete=False)

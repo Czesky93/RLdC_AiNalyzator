@@ -401,18 +401,29 @@ def compute_risk_snapshot(db: Session, mode: str = "demo", now: Optional[datetim
             break
 
     daily_net_pnl = _float(day_perf["net_pnl"])
+    # Dolicz unrealized PnL z otwartych pozycji (mark-to-market)
+    unrealized_pnl = 0.0
+    for p in positions:
+        entry = _float(p.entry_price)
+        qty = _float(p.quantity)
+        if entry > 0 and qty > 0:
+            current = _get_latest_price(db, (p.symbol or "").upper()) or _float(p.current_price) or entry
+            unrealized_pnl += (current - entry) * qty
+    daily_total_pnl = daily_net_pnl + unrealized_pnl
     if mode == "demo":
         initial_balance = float(os.getenv("DEMO_INITIAL_BALANCE", "10000") or 10000)
     else:
         # Dla LIVE używamy total_exposure jako proxy bazowego kapitału
         initial_balance = max(1.0, total_exposure)
-    daily_net_drawdown = min(0.0, daily_net_pnl)
+    daily_net_drawdown = min(0.0, daily_total_pnl)
     kill_switch_triggered = daily_net_drawdown <= -(initial_balance * 0.03) if initial_balance > 0 else False
 
     return {
         "mode": mode,
         "timestamp": now.isoformat(),
         "daily_net_pnl": _round_metric(daily_net_pnl),
+        "unrealized_pnl": _round_metric(unrealized_pnl),
+        "daily_total_pnl": _round_metric(daily_total_pnl),
         "daily_net_drawdown": _round_metric(daily_net_drawdown),
         "loss_streak_net": loss_streak,
         "open_positions_count": len(positions),
