@@ -4,7 +4,7 @@ Moduł analizy technicznej i generacji bloga.
 from __future__ import annotations
 
 from typing import List, Dict, Optional
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import json
 import os
 import requests
@@ -13,7 +13,7 @@ import re
 import pandas as pd
 import pandas_ta as ta
 
-from backend.database import Kline, Signal, BlogPost
+from backend.database import Kline, Signal, BlogPost, utc_now_naive
 from backend.system_logger import log_to_db, log_exception
 
 _last_openai_error_ts: Optional[datetime] = None
@@ -261,7 +261,7 @@ def generate_market_insights(db, symbols: List[str], timeframe: str = "1h", limi
                 "indicators": indicators,
                 "reason": insight["reason"],
                 "quantum": quantum.get(symbol),
-                "timestamp": datetime.utcnow().isoformat(),
+                "timestamp": utc_now_naive().isoformat(),
             }
         )
 
@@ -276,8 +276,8 @@ def _send_telegram_message(text: str):
     try:
         url = f"https://api.telegram.org/bot{token}/sendMessage"
         requests.post(url, json={"chat_id": chat_id, "text": text}, timeout=5)
-    except Exception:
-        pass
+    except Exception as exc:
+        log_exception("analysis._send_telegram_message", exc)
 
 
 def _merge_ranges_with_insights(insights: List[Dict], ranges: List[Dict]) -> List[Dict]:
@@ -451,7 +451,7 @@ def _openai_ranges(insights: List[Dict], force: bool = False) -> List[Dict]:
     model = os.getenv("OPENAI_MODEL", "gpt-5-mini")
     backoff_seconds = int(os.getenv("OPENAI_BACKOFF_SECONDS", "600"))
     global _last_openai_error_ts
-    if (not force) and _last_openai_error_ts and (datetime.utcnow() - _last_openai_error_ts).total_seconds() < backoff_seconds:
+    if (not force) and _last_openai_error_ts and (utc_now_naive() - _last_openai_error_ts).total_seconds() < backoff_seconds:
         return []
     payload = {
         "model": model,
@@ -494,7 +494,7 @@ def _openai_ranges(insights: List[Dict], force: bool = False) -> List[Dict]:
             timeout=25,
         )
         if resp.status_code >= 400:
-            _last_openai_error_ts = datetime.utcnow()
+            _last_openai_error_ts = utc_now_naive()
             try:
                 data = resp.json()
                 err = (data or {}).get("error") or {}
@@ -520,7 +520,7 @@ def _openai_ranges(insights: List[Dict], force: bool = False) -> List[Dict]:
             return []
         extracted = _extract_json(text)
         if not extracted:
-            _last_openai_error_ts = datetime.utcnow()
+            _last_openai_error_ts = utc_now_naive()
             log_to_db("ERROR", "analysis", "OpenAI response: brak tekstu/JSON do parsowania")
             return []
         ranges = json.loads(extracted)
@@ -528,7 +528,7 @@ def _openai_ranges(insights: List[Dict], force: bool = False) -> List[Dict]:
             return ranges
         return []
     except Exception as exc:
-        _last_openai_error_ts = datetime.utcnow()
+        _last_openai_error_ts = utc_now_naive()
         log_exception("analysis", "Błąd zapytania/parsing OpenAI ranges", exc)
         return []
 
@@ -543,7 +543,7 @@ def persist_insights_as_signals(db, insights: List[Dict]):
             price=ins.get("price") or 0.0,
             indicators=json.dumps(ins.get("indicators", {})),
             reason=ins.get("reason", ""),
-            timestamp=datetime.utcnow(),
+            timestamp=utc_now_naive(),
         )
         db.add(signal)
 
@@ -555,7 +555,7 @@ def generate_blog_post(db, insights: List[Dict]) -> Optional[BlogPost]:
     if not insights:
         return None
 
-    title = f"Market Insights: {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}"
+    title = f"Market Insights: {utc_now_naive().strftime('%Y-%m-%d %H:%M UTC')}"
     summary_lines = []
     content_lines = [
         "## Najważniejsze wnioski rynkowe",
@@ -606,7 +606,7 @@ def generate_blog_post(db, insights: List[Dict]) -> Optional[BlogPost]:
         summary=summary,
         market_insights=json.dumps(insights),
         status="draft",
-        created_at=datetime.utcnow(),
+        created_at=utc_now_naive(),
     )
     db.add(post)
     db.commit()
@@ -619,29 +619,29 @@ def maybe_generate_insights_and_blog(db, symbols: List[str], force: bool = False
     try:
         if not force:
             latest = db.query(BlogPost).order_by(BlogPost.created_at.desc()).first()
-            if latest and (datetime.utcnow() - latest.created_at) < timedelta(hours=1):
+            if latest and (utc_now_naive() - latest.created_at) < timedelta(hours=1):
                 return None
 
             backoff_seconds = int(os.getenv("OPENAI_BACKOFF_SECONDS", "600"))
             global _last_openai_error_ts
-            if _last_openai_error_ts and (datetime.utcnow() - _last_openai_error_ts).total_seconds() < backoff_seconds:
+            if _last_openai_error_ts and (utc_now_naive() - _last_openai_error_ts).total_seconds() < backoff_seconds:
                 return None
 
         insights = generate_market_insights(db, symbols, timeframe="1h")
         if not insights:
             return None
 
-        provider = os.getenv("AI_PROVIDER", "openai").strip().lower()
+        provider = os.getenv("AI_PROVIDER", "auto").strip().lower()
         if provider in ("heuristic", "offline"):
             ranges = _heuristic_ranges(insights)
-        elif provider == "auto":
-            ranges = _openai_ranges(insights, force=force) or _heuristic_ranges(insights)
-        else:
-            # default: OpenAI only
+        elif provider == "openai":
             ranges = _openai_ranges(insights, force=force)
             if not ranges:
-                # _openai_ranges loguje szczegóły i ma backoff — nie spamuj logów.
-                return None
+                # Fallback na heurystykę gdy brak klucza OpenAI — bot musi handlować
+                ranges = _heuristic_ranges(insights)
+        else:
+            # auto (default): próbuj OpenAI, w razie braku heurystyka
+            ranges = _openai_ranges(insights, force=force) or _heuristic_ranges(insights)
 
         insights = _merge_ranges_with_insights(insights, ranges)
 

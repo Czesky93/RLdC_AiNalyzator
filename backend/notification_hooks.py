@@ -257,10 +257,11 @@ def _should_send_telegram(priority: str) -> bool:
     return event_rank <= min_rank
 
 
-def send_telegram_message(text: str) -> bool:
+def send_telegram_message(text: str, source_module: str = "notification_hooks") -> bool:
     """
     Wyślij wiadomość przez Telegram Bot API (HTTP POST).
     Zwraca True jeśli wysłano pomyślnie.
+    Każda wysłana wiadomość jest archiwizowana przez Telegram Intelligence Layer.
     """
     cfg = _get_config()
     token = cfg["telegram_bot_token"]
@@ -270,6 +271,7 @@ def send_telegram_message(text: str) -> bool:
         return False
 
     url = f"https://api.telegram.org/bot{token}/sendMessage"
+    sent = False
     try:
         resp = requests.post(
             url,
@@ -278,13 +280,26 @@ def send_telegram_message(text: str) -> bool:
         )
         if resp.status_code == 200:
             logger.info("Telegram: wiadomość wysłana pomyślnie")
-            return True
+            sent = True
         else:
             logger.warning("Telegram: błąd wysyłki, status=%s, body=%s", resp.status_code, resp.text[:200])
-            return False
     except requests.RequestException as exc:
         logger.error("Telegram: błąd połączenia: %s", exc)
-        return False
+
+    # Archiwizacja przez Telegram Intelligence Layer
+    try:
+        from backend.telegram_intelligence import log_telegram_event
+        log_telegram_event(
+            chat_id=chat_id,
+            direction="outgoing",
+            raw_text=text,
+            source_module=source_module,
+            message_type="alert",
+        )
+    except Exception as log_exc:
+        logger.debug("Telegram Intelligence archiwizacja: %s", log_exc)
+
+    return sent
 
 
 def _log_notification(event_type: str, message: str) -> None:

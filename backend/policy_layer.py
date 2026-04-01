@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from backend.notification_hooks import notify_policy_action_created
@@ -27,6 +27,7 @@ from backend.database import (
     PolicyAction,
     PromotionMonitoring,
     RollbackMonitoring,
+    utc_now_naive
 )
 
 logger = logging.getLogger(__name__)
@@ -382,7 +383,7 @@ def create_policy_action(
     for old_action in open_actions:
         old_action.status = "superseded"
         old_action.superseded_by = new_row.id
-        old_action.resolved_at = datetime.utcnow()
+        old_action.resolved_at = utc_now_naive()
 
     db.commit()
     db.refresh(new_row)
@@ -415,7 +416,7 @@ def resolve_policy_action(
         raise ValueError(f"PolicyAction nie jest open: {row.status}")
 
     row.status = "resolved"
-    row.resolved_at = datetime.utcnow()
+    row.resolved_at = utc_now_naive()
     if notes:
         row.notes = (row.notes or "") + f"\n[resolved] {notes}" if row.notes else f"[resolved] {notes}"
     db.commit()

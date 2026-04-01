@@ -12,7 +12,7 @@ router = APIRouter()
 
 
 @router.get("/latest")
-async def get_latest_blog(db: Session = Depends(get_db)):
+def get_latest_blog(db: Session = Depends(get_db)):
     """Zwraca najnowszy wpis blogowy (draft lub published)."""
     try:
         latest = db.query(BlogPost).order_by(desc(BlogPost.created_at)).first()
@@ -37,7 +37,7 @@ async def get_latest_blog(db: Session = Depends(get_db)):
 
 
 @router.get("/list")
-async def list_blog_posts(
+def list_blog_posts(
     status: Optional[str] = Query(None, description="draft lub published"),
     limit: int = Query(20, ge=1, le=100),
     db: Session = Depends(get_db),

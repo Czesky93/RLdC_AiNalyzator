@@ -1,6 +1,7 @@
 'use client'
 
-import React, { useEffect, useState } from 'react'
+import { getApiBase } from '@/lib/api'
+import { useEffect, useState } from 'react'
 
 type AccountSummary = {
   equity: number
@@ -12,7 +13,7 @@ type AccountSummary = {
   timestamp: string
 }
 
-export default function AccountSummary() {
+export default function AccountSummary({ mode = 'demo' }: { mode?: 'demo' | 'live' }) {
   const [data, setData] = useState<AccountSummary | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -20,8 +21,8 @@ export default function AccountSummary() {
   useEffect(() => {
     const fetchSummary = async () => {
       try {
-        const base = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
-        const res = await fetch(`${base}/api/account/summary?mode=demo`)
+        const base = getApiBase()
+        const res = await fetch(`${base}/api/account/summary?mode=${mode}`)
         if (!res.ok) {
           throw new Error('Błąd pobierania account summary')
         }
@@ -34,7 +35,9 @@ export default function AccountSummary() {
       }
     }
     fetchSummary()
-  }, [])
+    const interval = setInterval(fetchSummary, 60000)
+    return () => clearInterval(interval)
+  }, [mode])
 
   return (
     <div className="bg-rldc-dark-card rounded-lg p-6 border border-rldc-dark-border neon-card">
@@ -46,7 +49,16 @@ export default function AccountSummary() {
       </div>
 
       {loading && <div className="text-sm text-slate-400">Ładowanie danych...</div>}
-      {error && <div className="text-sm text-rldc-red-primary">{error}</div>}
+      {error && (
+        <div className="rounded-lg border border-rldc-red-primary/30 bg-rldc-red-primary/10 px-4 py-3 text-sm text-rldc-red-primary">
+          {error}
+        </div>
+      )}
+      {data && (data as any)._info && (
+        <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-xs text-amber-400 mb-3 leading-relaxed">
+          {(data as any)._info}
+        </div>
+      )}
 
       {data && (
         <div className="grid grid-cols-2 gap-4">

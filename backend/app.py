@@ -18,6 +18,8 @@ from backend.database import init_db
 
 # Import routers
 from backend.routers import market, portfolio, orders, signals, account, positions, blog, control
+from backend.routers import telegram_intel
+from backend.routers import debug as debug_router
 from backend.collector import DataCollector
 from backend.reevaluation_worker import start_worker, stop_worker
 
@@ -64,17 +66,14 @@ app = FastAPI(
     title="RLdC Trading Bot API",
     description="API dla systemu autonomicznego tradingu RLdC AiNalyzator",
     version="0.7.0-beta",
-    lifespan=lifespan
+    lifespan=lifespan,
+    redirect_slashes=False,
 )
 
 # CORS middleware - pozwala na łączenie z frontendem
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:3000",
-        "http://127.0.0.1:3000",
-        "http://localhost:8000",
-    ],
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -112,6 +111,8 @@ app.include_router(account.router, prefix="/api/account", tags=["Account"])
 app.include_router(positions.router, prefix="/api/positions", tags=["Positions"])
 app.include_router(blog.router, prefix="/api/blog", tags=["Blog"])
 app.include_router(control.router, prefix="/api/control", tags=["Control"])
+app.include_router(telegram_intel.router, prefix="/api/telegram-intel", tags=["Telegram Intelligence"])
+app.include_router(debug_router.router, prefix="/api/debug", tags=["Debug / Diagnostics"])
 
 
 if __name__ == "__main__":

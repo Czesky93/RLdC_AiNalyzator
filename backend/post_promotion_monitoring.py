@@ -6,12 +6,12 @@ from __future__ import annotations
 
 import json
 import os
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List
 
 from sqlalchemy.orm import Session
 
-from backend.database import ConfigPromotion, PromotionMonitoring
+from backend.database import ConfigPromotion, PromotionMonitoring, utc_now_naive
 from backend.experiments import snapshot_performance_report
 from backend.recommendations import get_recommendation
 
@@ -79,8 +79,8 @@ def initialize_monitoring_record(db: Session, promotion_id: int, notes: str | No
         from_snapshot_id=promotion.from_snapshot_id,
         to_snapshot_id=_observed_snapshot_id(promotion),
         status="pending",
-        started_at=promotion.applied_at or promotion.initiated_at or datetime.utcnow(),
-        evaluation_window_start=promotion.applied_at or promotion.initiated_at or datetime.utcnow(),
+        started_at=promotion.applied_at or promotion.initiated_at or utc_now_naive(),
+        evaluation_window_start=promotion.applied_at or promotion.initiated_at or utc_now_naive(),
         evaluation_version=_EVALUATION_VERSION,
         notes=notes,
     )
@@ -119,8 +119,8 @@ def evaluate_monitoring(db: Session, promotion_id: int, notes: str | None = None
     recommendation = get_recommendation(db, int(promotion.recommendation_id))
     baseline_reference = ((recommendation.get("experiment") or {}).get("baseline") or {}).get("metrics") or {}
 
-    start_at = record.evaluation_window_start or promotion.applied_at or promotion.initiated_at or datetime.utcnow()
-    now = datetime.utcnow()
+    start_at = record.evaluation_window_start or promotion.applied_at or promotion.initiated_at or utc_now_naive()
+    now = utc_now_naive()
     observed = snapshot_performance_report(
         db,
         snapshot_id=_observed_snapshot_id(promotion),

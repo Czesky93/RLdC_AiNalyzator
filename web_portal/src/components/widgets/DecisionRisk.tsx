@@ -1,6 +1,7 @@
 'use client'
 
-import React, { useEffect, useState } from 'react'
+import { getApiBase } from '@/lib/api'
+import { useEffect, useState } from 'react'
 
 type RangeRow = {
   symbol: string
@@ -28,7 +29,7 @@ type RiskData = {
   positions_count: number
 }
 
-export default function DecisionRisk() {
+export default function DecisionRisk({ mode = 'demo' }: { mode?: 'demo' | 'live' }) {
   const [rangeRow, setRangeRow] = useState<RangeRow | null>(null)
   const [risk, setRisk] = useState<RiskData | null>(null)
   const [loading, setLoading] = useState(true)
@@ -38,10 +39,10 @@ export default function DecisionRisk() {
     let cancelled = false
     const fetchData = async () => {
       try {
-        const base = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
+        const base = getApiBase()
         const [rangesRes, riskRes] = await Promise.all([
           fetch(`${base}/api/market/ranges`),
-          fetch(`${base}/api/account/risk?mode=demo`),
+          fetch(`${base}/api/account/risk?mode=${mode}`),         
         ])
         if (!rangesRes.ok || !riskRes.ok) {
           throw new Error('Błąd pobierania danych')
@@ -67,7 +68,7 @@ export default function DecisionRisk() {
       cancelled = true
       clearInterval(interval)
     }
-  }, [])
+  }, [mode])
 
   function actionLabel(row: RangeRow | null) {
     if (!row) return 'CZEKAJ'
@@ -83,7 +84,12 @@ export default function DecisionRisk() {
       <h2 className="text-lg font-semibold text-slate-200 mb-4">Decyzje & Ryzyko</h2>
 
       {loading && <div className="text-sm text-slate-400">Ładowanie...</div>}
-      {error && <div className="text-sm text-rldc-red-primary">{error}</div>}
+      {error && (
+        <div className="rounded-lg border border-rldc-dark-border/50 bg-slate-500/5 px-4 py-6 text-center">
+          <div className="text-sm text-slate-500 mb-1">Brak danych</div>
+          <div className="text-xs text-slate-600 leading-relaxed">{mode === 'live' ? 'LIVE — sprawdź połączenie z Binance' : 'DEMO — błąd połączenia z API'}</div>
+        </div>
+      )}
 
       {rangeRow && (
         <div className="space-y-4">

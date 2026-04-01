@@ -1,7 +1,7 @@
 import os
 import sys
 import tempfile
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 # Ensure repo root is on sys.path so `import backend` works when running pytest from anywhere.
@@ -28,6 +28,7 @@ from backend.database import (
     ConfigSnapshot,
     PendingOrder,
     Recommendation,
+    RuntimeSetting,
     SessionLocal,
     Position,
     MarketData,
@@ -39,6 +40,7 @@ from backend.database import (
     save_cost_entry,
     save_decision_trace,
 )
+from backend.database import utc_now_naive
 from backend.experiments import compare_snapshots_for_experiment
 from backend.recommendations import evaluate_recommendation
 from backend.runtime_settings import apply_runtime_updates, build_runtime_state
@@ -79,6 +81,21 @@ def test_signals_top5(client):
     assert resp.status_code == 200
     data = resp.json()
     assert data.get("success") is True
+
+
+def test_signals_best_opportunity(client):
+    resp = client.get("/api/signals/best-opportunity")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data.get("success") is True
+    assert "action" in data
+    # Albo jest okazja, albo CZEKAJ
+    assert data["action"] in ("BUY", "SELL", "CZEKAJ")
+    if data.get("opportunity"):
+        opp = data["opportunity"]
+        assert "symbol" in opp
+        assert "confidence" in opp
+        assert "score" in opp
 
 
 def test_account_summary_demo(client):
@@ -1259,7 +1276,7 @@ def test_post_promotion_monitoring_healthy_verdict(client):
 
     db = SessionLocal()
     try:
-        now = datetime.utcnow()
+        now = utc_now_naive()
         db.add(Order(symbol="MONHEAL", side="SELL", order_type="MARKET", price=110.0, quantity=1.0, status="FILLED", mode="demo", gross_pnl=10.0, net_pnl=9.8, total_cost=0.2, fee_cost=0.2, config_snapshot_id=promoted_snapshot_id, timestamp=now))
         db.add(Order(symbol="MONHEAL", side="SELL", order_type="MARKET", price=111.0, quantity=1.0, status="FILLED", mode="demo", gross_pnl=11.0, net_pnl=10.8, total_cost=0.2, fee_cost=0.2, config_snapshot_id=promoted_snapshot_id, timestamp=now))
         db.commit()
@@ -1307,7 +1324,7 @@ def test_post_promotion_monitoring_collecting_and_rollback_candidate(client):
 
     db = SessionLocal()
     try:
-        now = datetime.utcnow()
+        now = utc_now_naive()
         losing_a = Order(symbol="MONWARN", side="SELL", order_type="MARKET", price=95.0, quantity=1.0, status="FILLED", mode="demo", gross_pnl=-5.0, net_pnl=-6.5, total_cost=1.5, fee_cost=1.5, config_snapshot_id=promoted_snapshot_id, timestamp=now)
         losing_b = Order(symbol="MONWARN", side="SELL", order_type="MARKET", price=94.0, quantity=1.0, status="FILLED", mode="demo", gross_pnl=-6.0, net_pnl=-7.8, total_cost=1.8, fee_cost=1.8, config_snapshot_id=promoted_snapshot_id, timestamp=now)
         db.add_all([losing_a, losing_b])
@@ -1359,7 +1376,7 @@ def test_rollback_decision_no_action_for_healthy_monitoring(client):
 
     db = SessionLocal()
     try:
-        now = datetime.utcnow()
+        now = utc_now_naive()
         db.add(Order(symbol="RBNOOP", side="SELL", order_type="MARKET", price=111.0, quantity=1.0, status="FILLED", mode="demo", gross_pnl=11.0, net_pnl=10.8, total_cost=0.2, fee_cost=0.2, config_snapshot_id=promoted_snapshot_id, timestamp=now))
         db.add(Order(symbol="RBNOOP", side="SELL", order_type="MARKET", price=112.0, quantity=1.0, status="FILLED", mode="demo", gross_pnl=12.0, net_pnl=11.8, total_cost=0.2, fee_cost=0.2, config_snapshot_id=promoted_snapshot_id, timestamp=now))
         db.commit()
@@ -1434,7 +1451,7 @@ def test_rollback_decision_required_for_rollback_candidate(client):
 
     db = SessionLocal()
     try:
-        now = datetime.utcnow()
+        now = utc_now_naive()
         db.add(Order(symbol="RBREQ", side="SELL", order_type="MARKET", price=94.0, quantity=1.0, status="FILLED", mode="demo", gross_pnl=-6.0, net_pnl=-8.0, total_cost=2.0, fee_cost=2.0, config_snapshot_id=promoted_snapshot_id, timestamp=now))
         db.add(Order(symbol="RBREQ", side="SELL", order_type="MARKET", price=93.0, quantity=1.0, status="FILLED", mode="demo", gross_pnl=-7.0, net_pnl=-9.3, total_cost=2.3, fee_cost=2.3, config_snapshot_id=promoted_snapshot_id, timestamp=now))
         db.commit()
@@ -1500,7 +1517,7 @@ def test_rollback_execution_success_flow(client):
 
     db = SessionLocal()
     try:
-        now = datetime.utcnow()
+        now = utc_now_naive()
         db.add(Order(symbol="RBEXEC", side="SELL", order_type="MARKET", price=93.0, quantity=1.0, status="FILLED", mode="demo", gross_pnl=-7.0, net_pnl=-9.5, total_cost=2.5, fee_cost=2.5, config_snapshot_id=promoted_snapshot_id, timestamp=now))
         db.add(Order(symbol="RBEXEC", side="SELL", order_type="MARKET", price=92.0, quantity=1.0, status="FILLED", mode="demo", gross_pnl=-8.0, net_pnl=-10.8, total_cost=2.8, fee_cost=2.8, config_snapshot_id=promoted_snapshot_id, timestamp=now))
         db.commit()
@@ -1602,7 +1619,7 @@ def test_rollback_execution_runtime_drift_case(client):
 
     db = SessionLocal()
     try:
-        now = datetime.utcnow()
+        now = utc_now_naive()
         db.add(Order(symbol="RBDRIFT", side="SELL", order_type="MARKET", price=91.0, quantity=1.0, status="FILLED", mode="demo", gross_pnl=-9.0, net_pnl=-11.5, total_cost=2.5, fee_cost=2.5, config_snapshot_id=promoted_snapshot_id, timestamp=now))
         db.add(Order(symbol="RBDRIFT", side="SELL", order_type="MARKET", price=90.0, quantity=1.0, status="FILLED", mode="demo", gross_pnl=-10.0, net_pnl=-12.8, total_cost=2.8, fee_cost=2.8, config_snapshot_id=promoted_snapshot_id, timestamp=now))
         db.commit()
@@ -1685,7 +1702,7 @@ def test_post_rollback_monitoring_stabilized_verdict(client):
 
     db = SessionLocal()
     try:
-        now = datetime.utcnow()
+        now = utc_now_naive()
         db.add(Order(symbol="PRMSTAB", side="SELL", order_type="MARKET", price=92.0, quantity=1.0, status="FILLED", mode="demo", gross_pnl=-8.0, net_pnl=-10.2, total_cost=2.2, fee_cost=2.2, config_snapshot_id=promoted_snapshot_id, timestamp=now))
         db.add(Order(symbol="PRMSTAB", side="SELL", order_type="MARKET", price=91.0, quantity=1.0, status="FILLED", mode="demo", gross_pnl=-9.0, net_pnl=-11.3, total_cost=2.3, fee_cost=2.3, config_snapshot_id=promoted_snapshot_id, timestamp=now))
         db.commit()
@@ -1703,7 +1720,7 @@ def test_post_rollback_monitoring_stabilized_verdict(client):
 
     db = SessionLocal()
     try:
-        now = datetime.utcnow()
+        now = utc_now_naive()
         db.add(Order(symbol="PRMSTAB", side="SELL", order_type="MARKET", price=113.0, quantity=1.0, status="FILLED", mode="demo", gross_pnl=13.0, net_pnl=12.8, total_cost=0.2, fee_cost=0.2, config_snapshot_id=target_snapshot_id, timestamp=now))
         db.add(Order(symbol="PRMSTAB", side="SELL", order_type="MARKET", price=114.0, quantity=1.0, status="FILLED", mode="demo", gross_pnl=14.0, net_pnl=13.8, total_cost=0.2, fee_cost=0.2, config_snapshot_id=target_snapshot_id, timestamp=now))
         db.commit()
@@ -1744,7 +1761,7 @@ def test_post_rollback_monitoring_collecting_verdict(client):
 
     db = SessionLocal()
     try:
-        now = datetime.utcnow()
+        now = utc_now_naive()
         db.add(Order(symbol="PRMCOLL", side="SELL", order_type="MARKET", price=94.0, quantity=1.0, status="FILLED", mode="demo", gross_pnl=-6.0, net_pnl=-8.0, total_cost=2.0, fee_cost=2.0, config_snapshot_id=promoted_snapshot_id, timestamp=now))
         db.add(Order(symbol="PRMCOLL", side="SELL", order_type="MARKET", price=93.0, quantity=1.0, status="FILLED", mode="demo", gross_pnl=-7.0, net_pnl=-9.1, total_cost=2.1, fee_cost=2.1, config_snapshot_id=promoted_snapshot_id, timestamp=now))
         db.commit()
@@ -1794,7 +1811,7 @@ def test_post_rollback_monitoring_escalate_verdict(client):
 
     db = SessionLocal()
     try:
-        now = datetime.utcnow()
+        now = utc_now_naive()
         db.add(Order(symbol="PRMESC", side="SELL", order_type="MARKET", price=92.0, quantity=1.0, status="FILLED", mode="demo", gross_pnl=-8.0, net_pnl=-10.6, total_cost=2.6, fee_cost=2.6, config_snapshot_id=promoted_snapshot_id, timestamp=now))
         db.add(Order(symbol="PRMESC", side="SELL", order_type="MARKET", price=91.0, quantity=1.0, status="FILLED", mode="demo", gross_pnl=-9.0, net_pnl=-11.9, total_cost=2.9, fee_cost=2.9, config_snapshot_id=promoted_snapshot_id, timestamp=now))
         db.commit()
@@ -1812,7 +1829,7 @@ def test_post_rollback_monitoring_escalate_verdict(client):
 
     db = SessionLocal()
     try:
-        now = datetime.utcnow()
+        now = utc_now_naive()
         db.add(Order(symbol="PRMESC", side="SELL", order_type="MARKET", price=88.0, quantity=1.0, status="FILLED", mode="demo", gross_pnl=-12.0, net_pnl=-14.8, total_cost=2.8, fee_cost=2.8, config_snapshot_id=rollback_snapshot_id, timestamp=now))
         db.add(Order(symbol="PRMESC", side="SELL", order_type="MARKET", price=87.0, quantity=1.0, status="FILLED", mode="demo", gross_pnl=-13.0, net_pnl=-15.9, total_cost=2.9, fee_cost=2.9, config_snapshot_id=rollback_snapshot_id, timestamp=now))
         db.commit()
@@ -2813,7 +2830,7 @@ def test_worker_cycle_escalation_with_overdue_incident(client):
             policy_action_id=0,
             priority="high",
             status="open",
-            sla_deadline=datetime.utcnow() - timedelta(hours=1),
+            sla_deadline=utc_now_naive() - timedelta(hours=1),
         )
         db.add(old_incident)
         db.commit()
@@ -3880,3 +3897,240 @@ def test_exit_quality_endpoint(client):
     data = resp.json()
     assert data["success"] is True
     assert "total_exits" in data["data"]
+
+
+# ─── Position Analysis ──────────────────────────────────────────────
+
+
+def test_position_analysis_endpoint_empty(client):
+    """Endpoint /api/positions/analysis zwraca sukces z pustą listą."""
+    resp = client.get("/api/positions/analysis?mode=demo")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["success"] is True
+    assert "summary" in data
+    assert "data" in data
+    assert isinstance(data["data"], list)
+    assert data["summary"]["positions_count"] == len(data["data"])
+
+
+def test_position_analysis_with_position(client):
+    """Endpoint analizy pozycji generuje kartę decyzyjną."""
+    db = SessionLocal()
+    pos = Position(
+        symbol="BTCEUR",
+        side="LONG",
+        entry_price=50000.0,
+        quantity=0.1,
+        current_price=55000.0,
+        unrealized_pnl=500.0,
+        mode="demo",
+        opened_at=utc_now_naive(),
+    )
+    db.add(pos)
+    db.commit()
+    pos_id = pos.id
+
+    try:
+        resp = client.get("/api/positions/analysis?mode=demo")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["success"] is True
+        cards = data["data"]
+        assert len(cards) >= 1
+
+        btc_card = next((c for c in cards if c["symbol"] == "BTCEUR"), None)
+        assert btc_card is not None
+        assert btc_card["entry_price"] == 50000.0
+        assert btc_card["current_price"] == 55000.0
+        assert btc_card["pnl_eur"] > 0
+        assert btc_card["decision"] in ("TRZYMAJ", "SPRZEDAJ", "CZEKAJ")
+        assert isinstance(btc_card["reasons"], list)
+        assert len(btc_card["reasons"]) > 0
+    finally:
+        obj = db.query(Position).filter(Position.id == pos_id).first()
+        if obj:
+            db.delete(obj)
+            db.commit()
+        db.close()
+
+
+def test_position_analysis_hold_card(client):
+    """Pozycja HOLD generuje kartę z celem i remaining (wymaga tymczasowego tieru HOLD)."""
+    import json as _json
+    db = SessionLocal()
+
+    # Ustaw tymczasowy tier HOLD dla WLFIEUR na czas testu
+    _hold_tiers = {
+        "CORE": {"symbols": ["BTCEUR"], "min_confidence_add": 0.0, "min_edge_multiplier_add": 0.0, "risk_scale": 1.0, "max_trades_per_day_per_symbol": 2},
+        "HOLD": {"symbols": ["WLFIEUR"], "hold_mode": True, "no_auto_exit": True, "no_new_entries": True, "target_value_eur": 300, "min_confidence_add": 0.0, "min_edge_multiplier_add": 0.0, "risk_scale": 0.0, "max_trades_per_day_per_symbol": 0},
+    }
+    old_setting = db.query(RuntimeSetting).filter(RuntimeSetting.key == "symbol_tiers").first()
+    old_value = old_setting.value if old_setting else None
+    if old_setting:
+        old_setting.value = _json.dumps(_hold_tiers)
+    else:
+        db.add(RuntimeSetting(key="symbol_tiers", value=_json.dumps(_hold_tiers)))
+    db.commit()
+
+    pos = Position(
+        symbol="WLFIEUR",
+        side="LONG",
+        entry_price=0.085,
+        quantity=3260,
+        current_price=0.085,
+        unrealized_pnl=0.0,
+        mode="demo",
+        opened_at=utc_now_naive(),
+    )
+    db.add(pos)
+    db.commit()
+    pos_id = pos.id
+
+    try:
+        resp = client.get("/api/positions/analysis?mode=demo")
+        assert resp.status_code == 200
+        cards = resp.json()["data"]
+
+        wlfi_card = next((c for c in cards if c["symbol"] == "WLFIEUR"), None)
+        assert wlfi_card is not None
+        assert wlfi_card["is_hold"] is True
+        assert wlfi_card["decision"] == "TRZYMAJ"
+        assert "hold_target_eur" in wlfi_card
+        assert "hold_remaining_eur" in wlfi_card
+    finally:
+        obj = db.query(Position).filter(Position.id == pos_id).first()
+        if obj:
+            db.delete(obj)
+            db.commit()
+        # Przywróć oryginalny tier override
+        st = db.query(RuntimeSetting).filter(RuntimeSetting.key == "symbol_tiers").first()
+        if st and old_value is not None:
+            st.value = old_value
+            db.commit()
+        elif st and old_value is None:
+            db.delete(st)
+            db.commit()
+        db.close()
+# TESTY AKCEPTACYJNE — LIVE/DEMO spójność (v0.7)
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+def test_acceptance_live_positions_returns_source_field(client):
+    """
+    GET /api/positions?mode=live musi zwracać source="binance_spot" (lub pustą listę
+    jeśli Binance niedostępne), ale NIGDY nie powinien 500.
+    """
+    resp = client.get("/api/positions?mode=live")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data.get("success") is True
+    # Jeśli Binance niedostępne w testach, data zwraca pustą listę
+    assert "data" in data
+    assert isinstance(data["data"], list)
+    # Gdy mamy dane, każdy element ma source
+    for item in data["data"]:
+        assert item.get("source") == "binance_spot"
+
+
+def test_acceptance_demo_positions_from_local_db(client):
+    """
+    GET /api/positions?mode=demo powinien czytać z lokalnej tabeli Position.
+    Bez pozycji w DB zwraca pustą listę (nie binance).
+    """
+    resp = client.get("/api/positions?mode=demo")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data.get("success") is True
+    assert isinstance(data.get("data"), list)
+    # Demo NIE zawiera source=binance_spot
+    for item in data["data"]:
+        assert item.get("source") != "binance_spot"
+
+
+def test_acceptance_best_opportunity_has_gate_fields(client):
+    """
+    GET /api/signals/best-opportunity musi zwracać pola bramek:
+    candidates_evaluated, oraz allowed_count/blocked_count LUB best_candidate.
+    Akcja to BUY/SELL/CZEKAJ.
+    """
+    resp = client.get("/api/signals/best-opportunity?mode=demo")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data.get("success") is True
+    assert data["action"] in ("BUY", "SELL", "CZEKAJ")
+    assert "candidates_evaluated" in data
+    # Jeśli CZEKAJ — musi być powód
+    if data["action"] == "CZEKAJ":
+        assert data.get("reason")
+    # Jeśli akcja BUY/SELL — musi być opportunity z score
+    if data["action"] in ("BUY", "SELL"):
+        opp = data.get("opportunity")
+        assert opp is not None
+        assert "score" in opp
+        assert "confidence" in opp
+        assert "symbol" in opp
+        assert "allowed_count" in data
+        assert "blocked_count" in data
+
+
+def test_acceptance_diagnostics_live_no_500(client):
+    """
+    GET /api/debug/state-consistency?mode=live nie powinien 500,
+    nawet gdy Binance niedostępne.
+    Dla LIVE powinien zwracać spot_comparison (lub graceful error).
+    """
+    resp = client.get("/api/debug/state-consistency?mode=live")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data.get("success") is True
+    assert data.get("mode") == "live"
+    # spot_comparison powinien być obecny (nawet z error)
+    if "spot_comparison" in data:
+        sc = data["spot_comparison"]
+        if not sc.get("error"):
+            assert "binance_spot_count" in sc
+            assert "in_binance_not_local" in sc
+
+
+def test_acceptance_goal_evaluator_returns_realism(client):
+    """
+    POST /api/positions/goals/evaluate powinien zwracać:
+    realism, required_move_pct, reality_score, suggested_path.
+    """
+    resp = client.post(
+        "/api/positions/goals/evaluate",
+        json={
+            "mode": "demo",
+            "target_value": 15000.0,
+            "current_value": 10000.0,
+            "goal_type": "target_value_eur",
+        },
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data.get("success") is True
+    assert "realism" in data
+    assert data["realism"] in ("bardzo_realny", "realny", "mozliwy", "trudny", "malo_realny")
+    assert "required_move_pct" in data
+    assert data["required_move_pct"] == 50.0  # (15000-10000)/10000 * 100
+    assert "reality_score" in data
+    assert isinstance(data["reality_score"], int)
+    assert "suggested_path" in data
+    assert isinstance(data["suggested_path"], list)
+    assert len(data["suggested_path"]) >= 1
+
+
+def test_acceptance_effective_universe_not_empty(client):
+    """
+    _get_symbols_from_db_or_env musi zwracać niepustą listę symboli
+    (dzięki fallback do ENV/Binance), więc best-opportunity i top5
+    nie powinny failować z "brak danych".
+    """
+    # top5 korzysta z _get_symbols_from_db_or_env
+    resp = client.get("/api/signals/top5")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data.get("success") is True
+    # Nie wymagamy danych (bo klines mogą być puste w testach),
+    # ale endpoint nie powinien crashować

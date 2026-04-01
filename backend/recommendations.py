@@ -5,12 +5,12 @@ Recommendation layer built on top of experiment outputs.
 from __future__ import annotations
 
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List
 
 from sqlalchemy.orm import Session
 
-from backend.database import Recommendation, compare_config_snapshots
+from backend.database import Recommendation, compare_config_snapshots, utc_now_naive
 from backend.experiments import get_experiment, list_experiments
 from backend.governance import enforce_pipeline_permission
 
@@ -154,7 +154,7 @@ def generate_recommendation(db: Session, experiment_id: int, notes: str | None =
         net_effect_summary_json=_json_text(evaluation["net_effect_summary"]),
         risk_effect_summary_json=_json_text(evaluation["risk_effect_summary"]),
         status="open",
-        created_at=datetime.utcnow(),
+        created_at=utc_now_naive(),
         notes=notes,
     )
     db.add(row)

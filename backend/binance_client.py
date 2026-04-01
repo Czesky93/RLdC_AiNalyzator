@@ -76,7 +76,11 @@ class BinanceClient:
                 "price": float(ticker["price"])
             }
         except BinanceAPIException as e:
-            logger.error(f"❌ Binance API error for {symbol}: {e.message}")
+            # -1121 = Invalid symbol — normalny fallback przy sprawdzaniu par, logujemy na DEBUG
+            if getattr(e, 'code', None) == -1121:
+                logger.debug(f"⚠️ Symbol {symbol} nie istnieje na Binance (fallback)")
+            else:
+                logger.error(f"❌ Binance API error for {symbol}: {e.message}")
             return None
         except BinanceRequestException as e:
             logger.error(f"❌ Binance request error for {symbol}: {str(e)}")
@@ -357,6 +361,177 @@ class BinanceClient:
             logger.error(f"❌ Error resolving symbol {pair}: {str(e)}")
 
         return None
+
+    def place_order(
+        self,
+        symbol: str,
+        side: str,
+        order_type: str = "MARKET",
+        quantity: float = 0.0,
+        price: Optional[float] = None,
+    ) -> Optional[Dict]:
+        """
+        Złóż zlecenie na Binance (wymaga API keys).
+
+        Args:
+            symbol:     Para walutowa (np. BTCEUR)
+            side:       'BUY' lub 'SELL'
+            order_type: 'MARKET' lub 'LIMIT'
+            quantity:   Ilość base asset
+            price:      Cena (tylko dla LIMIT)
+
+        Returns:
+            Dict z odpowiedzią Binance lub None przy błędzie.
+        """
+        if not self.api_key or not self.api_secret:
+            logger.error("❌ place_order: brak kluczy API — ustaw BINANCE_API_KEY i BINANCE_API_SECRET")
+            return None
+        if quantity <= 0:
+            logger.error(f"❌ place_order: nieprawidłowa ilość {quantity}")
+            return None
+
+        try:
+            kwargs: Dict[str, Any] = {
+                "symbol": symbol,
+                "side": side,
+                "type": order_type,
+                "quantity": quantity,
+            }
+            if order_type == "LIMIT":
+                if price is None:
+                    logger.error("❌ place_order: LIMIT wymaga ceny")
+                    return None
+                kwargs["price"] = f"{price:.8f}"
+                kwargs["timeInForce"] = "GTC"
+
+            # Uwzględnij przesunięcie czasu
+            kwargs["recvWindow"] = 5000
+            try:
+                result = self.client.create_order(**kwargs)
+            except BinanceAPIException as e:
+                if getattr(e, "code", None) == -1021:
+                    # Timestamp out of range — synchronizuj czas i powtórz
+                    self._sync_time()
+                    result = self.client.create_order(**kwargs)
+                else:
+                    raise
+            logger.info(f"✅ Zlecenie Binance: {side} {quantity} {symbol} → orderId={result.get('orderId')}")
+            return result
+        except BinanceAPIException as e:
+            logger.error(f"❌ Binance API error place_order {symbol}: code={e.status_code} msg={e.message}")
+            return {"_error": True, "error_code": e.status_code, "error_message": e.message}
+        except Exception as e:
+            logger.error(f"❌ place_order nieoczekiwany błąd {symbol}: {str(e)}")
+            return None
+
+    def get_order_fills(self, symbol: str, order_id: int) -> Optional[Dict]:
+        """
+        Pobierz szczegóły wypełnionego zlecenia (fills).
+
+        Returns:
+            Dict z polami: executed_price (float), executed_qty (float), fee (float), fee_asset (str)
+        """
+        if not self.api_key or not self.api_secret:
+            return None
+        try:
+            order = self.client.get_order(symbol=symbol, orderId=order_id, recvWindow=5000)
+            fills = order.get("fills", [])
+            exec_price = float(order.get("cummulativeQuoteQty", 0) or 0)
+            exec_qty = float(order.get("executedQty", 0) or 0)
+            avg_price = exec_price / exec_qty if exec_qty > 0 else float(order.get("price", 0) or 0)
+            total_fee = sum(float(f.get("commission", 0)) for f in fills)
+            fee_asset = fills[0].get("commissionAsset", "") if fills else ""
+            return {
+                "order_id": order_id,
+                "status": order.get("status"),
+                "executed_price": round(avg_price, 8),
+                "executed_qty": round(exec_qty, 8),
+                "fee": round(total_fee, 8),
+                "fee_asset": fee_asset,
+            }
+        except Exception as e:
+            logger.error(f"❌ get_order_fills {symbol} #{order_id}: {str(e)}")
+            return None
+
+    # ── Cache dla exchange info (TTL 5 minut) ────────────────────────────────
+    _allowed_cache_data: Optional[Dict[str, Dict]] = None
+    _allowed_cache_ts: float = 0.0
+    _ALLOWED_TTL: float = 300.0  # 5 minut
+
+    def get_allowed_symbols(self, quotes: Optional[List[str]] = None) -> Dict[str, Dict]:
+        """
+        Pobierz zestaw symboli SPOT dozwolonych do handlu na giełdzie Binance.
+        Buforuje wynik na 5 minut (exchangeInfo zmienia się rzadko).
+
+        Args:
+            quotes: Lista kwot (np. ["EUR", "USDC"]) — filtruje wyniki.
+                    None = zwróć wszystkie SPOT symbole.
+
+        Returns:
+            Dict[symbol, {base_asset, quote_asset, min_qty, step_size, min_notional}]
+        """
+        now = time.time()
+        if self._allowed_cache_data is not None and (now - self._allowed_cache_ts) < self._ALLOWED_TTL:
+            data = self._allowed_cache_data
+        else:
+            data = self._fetch_exchange_info()
+            self.__class__._allowed_cache_data = data
+            self.__class__._allowed_cache_ts = now
+
+        if not quotes:
+            return data
+        quotes_set = {q.upper() for q in quotes}
+        return {s: v for s, v in data.items() if v["quote_asset"] in quotes_set}
+
+    def _fetch_exchange_info(self) -> Dict[str, Dict]:
+        """Pobierz i zparsuj exchangeInfo z Binance."""
+        try:
+            info = self.client.get_exchange_info()
+            result: Dict[str, Dict] = {}
+            for sym in info.get("symbols", []):
+                if sym.get("status") != "TRADING":
+                    continue
+                # Sprawdź uprawnienie SPOT
+                perms = sym.get("permissions", [])
+                perm_sets = sym.get("permissionSets", [])
+                spot_ok = "SPOT" in perms
+                if not spot_ok and perm_sets:
+                    # nowszy format: [[...], ...]
+                    for ps in perm_sets:
+                        if "SPOT" in ps:
+                            spot_ok = True
+                            break
+                if not spot_ok:
+                    continue
+
+                symbol = sym["symbol"]
+                min_qty = min_notional = step_size = None
+                for f in sym.get("filters", []):
+                    ft = f.get("filterType", "")
+                    if ft == "LOT_SIZE":
+                        try:
+                            min_qty = float(f.get("minQty", 0))
+                            step_size = float(f.get("stepSize", 0))
+                        except (ValueError, TypeError):
+                            pass
+                    elif ft in ("MIN_NOTIONAL", "NOTIONAL"):
+                        try:
+                            min_notional = float(f.get("minNotional", 0))
+                        except (ValueError, TypeError):
+                            pass
+
+                result[symbol] = {
+                    "base_asset": sym["baseAsset"],
+                    "quote_asset": sym["quoteAsset"],
+                    "min_qty": min_qty,
+                    "step_size": step_size,
+                    "min_notional": min_notional,
+                }
+            logger.info(f"✅ ExchangeInfo: {len(result)} aktywnych symboli SPOT załadowanych")
+            return result
+        except Exception as exc:
+            logger.error(f"❌ Błąd pobierania exchangeInfo: {str(exc)}")
+            return {}
 
     def get_balances(self) -> List[Dict]:
         """Pobierz saldo konta (wymaga API keys)."""

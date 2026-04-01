@@ -44,9 +44,13 @@ module.exports = {
         },
         // Additional colors
         'teal-primary': '#14b8a6',
+        'teal-light': '#2dd4bf',
         'green-primary': '#10b981',
+        'green-light': '#34d399',
         'red-primary': '#ef4444',
+        'red-light': '#f87171',
         'orange-primary': '#f59e0b',
+        'orange-light': '#fbbf24',
       },
       boxShadow: {
         'glow-teal': '0 0 20px rgba(20, 184, 166, 0.3)',

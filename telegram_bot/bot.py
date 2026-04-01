@@ -3,52 +3,62 @@ Telegram Bot for RLdC Trading Bot
 """
 import os
 import json
-from datetime import datetime, timedelta
+import requests
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from dotenv import load_dotenv
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 
-from backend.database import SessionLocal, Signal, Order, Position, BlogPost, SystemLog, AccountSnapshot, PendingOrder, Alert
+from backend.database import SessionLocal, Signal, Order, Position, BlogPost, SystemLog, AccountSnapshot, PendingOrder, Alert, utc_now_naive
 from backend.system_logger import log_exception
+from backend.telegram_intelligence import log_telegram_event
 
 _ENV_PATH = os.path.join(os.path.dirname(__file__), "..", ".env")
 load_dotenv(dotenv_path=_ENV_PATH, override=True)
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
+ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "")
 TRADING_MODE = os.getenv("TRADING_MODE", "demo")
+API_BASE_URL = os.getenv("API_BASE_URL", "http://localhost:8000")
 
 
-def _log_telegram_message(chat_id: str, message_type: str, command: Optional[str], message: str, is_sent: bool, error: Optional[str] = None):
-    db = SessionLocal()
-    try:
-        from backend.database import TelegramMessage
-        entry = TelegramMessage(
-            chat_id=str(chat_id),
-            message_type=message_type,
-            command=command,
-            message=message,
-            is_sent=is_sent,
-            error=error,
-            timestamp=datetime.utcnow(),
-        )
-        db.add(entry)
-        db.commit()
-    except Exception as exc:
-        log_exception("telegram_bot", "Błąd logowania wiadomości Telegram", exc, db=db)
-        db.rollback()
-    finally:
-        db.close()
+def _is_authorized(update: Update) -> bool:
+    """Sprawdza czy wiadomość pochodzi z dozwolonego chatu."""
+    if not TELEGRAM_CHAT_ID:
+        return False  # brak konfiguracji = blokuj wszystkich
+    return str(update.effective_chat.id) == str(TELEGRAM_CHAT_ID)
 
 
 async def _send_reply(update: Update, text: str, command: Optional[str] = None):
+    chat_id = str(update.effective_chat.id)
     try:
         await update.message.reply_text(text)
-        _log_telegram_message(update.effective_chat.id, "COMMAND", command, text, True)
+        log_telegram_event(
+            chat_id=chat_id,
+            direction="outgoing",
+            raw_text=text,
+            source_module="telegram_bot",
+            message_type="command" if command else "alert",
+        )
     except Exception as exc:
-        _log_telegram_message(update.effective_chat.id, "COMMAND", command, text, False, str(exc))
+        log_telegram_event(
+            chat_id=chat_id,
+            direction="outgoing",
+            raw_text=f"{text} [BŁĄD: {exc}]",
+            source_module="telegram_bot",
+            message_type="error",
+        )
+
+
+async def _check_auth(update: Update) -> bool:
+    """Zwraca True jeśli autoryzowany, False + odpowiedź jeśli nie."""
+    if not _is_authorized(update):
+        await update.message.reply_text("⛔ Brak dostępu.")
+        return False
+    return True
 
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -73,7 +83,7 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "✅ Status systemu\n"
             f"Tryb: {TRADING_MODE}\n"
             f"Ostatni sygnał: {last_signal_text}\n"
-            f"Czas: {datetime.utcnow().isoformat()}"
+            f"Czas: {utc_now_naive().isoformat()}"
         )
     finally:
         db.close()
@@ -82,7 +92,23 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def stop_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = "🛑 Trading został zatrzymany (tryb demo)."
+    if not await _check_auth(update):
+        return
+    try:
+        resp = requests.post(
+            f"{API_BASE_URL}/api/control/state",
+            json={"demo_trading_enabled": False},
+            headers={"X-Admin-Token": ADMIN_TOKEN},
+            timeout=5,
+        )
+        if resp.status_code == 200:
+            text = "🛑 Demo trading zatrzymany. Kolektor nadal śledzi dane."
+        elif resp.status_code == 401:
+            text = "⛔ Brak autoryzacji API — sprawdź ADMIN_TOKEN w .env."
+        else:
+            text = f"⚠️ Nie udało się zatrzymać (status {resp.status_code}). Sprawdź API."
+    except Exception as exc:
+        text = f"❌ Błąd wywołania API: {exc}"
     await _send_reply(update, text, "/stop")
 
 
@@ -324,6 +350,8 @@ async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def confirm_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await _check_auth(update):
+        return
     db = SessionLocal()
     try:
         if not context.args:
@@ -339,7 +367,7 @@ async def confirm_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await _send_reply(update, "Nie znaleziono transakcji", "/confirm")
             return
         pending.status = "CONFIRMED"
-        pending.confirmed_at = datetime.utcnow()
+        pending.confirmed_at = utc_now_naive()
         db.commit()
         await _send_reply(
             update,
@@ -354,6 +382,8 @@ async def confirm_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def reject_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await _check_auth(update):
+        return
     db = SessionLocal()
     try:
         if not context.args:
@@ -369,7 +399,7 @@ async def reject_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await _send_reply(update, "Nie znaleziono transakcji", "/reject")
             return
         pending.status = "REJECTED"
-        pending.confirmed_at = datetime.utcnow()
+        pending.confirmed_at = utc_now_naive()
         db.commit()
         await _send_reply(
             update,
@@ -382,6 +412,8 @@ async def reject_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def governance_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Pipeline status + operator queue summary."""
+    if not await _check_auth(update):
+        return
     db = SessionLocal()
     try:
         from backend.governance import get_pipeline_status, get_operator_queue
@@ -434,6 +466,8 @@ async def governance_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 async def freeze_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Wyświetl aktywne blokady pipeline."""
+    if not await _check_auth(update):
+        return
     db = SessionLocal()
     try:
         from backend.governance import check_pipeline_permission
@@ -478,6 +512,8 @@ async def freeze_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def incidents_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Lista aktywnych incydentów."""
+    if not await _check_auth(update):
+        return
     db = SessionLocal()
     try:
         from backend.governance import list_incidents

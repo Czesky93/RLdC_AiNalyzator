@@ -4,12 +4,12 @@ Review / approval flow for recommendations.
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List
 
 from sqlalchemy.orm import Session
 
-from backend.database import Recommendation, RecommendationReview
+from backend.database import Recommendation, RecommendationReview, utc_now_naive
 from backend.recommendations import get_recommendation, list_recommendations
 
 
@@ -109,7 +109,7 @@ def apply_review_decision(
     review = RecommendationReview(
         recommendation_id=recommendation_id,
         review_status=new_status,
-        reviewed_at=datetime.utcnow(),
+        reviewed_at=utc_now_naive(),
         reviewed_by=reviewed_by,
         decision_reason=decision_reason,
         notes=notes,

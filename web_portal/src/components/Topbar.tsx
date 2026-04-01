@@ -1,14 +1,14 @@
 'use client'
 
-import { Bell, ChevronDown, Cloud, Download, Power, Search, User2 } from 'lucide-react'
+import { Bell, Cloud, Download, Power, Search, User2 } from 'lucide-react'
 import { useEffect, useMemo, useState } from 'react'
-import { API_BASE, withAdminToken } from '../lib/api'
+import { getApiBase, withAdminToken } from '../lib/api'
 
 interface TopbarProps {
   activeView: string
   setActiveView: (view: string) => void
-  tradingMode: 'live' | 'demo' | 'backtest'
-  setTradingMode: (mode: 'live' | 'demo' | 'backtest') => void
+  tradingMode: 'live' | 'demo'
+  setTradingMode: (mode: 'live' | 'demo') => void
 }
 
 export default function Topbar({ activeView, setActiveView, tradingMode, setTradingMode }: TopbarProps) {
@@ -18,20 +18,19 @@ export default function Topbar({ activeView, setActiveView, tradingMode, setTrad
 
   const navItems = useMemo(
     () => [
-      { label: 'Markets', view: 'markets' },
-      { label: 'Trade Desk', view: 'trade-desk' },
-      { label: 'Portfolio', view: 'portfolio' },
-      { label: 'Strategies', view: 'strategies' },
-      { label: 'AI & Signals', view: 'ai-signals' },
-      { label: 'Risk', view: 'risk' },
-      { label: 'Collegues', view: 'collegues' },
+      { label: 'Rynki', view: 'markets' },
+      { label: 'Handel', view: 'trade-desk' },
+      { label: 'Portfel', view: 'portfolio' },
+      { label: 'Strategie', view: 'strategies' },
+      { label: 'AI Sygnały', view: 'ai-signals' },
+      { label: 'Ryzyko', view: 'risk' },
     ],
     []
   )
 
   const refreshControl = async () => {
     try {
-      const res = await fetch(`${API_BASE}/api/control/state`)
+      const res = await fetch(`${getApiBase()}/api/control/state`)
       if (!res.ok) throw new Error('Błąd control')
       const json = await res.json()
       setTradingEnabled(Boolean(json?.data?.demo_trading_enabled))
@@ -59,11 +58,30 @@ export default function Topbar({ activeView, setActiveView, tradingMode, setTrad
             <span className="text-teal-primary">RLDC</span>
           </div>
           
-          {/* Basic Dom Dropdown */}
-          <div className="relative group">
-            <button className="flex items-center space-x-1 px-3 py-1.5 rounded-lg bg-rldc-dark-card border border-rldc-dark-border hover:border-teal-primary/40 transition text-sm text-slate-300">
-              <span className="text-xs font-medium">Basic Dom</span>
-              <ChevronDown size={14} />
+          {/* Przełącznik DEMO / LIVE */}
+          <div className="flex items-center rounded-lg overflow-hidden border border-rldc-dark-border ml-2">
+            <button
+              onClick={() => setTradingMode('demo')}
+              title="Tryb symulacyjny — brak realnych zleceń"
+              className={`px-4 py-1.5 text-xs font-bold tracking-wide transition-colors ${
+                tradingMode === 'demo'
+                  ? 'bg-rldc-green-primary text-[#0b121a]'
+                  : 'bg-rldc-dark-card text-slate-500 hover:text-slate-200 hover:bg-rldc-dark-hover'
+              }`}
+            >
+              DEMO
+            </button>
+            <div className="w-px h-5 bg-rldc-dark-border" />
+            <button
+              onClick={() => setTradingMode('live')}
+              title="Handel realny — dane z Binance"
+              className={`px-4 py-1.5 text-xs font-bold tracking-wide transition-colors ${
+                tradingMode === 'live'
+                  ? 'bg-amber-500 text-[#0b121a]'
+                  : 'bg-rldc-dark-card text-slate-500 hover:text-slate-200 hover:bg-rldc-dark-hover'
+              }`}
+            >
+              LIVE
             </button>
           </div>
         </div>
@@ -89,25 +107,32 @@ export default function Topbar({ activeView, setActiveView, tradingMode, setTrad
         </nav>
       </div>
 
-      {/* Center: Live Status & Selectors */}
+      {/* Center: Status trybu */}
       <div className="hidden xl:flex items-center space-x-3">
-        <div className="text-[10px] text-teal-primary font-bold uppercase tracking-wider flex items-center space-x-1.5">
-          <div className="w-2 h-2 bg-teal-primary rounded-full animate-pulse"></div>
-          <span>LIVE FUTURES RBC-CMC [Streaming] [Exchange] [Exchanges]</span>
-        </div>
+        {tradingMode === 'live' ? (
+          <div className="text-[10px] text-amber-400 font-bold uppercase tracking-wider flex items-center space-x-1.5">
+            <div className="w-2 h-2 bg-amber-400 rounded-full animate-pulse"></div>
+            <span>LIVE — Handel realny — Binance</span>
+          </div>
+        ) : (
+          <div className="text-[10px] text-rldc-green-primary font-bold uppercase tracking-wider flex items-center space-x-1.5">
+            <div className="w-2 h-2 bg-rldc-green-primary rounded-full"></div>
+            <span>DEMO — Symulacja — Brak realnych zleceń</span>
+          </div>
+        )}
       </div>
 
       {/* Right: Controls and Actions */}
       <div className="flex items-center space-x-3">
         {/* Selectors */}
         <div className="hidden lg:flex items-center space-x-2 text-xs">
-          <select className="bg-rldc-dark-card border border-rldc-dark-border rounded px-2 py-1 text-slate-300 text-xs focus:outline-none focus:border-teal-primary/50">
+          <select title="Seria" className="bg-rldc-dark-card border border-rldc-dark-border rounded px-2 py-1 text-slate-300 text-xs focus:outline-none focus:border-teal-primary/50">
             <option>Ser. c6h</option>
           </select>
-          <select className="bg-rldc-dark-card border border-rldc-dark-border rounded px-2 py-1 text-slate-300 text-xs focus:outline-none focus:border-teal-primary/50">
+          <select title="Symbol" className="bg-rldc-dark-card border border-rldc-dark-border rounded px-2 py-1 text-slate-300 text-xs focus:outline-none focus:border-teal-primary/50">
             <option>Sym. BTCUSDT</option>
           </select>
-          <select className="bg-rldc-dark-card border border-rldc-dark-border rounded px-2 py-1 text-slate-300 text-xs focus:outline-none focus:border-teal-primary/50">
+          <select title="Strategia" className="bg-rldc-dark-card border border-rldc-dark-border rounded px-2 py-1 text-slate-300 text-xs focus:outline-none focus:border-teal-primary/50">
             <option>MAATHG cu PNBET</option>
           </select>
         </div>
@@ -138,7 +163,7 @@ export default function Topbar({ activeView, setActiveView, tradingMode, setTrad
             setStopping(true)
             try {
               const headers: Record<string, string> = withAdminToken({ 'Content-Type': 'application/json' })
-              const res = await fetch(`${API_BASE}/api/control/state`, {
+              const res = await fetch(`${getApiBase()}/api/control/state`, {
                 method: 'POST',
                 headers,
                 body: JSON.stringify({ demo_trading_enabled: false }),
@@ -156,7 +181,7 @@ export default function Topbar({ activeView, setActiveView, tradingMode, setTrad
           title={tradingEnabled === false ? 'Trading już wyłączony' : 'Wyłącz trading'}
         >
           <Power size={16} />
-          <span className="hidden sm:inline">{stopping ? 'STOPPING...' : 'STOP TRADING'}</span>
+          <span className="hidden sm:inline">{stopping ? 'ZATRZYMUJĘ...' : 'STOP HANDEL'}</span>
         </button>
       </div>
     </div>

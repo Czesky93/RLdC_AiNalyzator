@@ -5,12 +5,12 @@ Rollback decision layer consuming post-promotion monitoring verdicts.
 from __future__ import annotations
 
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List
 
 from sqlalchemy.orm import Session
 
-from backend.database import ConfigPromotion, ConfigRollback, PromotionMonitoring
+from backend.database import ConfigPromotion, ConfigRollback, PromotionMonitoring, utc_now_naive
 from backend.post_promotion_monitoring import get_monitoring_by_promotion, get_monitoring_record
 
 
@@ -191,7 +191,7 @@ def create_rollback_decision(
         from_snapshot_id=promotion.to_snapshot_id,
         to_snapshot_id=promotion.rollback_snapshot_id,
         rollback_snapshot_id=promotion.rollback_snapshot_id,
-        initiated_at=datetime.utcnow(),
+        initiated_at=utc_now_naive(),
         initiated_by=initiated_by,
         validation_summary_json=_json_text(validation_summary),
         rollback_reason_codes_json=_json_text(decision["reason_codes"]),

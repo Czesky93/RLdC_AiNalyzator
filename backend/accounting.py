@@ -13,7 +13,7 @@ Definitions used across the system:
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import math
 import os
 from typing import Dict, Iterable, List, Optional
@@ -21,7 +21,7 @@ from typing import Dict, Iterable, List, Optional
 from sqlalchemy import desc
 from sqlalchemy.orm import Session
 
-from backend.database import CostLedger, DecisionTrace, MarketData, Order, Position
+from backend.database import CostLedger, DecisionTrace, MarketData, Order, Position, utc_now_naive
 
 
 def get_demo_quote_ccy() -> str:
@@ -260,7 +260,7 @@ def summarize_positions(positions: Iterable[Position], db: Session | None = None
 
 
 def compute_daily_performance(db: Session, mode: str = "demo", now: Optional[datetime] = None) -> Dict[str, object]:
-    now = now or datetime.utcnow()
+    now = now or utc_now_naive()
     day_ago = now - timedelta(hours=24)
     orders = (
         db.query(Order)
@@ -275,7 +275,7 @@ def compute_daily_performance(db: Session, mode: str = "demo", now: Optional[dat
 
 
 def compute_activity_snapshot(db: Session, mode: str = "demo", now: Optional[datetime] = None) -> Dict[str, object]:
-    now = now or datetime.utcnow()
+    now = now or utc_now_naive()
     day_ago = now - timedelta(hours=24)
     hour_ago = now - timedelta(hours=1)
     orders = (
@@ -376,7 +376,7 @@ def cost_breakdown_by_symbol(db: Session, mode: str = "demo") -> List[Dict[str, 
 
 
 def compute_risk_snapshot(db: Session, mode: str = "demo", now: Optional[datetime] = None) -> Dict[str, object]:
-    now = now or datetime.utcnow()
+    now = now or utc_now_naive()
     day_perf = compute_daily_performance(db, mode=mode, now=now)
     positions = db.query(Position).filter(Position.mode == mode).all()
     exposure_per_symbol = {
@@ -401,7 +401,11 @@ def compute_risk_snapshot(db: Session, mode: str = "demo", now: Optional[datetim
             break
 
     daily_net_pnl = _float(day_perf["net_pnl"])
-    initial_balance = float(os.getenv("DEMO_INITIAL_BALANCE", "10000") or 10000) if mode == "demo" else 0.0
+    if mode == "demo":
+        initial_balance = float(os.getenv("DEMO_INITIAL_BALANCE", "10000") or 10000)
+    else:
+        # Dla LIVE używamy total_exposure jako proxy bazowego kapitału
+        initial_balance = max(1.0, total_exposure)
     daily_net_drawdown = min(0.0, daily_net_pnl)
     kill_switch_triggered = daily_net_drawdown <= -(initial_balance * 0.03) if initial_balance > 0 else False
 
@@ -423,9 +427,19 @@ def compute_demo_account_state(
     quote_ccy: Optional[str] = None,
     now: Optional[datetime] = None,
 ) -> Dict:
-    now = now or datetime.utcnow()
+    now = now or utc_now_naive()
     quote_ccy = (quote_ccy or get_demo_quote_ccy()).strip().upper()
-    initial_balance = float(os.getenv("DEMO_INITIAL_BALANCE", "10000") or 10000)
+    # Czytaj initial_balance z RuntimeSetting (override po resecie demo)
+    # lub fallback do ENV DEMO_INITIAL_BALANCE
+    from backend.database import RuntimeSetting
+    _ib_row = db.query(RuntimeSetting).filter(RuntimeSetting.key == "demo_initial_balance").first()
+    if _ib_row and _ib_row.value:
+        try:
+            initial_balance = float(_ib_row.value)
+        except (ValueError, TypeError):
+            initial_balance = float(os.getenv("DEMO_INITIAL_BALANCE", "10000") or 10000)
+    else:
+        initial_balance = float(os.getenv("DEMO_INITIAL_BALANCE", "10000") or 10000)
     quotes = _quotes_candidates()
 
     cash = float(initial_balance)

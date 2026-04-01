@@ -5,7 +5,7 @@ Reporting and analytics layer built on top of accounting and risk.
 from __future__ import annotations
 
 from collections import defaultdict
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Dict, List
 
 from sqlalchemy.orm import Session
@@ -29,6 +29,7 @@ from backend.database import (
     compare_config_snapshots,
     get_config_snapshot,
     list_config_snapshots,
+    utc_now_naive,
 )
 
 
@@ -74,19 +75,19 @@ def daily_performance_report(db: Session, mode: str = "demo") -> List[Dict[str, 
     orders = db.query(Order).filter(Order.mode == mode, Order.status == "FILLED").all()
     grouped: Dict[str, List[Order]] = defaultdict(list)
     for order in orders:
-        ts = order.timestamp or datetime.utcnow()
+        ts = order.timestamp or utc_now_naive()
         grouped[ts.date().isoformat()].append(order)
 
     blocked_by_day: Dict[str, int] = defaultdict(int)
     traces = db.query(DecisionTrace).filter(DecisionTrace.mode == mode).all()
     for trace in traces:
         if "SKIP" in (trace.action_type or "").upper() or "BLOCK" in (trace.action_type or "").upper() or "REJECT" in (trace.action_type or "").upper():
-            ts = trace.timestamp or datetime.utcnow()
+            ts = trace.timestamp or utc_now_naive()
             blocked_by_day[ts.date().isoformat()] += 1
 
     cost_by_day: Dict[str, float] = defaultdict(float)
     for ledger in db.query(CostLedger).all():
-        ts = ledger.timestamp or datetime.utcnow()
+        ts = ledger.timestamp or utc_now_naive()
         cost_by_day[ts.date().isoformat()] += float(ledger.actual_value or ledger.expected_value or 0.0)
 
     result = []

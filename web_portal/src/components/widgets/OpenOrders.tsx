@@ -1,7 +1,7 @@
 'use client'
 
-import React, { useEffect, useState } from 'react'
-import { API_BASE, withAdminToken } from '../../lib/api'
+import { useEffect, useState } from 'react'
+import { getApiBase, withAdminToken } from '../../lib/api'
 
 type PositionItem = {
   id: number
@@ -14,7 +14,7 @@ type PositionItem = {
   pnl_percent: number
 }
 
-export default function OpenOrders() {
+export default function OpenOrders({ mode = 'demo' }: { mode?: 'demo' | 'live' }) {
   const [positions, setPositions] = useState<PositionItem[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -24,7 +24,7 @@ export default function OpenOrders() {
     let cancelled = false
     const fetchPositions = async () => {
       try {
-        const res = await fetch(`${API_BASE}/api/positions?mode=demo`)
+        const res = await fetch(`${getApiBase()}/api/positions?mode=${mode}`)
         if (!res.ok) {
           throw new Error('Błąd pobierania pozycji')
         }
@@ -42,11 +42,11 @@ export default function OpenOrders() {
       cancelled = true
       clearInterval(interval)
     }
-  }, [])
+  }, [mode])
 
   const refresh = async () => {
     try {
-      const res = await fetch(`${API_BASE}/api/positions?mode=demo`)
+      const res = await fetch(`${getApiBase()}/api/positions?mode=${mode}`)
       if (!res.ok) throw new Error('Błąd odświeżania pozycji')
       const json = await res.json()
       setPositions(json.data || [])
@@ -62,8 +62,8 @@ export default function OpenOrders() {
   const closeOneQty = async (positionId: number, quantity: number | null) => {
     setActionStatus(`Zamykam #${positionId}...`)
     try {
-      const url = new URL(`${API_BASE}/api/positions/${positionId}/close`)
-      url.searchParams.set('mode', 'demo')
+      const url = new URL(`${getApiBase()}/api/positions/${positionId}/close`)
+      url.searchParams.set('mode', mode)
       if (typeof quantity === 'number' && Number.isFinite(quantity) && quantity > 0) {
         url.searchParams.set('quantity', String(quantity))
       }
@@ -85,7 +85,7 @@ export default function OpenOrders() {
   const closeAll = async () => {
     setActionStatus('Zamykam wszystkie...')
     try {
-      const res = await fetch(`${API_BASE}/api/positions/close-all?mode=demo`, {
+      const res = await fetch(`${getApiBase()}/api/positions/close-all?mode=${mode}`, {
         method: 'POST',
         headers: withAdminToken(),
       })

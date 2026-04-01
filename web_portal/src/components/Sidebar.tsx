@@ -1,55 +1,85 @@
 'use client'
 
 import {
-    Activity,
-    BarChart2,
-    BarChart3,
-    Bell,
-    FileText,
-    Layers,
-    LayoutDashboard,
-    Newspaper,
-    Settings,
-    Shield,
-    Target,
-    TestTube,
-    Wallet
+  Activity,
+  BarChart2,
+  BarChart3,
+  Bell,
+  BrainCircuit,
+  FileText,
+  Layers,
+  LayoutDashboard,
+  MessageSquare,
+  Newspaper,
+  ScrollText,
+  SearchX,
+  Settings,
+  Shield,
+  Target,
+  TestTube,
+  TrendingDown,
+  Wallet
 } from 'lucide-react'
 
 interface SidebarProps {
   activeView: string
   setActiveView: (view: string) => void
+  tradingMode: 'live' | 'demo'
+  setTradingMode: (mode: 'live' | 'demo') => void
 }
 
 const menuItems = [
-  { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard },
-  { id: 'trade-desk', label: 'Trade Desk', icon: Target },
-  { id: 'portfolio', label: 'Portfolio', icon: Wallet },
+  { id: 'dashboard', label: 'Panel główny', icon: LayoutDashboard },
+  { id: 'position-analysis', label: 'Decyzje', icon: BrainCircuit },
+  { id: 'execution-trace', label: 'Diagnostyka', icon: SearchX },
+  { id: 'telegram-intel', label: 'Telegram AI', icon: MessageSquare },
+  { id: 'trade-desk', label: 'Zlecenia', icon: Target },
+  { id: 'exit-diagnostics', label: 'Diagnostyka wyjść', icon: TrendingDown },
+  { id: 'portfolio', label: 'Portfel', icon: Wallet },
   { id: 'strategies', label: 'Strategie', icon: Layers },
-  { id: 'ai-signals', label: 'AI & Sygnały', icon: Activity },
-  { id: 'risk', label: 'Risk Sblock', icon: Shield },
-  { id: 'backtest', label: 'Backtest / Demo', icon: TestTube },
-  { id: 'economics', label: 'Economics', icon: BarChart2 },
-  { id: 'alerts', label: 'Alertes', icon: Bell },
-  { id: 'news', label: 'News', icon: Newspaper },
-  { id: 'macro-reports', label: 'Macro-reports', icon: FileText },
-  { id: 'reports', label: 'Reports', icon: BarChart3 },
-  { id: 'settings', label: 'Settings', icon: Settings },
+  { id: 'ai-signals', label: 'AI Sygnały', icon: Activity },
+  { id: 'risk', label: 'Ryzyko', icon: Shield },
+  { id: 'backtest', label: 'Historia', icon: TestTube },
+  { id: 'economics', label: 'Ekonomia', icon: BarChart2 },
+  { id: 'alerts', label: 'Alerty', icon: Bell },
+  { id: 'news', label: 'Wiadomości', icon: Newspaper },
+  { id: 'macro-reports', label: 'Raporty', icon: FileText },
+  { id: 'reports', label: 'Statystyki', icon: BarChart3 },
+  { id: 'logs', label: 'Logi', icon: ScrollText },
+  { id: 'settings', label: 'Ustawienia', icon: Settings },
 ]
 
-export default function Sidebar({ activeView, setActiveView }: SidebarProps) {
+export default function Sidebar({ activeView, setActiveView, tradingMode, setTradingMode }: SidebarProps) {
   return (
-    <div className="w-20 bg-[#0b121a] border-r border-rldc-dark-border min-h-[calc(100vh-3.5rem)] flex flex-col items-center py-4 shadow-[inset_-1px_0_0_rgba(255,255,255,0.04)]">
-      {/* FUTURES Section */}
-      <div className="mb-6 w-full px-2">
+    <div className="w-20 bg-[#0b121a] border-r border-rldc-dark-border sticky top-14 h-[calc(100vh-3.5rem)] overflow-y-auto flex flex-col items-center py-4 shadow-[inset_-1px_0_0_rgba(255,255,255,0.04)]">
+      {/* Przełącznik trybu DEMO / LIVE */}
+      <div className="mb-4 w-full px-2">
         <div className="text-[9px] text-slate-500 uppercase tracking-wider text-center mb-2 font-semibold">
-          FUTURES
+          TRYB
         </div>
-        <div className="flex flex-col items-center">
-          <div className="text-xs text-slate-300 font-bold mb-1">BTC/USDT</div>
-          <div className="px-2 py-0.5 rounded bg-green-primary/10 border border-green-primary/30 text-[9px] text-green-light font-medium">
-            ACTIVE
-          </div>
+        <div className="flex flex-col gap-1">
+          <button
+            onClick={() => setTradingMode('demo')}
+            title="Tryb symulacyjny (DEMO)"
+            className={`w-full py-1 rounded text-[9px] font-bold transition border ${
+              tradingMode === 'demo'
+                ? 'bg-rldc-green-primary/20 text-rldc-green-primary border-rldc-green-primary/40'
+                : 'bg-transparent text-slate-600 border-slate-700/40 hover:text-slate-400'
+            }`}
+          >
+            DEMO
+          </button>
+          <button
+            onClick={() => setTradingMode('live')}
+            title="Handel realny — dane z Binance"
+            className={`w-full py-1 rounded text-[9px] font-bold transition border ${
+              tradingMode === 'live'
+                ? 'bg-amber-500/20 text-amber-400 border-amber-500/40'
+                : 'bg-transparent text-slate-600 border-slate-700/40 hover:text-slate-400'
+            }`}
+          >
+            LIVE
+          </button>
         </div>
       </div>
 

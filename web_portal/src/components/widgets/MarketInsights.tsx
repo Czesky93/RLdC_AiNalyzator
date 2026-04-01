@@ -1,7 +1,8 @@
 'use client'
 
-import React, { useEffect, useState } from 'react'
-import { TrendingUp, AlertCircle, CheckCircle } from 'lucide-react'
+import { getApiBase } from '@/lib/api'
+import { AlertCircle, CheckCircle, TrendingUp } from 'lucide-react'
+import { useEffect, useState } from 'react'
 
 type Insight = {
   id: number
@@ -21,7 +22,7 @@ export default function MarketInsights() {
     let cancelled = false
     const fetchSignals = async () => {
       try {
-        const base = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
+        const base = getApiBase()
         const res = await fetch(`${base}/api/signals/latest?limit=5`)
         if (!res.ok) {
           throw new Error('Błąd pobierania sygnałów')
@@ -80,7 +81,7 @@ export default function MarketInsights() {
               </span>
             </div>
 
-            <p className="text-xs text-slate-400 mb-3">{insight.reason}</p>
+            <p className="text-xs text-slate-400 mb-3 leading-relaxed">{insight.reason}</p>
 
             <div className="flex items-center justify-between">
               <div className="flex items-center space-x-2">

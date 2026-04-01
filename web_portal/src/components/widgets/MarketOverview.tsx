@@ -1,7 +1,8 @@
 'use client'
 
-import React, { useEffect, useState } from 'react'
-import { TrendingUp, TrendingDown } from 'lucide-react'
+import { getApiBase } from '@/lib/api'
+import { TrendingDown, TrendingUp } from 'lucide-react'
+import { useEffect, useState } from 'react'
 
 type MarketItem = {
   symbol: string
@@ -20,7 +21,7 @@ export default function MarketOverview() {
   useEffect(() => {
     const fetchData = async () => {
       try {
-        const base = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
+        const base = getApiBase()
         const res = await fetch(`${base}/api/market/summary`)
         if (!res.ok) {
           throw new Error('Błąd pobierania danych rynku')

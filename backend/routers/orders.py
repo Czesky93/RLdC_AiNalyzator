@@ -6,14 +6,14 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 from sqlalchemy import desc
 from typing import Optional
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pydantic import BaseModel
-import random
 import io
 import csv
 
-from backend.database import get_db, Order, Alert, PendingOrder, MarketData
+from backend.database import get_db, Order, Alert, PendingOrder, MarketData, Position, utc_now_naive
 from backend.auth import require_admin
+from backend.binance_client import get_binance_client
 
 router = APIRouter()
 
@@ -35,42 +35,8 @@ class PendingOrderCreate(BaseModel):
     reason: Optional[str] = None
 
 
-class DemoOrderGenerator:
-    """Generator demo orders"""
-    
-    @staticmethod
-    def generate_demo_orders(db: Session, count: int = 50):
-        """Wygeneruj przykładowe zlecenia demo"""
-        symbols = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "MATICUSDT", "BNBUSDT"]
-        sides = ["BUY", "SELL"]
-        types = ["MARKET", "LIMIT"]
-        statuses = ["FILLED", "FILLED", "FILLED", "CANCELLED", "REJECTED"]  # Więcej FILLED
-        
-        orders = []
-        for i in range(count):
-            timestamp = datetime.utcnow() - timedelta(hours=random.randint(1, 168))
-            
-            order = Order(
-                symbol=random.choice(symbols),
-                side=random.choice(sides),
-                order_type=random.choice(types),
-                price=round(random.uniform(50, 50000), 2),
-                quantity=round(random.uniform(0.01, 10), 4),
-                status=random.choice(statuses),
-                mode="demo",
-                executed_price=round(random.uniform(50, 50000), 2),
-                executed_quantity=round(random.uniform(0.01, 10), 4),
-                timestamp=timestamp
-            )
-            orders.append(order)
-        
-        db.bulk_save_objects(orders)
-        db.commit()
-        return count
-
-
-@router.get("/")
-async def get_orders(
+@router.get("")
+def get_orders(
     mode: str = Query("demo", description="Tryb: demo lub live"),
     status: Optional[str] = Query(None, description="Filtr po statusie (FILLED, CANCELLED, etc.)"),
     symbol: Optional[str] = Query(None, description="Filtr po symbolu"),
@@ -134,7 +100,7 @@ async def get_orders(
 
 
 @router.get("/pending")
-async def get_pending_orders(
+def get_pending_orders(
     mode: str = Query("demo", description="Tryb: demo lub live"),
     status: Optional[str] = Query(None, description="PENDING/CONFIRMED/REJECTED/EXECUTED"),
     limit: int = Query(100, ge=1, le=500, description="Limit"),
@@ -170,7 +136,7 @@ async def get_pending_orders(
 
 
 @router.post("/pending")
-async def create_pending_order(
+def create_pending_order(
     payload: PendingOrderCreate,
     mode: str = Query("demo", description="Tryb: demo lub live (na start: tylko demo)"),
     db: Session = Depends(get_db),
@@ -229,7 +195,7 @@ async def create_pending_order(
         mode="demo",
         status="PENDING",
         reason=(payload.reason or None),
-        created_at=datetime.utcnow(),
+        created_at=utc_now_naive(),
     )
     db.add(p)
     db.commit()
@@ -250,7 +216,7 @@ async def create_pending_order(
 
 
 @router.post("/pending/{pending_id}/confirm")
-async def confirm_pending_order(
+def confirm_pending_order(
     pending_id: int,
     db: Session = Depends(get_db),
     admin: None = Depends(require_admin),
@@ -267,14 +233,14 @@ async def confirm_pending_order(
         raise HTTPException(status_code=409, detail="Pending order is not in PENDING status")
 
     p.status = "CONFIRMED"
-    p.confirmed_at = datetime.utcnow()
+    p.confirmed_at = utc_now_naive()
     db.commit()
     db.refresh(p)
     return {"success": True, "data": {"id": p.id, "status": p.status, "confirmed_at": p.confirmed_at.isoformat()}}
 
 
 @router.post("/pending/{pending_id}/reject")
-async def reject_pending_order(
+def reject_pending_order(
     pending_id: int,
     db: Session = Depends(get_db),
     admin: None = Depends(require_admin),
@@ -291,14 +257,14 @@ async def reject_pending_order(
         raise HTTPException(status_code=409, detail="Pending order is not in PENDING status")
 
     p.status = "REJECTED"
-    p.confirmed_at = datetime.utcnow()
+    p.confirmed_at = utc_now_naive()
     db.commit()
     db.refresh(p)
     return {"success": True, "data": {"id": p.id, "status": p.status, "confirmed_at": p.confirmed_at.isoformat()}}
 
 
 @router.post("/pending/{pending_id}/cancel")
-async def cancel_pending_order(
+def cancel_pending_order(
     pending_id: int,
     db: Session = Depends(get_db),
     admin: None = Depends(require_admin),
@@ -320,86 +286,231 @@ async def cancel_pending_order(
         p.reason = f"{p.reason} (cancelled)"
     else:
         p.reason = "cancelled"
-    p.confirmed_at = datetime.utcnow()
+    p.confirmed_at = utc_now_naive()
     db.commit()
     db.refresh(p)
     return {"success": True, "data": {"id": p.id, "status": p.status, "confirmed_at": p.confirmed_at.isoformat()}}
 
 
-@router.post("/")
-async def create_order(
+@router.post("")
+def create_order(
     order: OrderCreate,
-    mode: str = Query("demo", description="Tryb: demo (live nie jest dostępny - read-only)"),
+    mode: str = Query("demo", description="Tryb: demo lub live"),
     db: Session = Depends(get_db)
 ):
     """
-    Utwórz nowe zlecenie (tylko DEMO)
-    LIVE mode jest read-only - nie wykonujemy zleceń
+    Utwórz nowe zlecenie.
+    - DEMO: zapis do lokalnej bazy, natychmiastowe FILLED.
+    - LIVE: MARKET order na Binance → zapis fills do DB.
     """
     try:
-        if mode != "demo":
-            raise HTTPException(
-                status_code=403,
-                detail="Trading in LIVE mode is disabled (read-only). Use DEMO mode."
-            )
-        
-        # Walidacja
+        # Walidacja wspólna
         if order.side not in ["BUY", "SELL"]:
-            raise HTTPException(status_code=400, detail="Invalid side. Use BUY or SELL")
-        
+            raise HTTPException(status_code=400, detail="Nieprawidłowy side. Użyj BUY lub SELL")
         if order.order_type not in ["MARKET", "LIMIT"]:
-            raise HTTPException(status_code=400, detail="Invalid type. Use MARKET or LIMIT")
-        
+            raise HTTPException(status_code=400, detail="Nieprawidłowy typ. Użyj MARKET lub LIMIT")
         if order.quantity <= 0:
-            raise HTTPException(status_code=400, detail="Quantity must be positive")
-        
-        # Symulacja wykonania zlecenia
-        # W prawdziwym systemie tutaj byłaby logika matchingu z orderbook
-        executed_price = order.price if order.order_type == "LIMIT" else round(random.uniform(50, 50000), 2)
-        
-        # Utwórz zlecenie
+            raise HTTPException(status_code=400, detail="Ilość musi być większa od zera")
+
+        # ─── DEMO ───────────────────────────────────────────────────────────────
+        if mode == "demo":
+            if order.order_type == "LIMIT" and order.price:
+                executed_price = order.price
+            else:
+                md = (
+                    db.query(MarketData)
+                    .filter(MarketData.symbol == order.symbol)
+                    .order_by(MarketData.timestamp.desc())
+                    .first()
+                )
+                if not md or not md.price:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Brak danych rynkowych dla {order.symbol}. Uruchom kolektor."
+                    )
+                executed_price = float(md.price)
+
+            new_order = Order(
+                symbol=order.symbol,
+                side=order.side,
+                order_type=order.order_type,
+                price=order.price,
+                quantity=order.quantity,
+                status="FILLED",
+                mode="demo",
+                executed_price=executed_price,
+                executed_quantity=order.quantity,
+                timestamp=utc_now_naive(),
+            )
+            db.add(new_order)
+            db.commit()
+            db.refresh(new_order)
+
+            return {
+                "success": True,
+                "message": f"Zlecenie demo {order.side} {order.quantity} {order.symbol} @ {executed_price:.4f}",
+                "data": {
+                    "id": new_order.id,
+                    "symbol": new_order.symbol,
+                    "side": new_order.side,
+                    "type": new_order.order_type,
+                    "quantity": new_order.quantity,
+                    "status": new_order.status,
+                    "executed_price": new_order.executed_price,
+                    "executed_quantity": new_order.executed_quantity,
+                    "timestamp": new_order.timestamp.isoformat(),
+                    "mode": "demo",
+                },
+            }
+
+        # ─── LIVE ────────────────────────────────────────────────────────────────
+        binance = get_binance_client()
+
+        # Sprawdź klucze
+        if not binance.api_key or not binance.api_secret:
+            raise HTTPException(
+                status_code=503,
+                detail="Brak kluczy Binance API. Ustaw BINANCE_API_KEY i BINANCE_API_SECRET w .env"
+            )
+
+        # Tylko MARKET na start (bezpieczeństwo)
+        if order.order_type != "MARKET":
+            raise HTTPException(
+                status_code=400,
+                detail="Tryb LIVE obsługuje tylko MARKET orders. Zmień order_type na MARKET."
+            )
+
+        # Złóż zlecenie na Binance
+        result = binance.place_order(
+            symbol=order.symbol,
+            side=order.side,
+            order_type="MARKET",
+            quantity=order.quantity,
+        )
+
+        if result is None:
+            raise HTTPException(
+                status_code=502,
+                detail="Binance nie odpowiedział. Sprawdź klucze API i połączenie."
+            )
+        if result.get("_error"):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Binance odrzucił zlecenie: {result.get('error_message', 'nieznany błąd')} (kod: {result.get('error_code', '?')})"
+            )
+
+        binance_order_id = result.get("orderId")
+        binance_status = result.get("status", "UNKNOWN")
+
+        # Pobierz fills (cena wykonania)
+        fills = result.get("fills") or []
+        exec_qty = float(result.get("executedQty", order.quantity) or order.quantity)
+        cum_quote = float(result.get("cummulativeQuoteQty", 0) or 0)
+        executed_price = (cum_quote / exec_qty) if exec_qty > 0 else 0.0
+
+        # Fallback — pobierz cenę z fills jeśli cummulativeQuoteQty = 0
+        if executed_price == 0 and fills:
+            total_cost = sum(float(f.get("price", 0)) * float(f.get("qty", 0)) for f in fills)
+            total_qty = sum(float(f.get("qty", 0)) for f in fills)
+            executed_price = total_cost / total_qty if total_qty > 0 else 0.0
+
+        # Całkowita prowizja (w quote asset lub BNB)
+        total_fee = sum(float(f.get("commission", 0)) for f in fills)
+        fee_asset = fills[0].get("commissionAsset", "") if fills else ""
+
+        # Zapis do DB
         new_order = Order(
             symbol=order.symbol,
             side=order.side,
-            order_type=order.order_type,
-            price=order.price,
-            quantity=order.quantity,
-            status="FILLED",  # Demo: od razu FILLED
-            mode="demo",
-            executed_price=executed_price,
-            executed_quantity=order.quantity,
-            timestamp=datetime.utcnow()
+            order_type="MARKET",
+            price=None,
+            quantity=exec_qty,
+            status=binance_status,
+            mode="live",
+            executed_price=executed_price if executed_price > 0 else None,
+            executed_quantity=exec_qty,
+            timestamp=utc_now_naive(),
         )
-        
         db.add(new_order)
+        db.flush()
+
+        # Jeśli BUY FILLED → utwórz/aktualizuj Position
+        if order.side == "BUY" and binance_status in ("FILLED", "PARTIALLY_FILLED") and executed_price > 0:
+            existing = (
+                db.query(Position)
+                .filter(Position.symbol == order.symbol, Position.mode == "live")
+                .first()
+            )
+            if existing:
+                # Uśrednij cenę wejścia
+                old_cost = float(existing.entry_price or 0) * float(existing.quantity or 0)
+                new_cost = executed_price * exec_qty
+                total_qty = float(existing.quantity or 0) + exec_qty
+                existing.entry_price = (old_cost + new_cost) / total_qty if total_qty > 0 else executed_price
+                existing.quantity = total_qty
+                existing.current_price = executed_price
+                existing.unrealized_pnl = 0.0
+            else:
+                pos = Position(
+                    symbol=order.symbol,
+                    side="BUY",
+                    entry_price=executed_price,
+                    current_price=executed_price,
+                    quantity=exec_qty,
+                    unrealized_pnl=0.0,
+                    mode="live",
+                    opened_at=utc_now_naive(),
+                )
+                db.add(pos)
+
+        # Jeśli SELL FILLED → zmniejsz/usuń Position
+        if order.side == "SELL" and binance_status in ("FILLED", "PARTIALLY_FILLED"):
+            existing = (
+                db.query(Position)
+                .filter(Position.symbol == order.symbol, Position.mode == "live")
+                .first()
+            )
+            if existing:
+                remaining = float(existing.quantity or 0) - exec_qty
+                if remaining <= 1e-8:
+                    db.delete(existing)
+                else:
+                    existing.quantity = remaining
+
         db.commit()
         db.refresh(new_order)
-        
+
         return {
             "success": True,
-            "message": "Zlecenie utworzone (DEMO)",
+            "message": (
+                f"✓ Zlecenie LIVE {order.side} {exec_qty} {order.symbol} "
+                f"@ {executed_price:.4f} EUR · prowizja {total_fee:.8f} {fee_asset}"
+            ),
             "data": {
                 "id": new_order.id,
+                "binance_order_id": binance_order_id,
                 "symbol": new_order.symbol,
                 "side": new_order.side,
                 "type": new_order.order_type,
-                "price": new_order.price,
-                "quantity": new_order.quantity,
-                "status": new_order.status,
-                "executed_price": new_order.executed_price,
-                "executed_quantity": new_order.executed_quantity,
-                "timestamp": new_order.timestamp.isoformat()
-            }
+                "quantity": exec_qty,
+                "status": binance_status,
+                "executed_price": executed_price,
+                "executed_quantity": exec_qty,
+                "fee": total_fee,
+                "fee_asset": fee_asset,
+                "timestamp": new_order.timestamp.isoformat(),
+                "mode": "live",
+            },
         }
-        
+
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error creating order: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Błąd tworzenia zlecenia: {str(e)}")
 
 
 @router.get("/export.csv")
-async def export_orders_csv(
+def export_orders_csv(
     mode: str = Query("demo", description="Tryb: demo lub live"),
     days: int = Query(7, ge=1, le=90, description="Ile dni wstecz (max 90)"),
     db: Session = Depends(get_db)
@@ -409,21 +520,13 @@ async def export_orders_csv(
     """
     try:
         # Pobierz zlecenia z ostatnich N dni
-        since = datetime.utcnow() - timedelta(days=days)
+        since = utc_now_naive() - timedelta(days=days)
         
         orders = db.query(Order).filter(
             Order.mode == mode,
             Order.timestamp >= since
         ).order_by(desc(Order.timestamp)).all()
-        
-        # Jeśli brak, wygeneruj demo
-        if not orders and mode == "demo":
-            DemoOrderGenerator.generate_demo_orders(db, 50)
-            orders = db.query(Order).filter(
-                Order.mode == mode,
-                Order.timestamp >= since
-            ).order_by(desc(Order.timestamp)).all()
-        
+
         # Utwórz CSV w pamięci
         output = io.StringIO()
         writer = csv.writer(output)
@@ -464,7 +567,7 @@ async def export_orders_csv(
             iter([output.getvalue()]),
             media_type="text/csv",
             headers={
-                "Content-Disposition": f"attachment; filename=orders_{mode}_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.csv"
+                "Content-Disposition": f"attachment; filename=orders_{mode}_{utc_now_naive().strftime('%Y%m%d_%H%M%S')}.csv"
             }
         )
         
@@ -473,7 +576,7 @@ async def export_orders_csv(
 
 
 @router.get("/stats")
-async def get_order_stats(
+def get_order_stats(
     mode: str = Query("demo", description="Tryb: demo lub live"),
     days: int = Query(7, ge=1, le=90, description="Period statystyk"),
     db: Session = Depends(get_db)
@@ -482,7 +585,7 @@ async def get_order_stats(
     Statystyki zleceń
     """
     try:
-        since = datetime.utcnow() - timedelta(days=days)
+        since = utc_now_naive() - timedelta(days=days)
         
         orders = db.query(Order).filter(
             Order.mode == mode,

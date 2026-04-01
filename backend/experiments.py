@@ -5,14 +5,14 @@ Controlled experiment layer for comparing configuration snapshots.
 from __future__ import annotations
 
 from collections import defaultdict
-from datetime import datetime
+from datetime import datetime, timezone
 import json
 from typing import Any, Dict, Iterable, List, Optional
 
 from sqlalchemy.orm import Session
 
 from backend.accounting import summarize_orders
-from backend.database import DecisionTrace, Experiment, ExperimentResult, Order, get_config_snapshot
+from backend.database import DecisionTrace, Experiment, ExperimentResult, Order, get_config_snapshot, utc_now_naive
 from backend.governance import enforce_pipeline_permission
 
 
@@ -353,7 +353,7 @@ def create_experiment(
         start_at=start_dt,
         end_at=end_dt,
     )
-    now = datetime.utcnow()
+    now = utc_now_naive()
     experiment = Experiment(
         name=name,
         description=description,

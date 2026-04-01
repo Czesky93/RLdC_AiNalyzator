@@ -16,7 +16,7 @@ Warstwa czysto prezentacyjna / read-only.
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 from sqlalchemy.orm import Session
@@ -30,6 +30,7 @@ from backend.database import (
     PromotionMonitoring,
     RollbackMonitoring,
     SystemLog,
+    utc_now_naive
 )
 from backend.governance import (
     get_operator_queue,
@@ -256,7 +257,7 @@ def get_operator_console(db: Session) -> Dict[str, Any]:
     Jeden endpoint — pełny obraz systemu.
     """
     console: Dict[str, Any] = {
-        "generated_at": datetime.utcnow().isoformat(),
+        "generated_at": utc_now_naive().isoformat(),
         "sections": {},
     }
 

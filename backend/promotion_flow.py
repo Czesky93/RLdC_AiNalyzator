@@ -5,12 +5,12 @@ Controlled promotion flow for approved recommendations.
 from __future__ import annotations
 
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List
 
 from sqlalchemy.orm import Session
 
-from backend.database import ConfigPromotion, Position, Recommendation, RecommendationReview, get_config_snapshot
+from backend.database import ConfigPromotion, Position, Recommendation, RecommendationReview, get_config_snapshot, utc_now_naive
 from backend.governance import enforce_pipeline_permission
 from backend.recommendations import get_recommendation
 from backend.runtime_settings import RuntimeSettingsError, apply_runtime_updates, build_runtime_state
@@ -152,7 +152,7 @@ def promote_recommendation(
         from_snapshot_id=ctx["current_snapshot_id"],
         to_snapshot_id=ctx["recommendation"]["candidate_snapshot_id"],
         status="pending",
-        initiated_at=datetime.utcnow(),
+        initiated_at=utc_now_naive(),
         initiated_by=initiated_by,
         rollback_available=True,
         rollback_snapshot_id=ctx["current_snapshot_id"],
@@ -172,7 +172,7 @@ def promote_recommendation(
             active_position_count=_active_position_count(db),
         )
         promotion.status = "applied"
-        promotion.applied_at = datetime.utcnow()
+        promotion.applied_at = utc_now_naive()
         promotion.runtime_apply_result_json = _json_text(apply_result)
         promotion.post_promotion_monitoring_status = "pending"
         db.commit()
@@ -182,7 +182,7 @@ def promote_recommendation(
         db.rollback()
         db.add(promotion)
         promotion.status = "failed"
-        promotion.failed_at = datetime.utcnow()
+        promotion.failed_at = utc_now_naive()
         promotion.failure_reason = str(exc)
         promotion.post_promotion_monitoring_status = "blocked"
         db.commit()

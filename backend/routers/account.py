@@ -6,15 +6,16 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from sqlalchemy import desc
 from typing import Any, Dict, Optional
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import os
 import re
 import requests
 import hashlib
 
-from backend.database import get_db, AccountSnapshot, Position, SystemLog, reset_database
+from backend.database import get_db, AccountSnapshot, Position, SystemLog, MarketData, Order, CostLedger, PendingOrder, RuntimeSetting, DecisionTrace, reset_database, utc_now_naive
 from backend.binance_client import get_binance_client
 from backend.accounting import compute_demo_account_state, compute_risk_snapshot, get_demo_quote_ccy
+from backend.routers.portfolio import _build_live_spot_portfolio
 from backend.auth import require_admin
 from backend.experiments import compare_snapshots_for_experiment, create_experiment, get_experiment, list_experiments
 from backend.recommendations import (
@@ -187,7 +188,7 @@ def _cached_demo_state(db: Session, force: bool = False) -> dict:
     """
     Cache DEMO state na krótki TTL, żeby nie mielić DB w UI (odświeżanie co 60s).
     """
-    now = datetime.utcnow()
+    now = utc_now_naive()
     ttl_seconds = int(os.getenv("ACCOUNT_STATE_CACHE_SECONDS", "5"))
     if not force and _demo_state_cache.get("ts") and _demo_state_cache.get("data"):
         age = (now - _demo_state_cache["ts"]).total_seconds()
@@ -209,7 +210,7 @@ def _persist_demo_snapshot(db: Session, state: dict) -> AccountSnapshot:
         margin_level=0.0,
         balance=float(state.get("cash") or 0.0),
         unrealized_pnl=float(state.get("unrealized_pnl") or 0.0),
-        timestamp=datetime.utcnow(),
+        timestamp=utc_now_naive(),
     )
     db.add(snap)
     db.commit()
@@ -218,7 +219,7 @@ def _persist_demo_snapshot(db: Session, state: dict) -> AccountSnapshot:
 
 
 @router.get("/summary")
-async def get_account_summary(
+def get_account_summary(
     mode: str = Query("demo", description="Tryb: demo lub live"),
     db: Session = Depends(get_db)
 ):
@@ -245,34 +246,62 @@ async def get_account_summary(
                 "realized_pnl_total": round(float(state.get("realized_pnl_total") or 0.0), 2),
                 "realized_pnl_24h": round(float(state.get("realized_pnl_24h") or 0.0), 2),
                 "roi": float(state.get("roi") or 0.0),
-                "timestamp": state.get("timestamp") or datetime.utcnow().isoformat(),
+                "timestamp": state.get("timestamp") or utc_now_naive().isoformat(),
                 "positions": state.get("positions") or [],
             }
             return {"success": True, "data": data}
         
         elif mode == "live":
             # LIVE mode - pobierz z Binance (read-only)
-            binance = get_binance_client()
-            account = binance.get_account_info()
+            _binance_err: Optional[str] = None
+            try:
+                binance = get_binance_client()
+                account = binance.get_account_info()
+            except Exception as _be:
+                account = None
+                _binance_err = str(_be)
             if not account:
-                raise HTTPException(
-                    status_code=401,
-                    detail="Brak kluczy API Binance lub błąd autoryzacji"
-                )
+                return {
+                    "success": True,
+                    "data": {
+                        "mode": "live",
+                        "equity": 0.0,
+                        "balance": 0.0,
+                        "free_margin": 0.0,
+                        "used_margin": 0.0,
+                        "margin_level": 0.0,
+                        "unrealized_pnl": 0.0,
+                        "cash": 0.0,
+                        "positions_value": 0.0,
+                        "realized_pnl_total": 0.0,
+                        "realized_pnl_24h": 0.0,
+                        "roi": 0.0,
+                        "positions": [],
+                        "timestamp": utc_now_naive().isoformat(),
+                        "_info": (
+                            f"Binance API niedostępne ({_binance_err}). "
+                            if _binance_err else
+                            "Binance API niedostępne. "
+                        ) + "Ustaw BINANCE_API_KEY i BINANCE_SECRET_KEY w .env",
+                    }
+                }
 
             spot_balances = account.get("balances", [])
-            stable_assets = {"USDT", "USDC", "BUSD"}
-            spot_stable_total = sum(b["total"] for b in spot_balances if b["asset"] in stable_assets)
 
+            # ── przelicz wszystkie aktywa spot na EUR ──────────────────────
+            spot_data = _build_live_spot_portfolio(db)
+            total_equity = spot_data.get("total_equity_eur", 0.0)
+            free_cash_eur = spot_data.get("free_cash_eur", 0.0)
+            spot_positions = spot_data.get("spot_positions", [])
+            unpriced = spot_data.get("unpriced_assets", [])
+
+            # earn + futures (opcjonalne, dokładają do equity)
             simple_earn_account = binance.get_simple_earn_account() or {}
-            simple_earn_flexible = binance.get_simple_earn_flexible_positions() or {}
-            simple_earn_locked = binance.get_simple_earn_locked_positions() or {}
             earn_total = 0.0
             try:
                 earn_total = float(simple_earn_account.get("totalAmount", 0) or 0)
             except Exception:
                 earn_total = 0.0
-
             futures_balance = binance.get_futures_balance() or []
             futures_account = binance.get_futures_account() or {}
             futures_wallet_balance = 0.0
@@ -283,20 +312,24 @@ async def get_account_summary(
                         break
             except Exception:
                 futures_wallet_balance = 0.0
-
-            total_equity = spot_stable_total + earn_total + futures_wallet_balance
+            eur_per_usdt = spot_data.get("eur_per_usdt") or 1.0
+            total_equity += round(
+                (earn_total + futures_wallet_balance) * eur_per_usdt, 2
+            )
 
             data = {
                 "mode": "live",
                 "equity": round(total_equity, 2),
-                "free_margin": round(total_equity * 0.5, 2),
-                "used_margin": round(total_equity * 0.5, 2),
+                "free_margin": round(free_cash_eur, 2),
+                "used_margin": round(total_equity - free_cash_eur, 2),
                 "margin_level": 200.0,
-                "balance": round(spot_stable_total, 2),
+                "balance": round(total_equity, 2),
                 "unrealized_pnl": 0.0,
-                "timestamp": datetime.utcnow().isoformat(),
-                "balances": spot_balances[:10],
-                "spot_stable_total": round(spot_stable_total, 2),
+                "timestamp": utc_now_naive().isoformat(),
+                "balances": spot_balances[:15],
+                "spot_positions": spot_positions,
+                "unpriced_assets": unpriced,
+                "spot_equity_eur": round(spot_data.get("total_equity_eur", 0.0), 2),
                 "simple_earn_total": round(earn_total, 2),
                 "futures_wallet_balance": round(futures_wallet_balance, 2),
                 "futures_account": futures_account,
@@ -311,7 +344,7 @@ async def get_account_summary(
                 margin_level=data["margin_level"],
                 balance=data["balance"],
                 unrealized_pnl=data["unrealized_pnl"],
-                timestamp=datetime.utcnow()
+                timestamp=utc_now_naive()
             )
             db.add(snapshot)
             db.commit()
@@ -331,7 +364,7 @@ async def get_account_summary(
 
 
 @router.post("/reset")
-async def reset_account_data(
+def reset_account_data(
     request: Request,
     scope: str = Query("full", description="full lub demo"),
     admin: None = Depends(require_admin),
@@ -350,7 +383,7 @@ async def reset_account_data(
 
 
 @router.get("/openai-status")
-async def get_openai_status(
+def get_openai_status(
     force: bool = Query(False, description="Jeśli true, pomija cache i wykonuje realny test"),
 ):
     """
@@ -374,7 +407,7 @@ async def get_openai_status(
             },
         }
 
-    now = datetime.utcnow()
+    now = utc_now_naive()
     ttl_seconds = int(os.getenv("OPENAI_STATUS_CACHE_SECONDS", "120"))
     if not force and _openai_status_cache.get("ts") and _openai_status_cache.get("data"):
         age = (now - _openai_status_cache["ts"]).total_seconds()
@@ -441,7 +474,7 @@ async def get_openai_status(
 
 
 @router.get("/history")
-async def get_account_history(
+def get_account_history(
     mode: str = Query("demo", description="Tryb: demo lub live"),
     hours: int = Query(24, ge=1, le=168, description="Ile godzin wstecz (max 168 = tydzień)"),
     db: Session = Depends(get_db)
@@ -452,7 +485,7 @@ async def get_account_history(
     """
     try:
         # Oblicz czas początkowy
-        since = datetime.utcnow() - timedelta(hours=hours)
+        since = utc_now_naive() - timedelta(hours=hours)
         
         # Pobierz snapshoty
         snapshots = db.query(AccountSnapshot).filter(
@@ -496,7 +529,7 @@ async def get_account_history(
 
 
 @router.get("/kpi")
-async def get_account_kpi(
+def get_account_kpi(
     mode: str = Query("demo", description="Tryb: demo lub live"),
     db: Session = Depends(get_db)
 ):
@@ -514,10 +547,28 @@ async def get_account_kpi(
                 state = _cached_demo_state(db)
                 latest = _persist_demo_snapshot(db, state)
             else:
-                raise HTTPException(status_code=404, detail="No account data found")
+                # Tryb LIVE bez danych — zwracamy HTTP 200 z bezpiecznym fallbackiem
+                return {
+                    "success": True,
+                    "mode": mode,
+                    "data": {
+                        "equity": 0.0,
+                        "equity_change": 0.0,
+                        "equity_change_percent": 0.0,
+                        "free_margin": 0.0,
+                        "used_margin": 0.0,
+                        "margin_level": 0.0,
+                        "unrealized_pnl": 0.0,
+                        "balance": 0.0,
+                        "timestamp": utc_now_naive().isoformat()
+                    },
+                    "_info": "Brak danych live z Binance. Synchronizacja konta nieaktywna.",
+                    "source": "fallback",
+                    "stale": True
+                }
         
         # Pobierz snapshot sprzed 24h
-        day_ago = datetime.utcnow() - timedelta(hours=24)
+        day_ago = utc_now_naive() - timedelta(hours=24)
         prev = db.query(AccountSnapshot).filter(
             AccountSnapshot.mode == mode,
             AccountSnapshot.timestamp <= day_ago
@@ -555,7 +606,7 @@ async def get_account_kpi(
 
 
 @router.get("/risk")
-async def get_risk_summary(
+def get_risk_summary(
     mode: str = Query("demo", description="Tryb: demo lub live"),
     db: Session = Depends(get_db)
 ):
@@ -574,7 +625,7 @@ async def get_risk_summary(
 
 
 @router.get("/analytics/overview")
-async def get_analytics_overview(
+def get_analytics_overview(
     mode: str = Query("demo", description="Tryb: demo lub live"),
     db: Session = Depends(get_db),
 ):
@@ -592,7 +643,7 @@ async def get_analytics_overview(
 
 
 @router.get("/analytics/risk-effectiveness")
-async def get_risk_effectiveness(
+def get_risk_effectiveness(
     mode: str = Query("demo", description="Tryb: demo lub live"),
     db: Session = Depends(get_db),
 ):
@@ -610,7 +661,7 @@ async def get_risk_effectiveness(
 
 
 @router.get("/analytics")
-async def get_analytics_bundle(
+def get_analytics_bundle(
     mode: str = Query("demo", description="Tryb: demo lub live"),
     db: Session = Depends(get_db),
 ):
@@ -628,7 +679,7 @@ async def get_analytics_bundle(
 
 
 @router.get("/analytics/config-snapshots/compare")
-async def compare_config_snapshot_payloads(
+def compare_config_snapshot_payloads(
     snapshot_a: str,
     snapshot_b: str,
     mode: str = Query("demo", description="Tryb: demo lub live"),
@@ -647,7 +698,7 @@ async def compare_config_snapshot_payloads(
 
 
 @router.get("/analytics/config-snapshots/{snapshot_id}")
-async def get_config_snapshot_payload(
+def get_config_snapshot_payload(
     snapshot_id: str,
     db: Session = Depends(get_db),
 ):
@@ -666,7 +717,7 @@ async def get_config_snapshot_payload(
 
 
 @router.get("/analytics/experiments/compare")
-async def compare_experiment_variants(
+def compare_experiment_variants(
     baseline_snapshot_id: str,
     candidate_snapshot_id: str,
     mode: str = Query("demo", description="Tryb: demo lub live"),
@@ -697,7 +748,7 @@ async def compare_experiment_variants(
 
 
 @router.get("/analytics/experiments")
-async def get_experiments(
+def get_experiments(
     db: Session = Depends(get_db),
 ):
     try:
@@ -707,7 +758,7 @@ async def get_experiments(
 
 
 @router.get("/analytics/experiments/{experiment_id}")
-async def get_experiment_by_id(
+def get_experiment_by_id(
     experiment_id: int,
     db: Session = Depends(get_db),
 ):
@@ -720,7 +771,7 @@ async def get_experiment_by_id(
 
 
 @router.post("/analytics/experiments")
-async def create_experiment_endpoint(
+def create_experiment_endpoint(
     payload: ExperimentCreateRequest,
     db: Session = Depends(get_db),
     admin: None = Depends(require_admin),
@@ -750,7 +801,7 @@ async def create_experiment_endpoint(
 
 
 @router.get("/analytics/recommendations")
-async def get_recommendations(
+def get_recommendations(
     db: Session = Depends(get_db),
 ):
     try:
@@ -760,7 +811,7 @@ async def get_recommendations(
 
 
 @router.get("/analytics/recommendations/overview")
-async def get_recommendations_overview(
+def get_recommendations_overview(
     db: Session = Depends(get_db),
 ):
     try:
@@ -776,7 +827,7 @@ async def get_recommendations_overview(
 
 
 @router.get("/analytics/recommendations/review-queue")
-async def get_recommendation_review_queue(
+def get_recommendation_review_queue(
     db: Session = Depends(get_db),
 ):
     try:
@@ -786,7 +837,7 @@ async def get_recommendation_review_queue(
 
 
 @router.post("/analytics/recommendations")
-async def create_recommendation_endpoint(
+def create_recommendation_endpoint(
     payload: RecommendationCreateRequest,
     db: Session = Depends(get_db),
     admin: None = Depends(require_admin),
@@ -805,7 +856,7 @@ async def create_recommendation_endpoint(
 
 
 @router.get("/analytics/recommendations/{recommendation_id}")
-async def get_recommendation_by_id(
+def get_recommendation_by_id(
     recommendation_id: int,
     db: Session = Depends(get_db),
 ):
@@ -818,7 +869,7 @@ async def get_recommendation_by_id(
 
 
 @router.get("/analytics/recommendations/{recommendation_id}/review")
-async def get_recommendation_review_bundle(
+def get_recommendation_review_bundle(
     recommendation_id: int,
     db: Session = Depends(get_db),
 ):
@@ -848,7 +899,7 @@ def _apply_review_http(
 
 
 @router.post("/analytics/recommendations/{recommendation_id}/start-review")
-async def start_recommendation_review(
+def start_recommendation_review(
     recommendation_id: int,
     payload: RecommendationReviewRequest,
     db: Session = Depends(get_db),
@@ -863,7 +914,7 @@ async def start_recommendation_review(
 
 
 @router.post("/analytics/recommendations/{recommendation_id}/approve")
-async def approve_recommendation(
+def approve_recommendation(
     recommendation_id: int,
     payload: RecommendationReviewRequest,
     db: Session = Depends(get_db),
@@ -878,7 +929,7 @@ async def approve_recommendation(
 
 
 @router.post("/analytics/recommendations/{recommendation_id}/reject")
-async def reject_recommendation(
+def reject_recommendation(
     recommendation_id: int,
     payload: RecommendationReviewRequest,
     db: Session = Depends(get_db),
@@ -893,7 +944,7 @@ async def reject_recommendation(
 
 
 @router.post("/analytics/recommendations/{recommendation_id}/defer")
-async def defer_recommendation(
+def defer_recommendation(
     recommendation_id: int,
     payload: RecommendationReviewRequest,
     db: Session = Depends(get_db),
@@ -908,7 +959,7 @@ async def defer_recommendation(
 
 
 @router.get("/analytics/promotions")
-async def get_config_promotions(
+def get_config_promotions(
     db: Session = Depends(get_db),
 ):
     try:
@@ -918,7 +969,7 @@ async def get_config_promotions(
 
 
 @router.get("/analytics/promotions/{promotion_id}")
-async def get_config_promotion_by_id(
+def get_config_promotion_by_id(
     promotion_id: int,
     db: Session = Depends(get_db),
 ):
@@ -931,7 +982,7 @@ async def get_config_promotion_by_id(
 
 
 @router.post("/analytics/promotions")
-async def create_config_promotion(
+def create_config_promotion(
     payload: PromotionCreateRequest,
     db: Session = Depends(get_db),
     admin: None = Depends(require_admin),
@@ -957,7 +1008,7 @@ async def create_config_promotion(
 
 
 @router.get("/analytics/promotion-monitoring")
-async def get_promotion_monitoring_records(
+def get_promotion_monitoring_records(
     db: Session = Depends(get_db),
 ):
     try:
@@ -967,7 +1018,7 @@ async def get_promotion_monitoring_records(
 
 
 @router.get("/analytics/promotion-monitoring/{monitoring_id}")
-async def get_promotion_monitoring_record(
+def get_promotion_monitoring_record(
     monitoring_id: int,
     db: Session = Depends(get_db),
 ):
@@ -980,7 +1031,7 @@ async def get_promotion_monitoring_record(
 
 
 @router.get("/analytics/promotions/{promotion_id}/monitoring")
-async def get_monitoring_verdict_for_promotion(
+def get_monitoring_verdict_for_promotion(
     promotion_id: int,
     db: Session = Depends(get_db),
 ):
@@ -993,7 +1044,7 @@ async def get_monitoring_verdict_for_promotion(
 
 
 @router.post("/analytics/promotions/{promotion_id}/monitoring/evaluate")
-async def evaluate_promotion_monitoring(
+def evaluate_promotion_monitoring(
     promotion_id: int,
     payload: PromotionMonitoringRequest,
     db: Session = Depends(get_db),
@@ -1008,7 +1059,7 @@ async def evaluate_promotion_monitoring(
 
 
 @router.get("/analytics/rollbacks")
-async def get_rollback_decisions(
+def get_rollback_decisions(
     db: Session = Depends(get_db),
 ):
     try:
@@ -1018,7 +1069,7 @@ async def get_rollback_decisions(
 
 
 @router.get("/analytics/rollbacks/{rollback_id}")
-async def get_rollback_decision_by_id(
+def get_rollback_decision_by_id(
     rollback_id: int,
     db: Session = Depends(get_db),
 ):
@@ -1031,7 +1082,7 @@ async def get_rollback_decision_by_id(
 
 
 @router.get("/analytics/promotions/{promotion_id}/rollback-decision")
-async def get_latest_rollback_decision_for_promotion(
+def get_latest_rollback_decision_for_promotion(
     promotion_id: int,
     db: Session = Depends(get_db),
 ):
@@ -1044,7 +1095,7 @@ async def get_latest_rollback_decision_for_promotion(
 
 
 @router.post("/analytics/promotions/{promotion_id}/rollback-decision")
-async def create_promotion_rollback_decision(
+def create_promotion_rollback_decision(
     promotion_id: int,
     payload: RollbackDecisionRequest,
     db: Session = Depends(get_db),
@@ -1068,7 +1119,7 @@ async def create_promotion_rollback_decision(
 
 
 @router.get("/analytics/rollback-executions")
-async def get_rollback_execution_records(
+def get_rollback_execution_records(
     db: Session = Depends(get_db),
 ):
     try:
@@ -1078,7 +1129,7 @@ async def get_rollback_execution_records(
 
 
 @router.get("/analytics/rollback-executions/{rollback_id}")
-async def get_rollback_execution_record(
+def get_rollback_execution_record(
     rollback_id: int,
     db: Session = Depends(get_db),
 ):
@@ -1091,7 +1142,7 @@ async def get_rollback_execution_record(
 
 
 @router.post("/analytics/rollbacks/{rollback_id}/execute")
-async def execute_rollback_decision(
+def execute_rollback_decision(
     rollback_id: int,
     payload: RollbackExecutionRequest,
     db: Session = Depends(get_db),
@@ -1118,7 +1169,7 @@ async def execute_rollback_decision(
 
 
 @router.get("/analytics/post-rollback-monitoring")
-async def get_post_rollback_monitoring_records(
+def get_post_rollback_monitoring_records(
     db: Session = Depends(get_db),
 ):
     try:
@@ -1128,7 +1179,7 @@ async def get_post_rollback_monitoring_records(
 
 
 @router.get("/analytics/post-rollback-monitoring/{monitoring_id}")
-async def get_post_rollback_monitoring_record_by_id(
+def get_post_rollback_monitoring_record_by_id(
     monitoring_id: int,
     db: Session = Depends(get_db),
 ):
@@ -1141,7 +1192,7 @@ async def get_post_rollback_monitoring_record_by_id(
 
 
 @router.get("/analytics/rollbacks/{rollback_id}/post-monitoring")
-async def get_post_rollback_monitoring_for_rollback(
+def get_post_rollback_monitoring_for_rollback(
     rollback_id: int,
     db: Session = Depends(get_db),
 ):
@@ -1154,7 +1205,7 @@ async def get_post_rollback_monitoring_for_rollback(
 
 
 @router.post("/analytics/rollbacks/{rollback_id}/post-monitoring/evaluate")
-async def evaluate_rollback_post_monitoring(
+def evaluate_rollback_post_monitoring(
     rollback_id: int,
     payload: PromotionMonitoringRequest,
     db: Session = Depends(get_db),
@@ -1169,7 +1220,7 @@ async def evaluate_rollback_post_monitoring(
 
 
 @router.get("/system-logs")
-async def get_system_logs(
+def get_system_logs(
     limit: int = Query(50, ge=1, le=200, description="Ile wpisów (max 200)"),
     level: Optional[str] = Query(None, description="Filtr poziomu: INFO/WARNING/ERROR"),
     module: Optional[str] = Query(None, description="Filtr modułu (np. analysis, collector)"),
@@ -1209,7 +1260,7 @@ async def get_system_logs(
 
 
 @router.get("/analytics/policy-actions")
-async def get_policy_actions_list(
+def get_policy_actions_list(
     status: Optional[str] = Query(None, description="Filtr statusu: open, resolved, superseded"),
     source_type: Optional[str] = Query(None, description="Filtr źródła: promotion_monitoring, rollback_decision, rollback_monitoring"),
     db: Session = Depends(get_db),
@@ -1221,7 +1272,7 @@ async def get_policy_actions_list(
 
 
 @router.get("/analytics/policy-actions/active")
-async def get_active_policy_actions(
+def get_active_policy_actions(
     db: Session = Depends(get_db),
 ):
     try:
@@ -1231,7 +1282,7 @@ async def get_active_policy_actions(
 
 
 @router.get("/analytics/policy-actions/summary")
-async def get_policy_actions_summary(
+def get_policy_actions_summary(
     db: Session = Depends(get_db),
 ):
     try:
@@ -1241,7 +1292,7 @@ async def get_policy_actions_summary(
 
 
 @router.get("/analytics/policy-actions/{policy_action_id}")
-async def get_policy_action_by_id(
+def get_policy_action_by_id(
     policy_action_id: int,
     db: Session = Depends(get_db),
 ):
@@ -1254,7 +1305,7 @@ async def get_policy_action_by_id(
 
 
 @router.post("/analytics/policy-actions")
-async def create_policy_action_endpoint(
+def create_policy_action_endpoint(
     payload: PolicyActionCreateRequest,
     db: Session = Depends(get_db),
     admin: None = Depends(require_admin),
@@ -1279,7 +1330,7 @@ async def create_policy_action_endpoint(
 
 
 @router.post("/analytics/policy-actions/{policy_action_id}/resolve")
-async def resolve_policy_action_endpoint(
+def resolve_policy_action_endpoint(
     policy_action_id: int,
     payload: PolicyActionResolveRequest,
     db: Session = Depends(get_db),
@@ -1302,7 +1353,7 @@ async def resolve_policy_action_endpoint(
 
 
 @router.get("/analytics/pipeline-status")
-async def get_pipeline_status_endpoint(
+def get_pipeline_status_endpoint(
     db: Session = Depends(get_db),
 ):
     try:
@@ -1312,7 +1363,7 @@ async def get_pipeline_status_endpoint(
 
 
 @router.get("/analytics/pipeline-permission/{operation}")
-async def check_pipeline_permission_endpoint(
+def check_pipeline_permission_endpoint(
     operation: str,
     db: Session = Depends(get_db),
 ):
@@ -1325,7 +1376,7 @@ async def check_pipeline_permission_endpoint(
 
 
 @router.get("/analytics/operator-queue")
-async def get_operator_queue_endpoint(
+def get_operator_queue_endpoint(
     db: Session = Depends(get_db),
 ):
     try:
@@ -1335,7 +1386,7 @@ async def get_operator_queue_endpoint(
 
 
 @router.get("/analytics/incidents")
-async def list_incidents_endpoint(
+def list_incidents_endpoint(
     status: Optional[str] = Query(None, description="Filtr statusu: open, acknowledged, in_progress, escalated, resolved"),
     priority: Optional[str] = Query(None, description="Filtr priorytetu: critical, high, medium, low"),
     db: Session = Depends(get_db),
@@ -1347,7 +1398,7 @@ async def list_incidents_endpoint(
 
 
 @router.get("/analytics/incidents/{incident_id}")
-async def get_incident_endpoint(
+def get_incident_endpoint(
     incident_id: int,
     db: Session = Depends(get_db),
 ):
@@ -1360,7 +1411,7 @@ async def get_incident_endpoint(
 
 
 @router.post("/analytics/incidents")
-async def create_incident_endpoint(
+def create_incident_endpoint(
     payload: IncidentCreateRequest,
     db: Session = Depends(get_db),
     admin: None = Depends(require_admin),
@@ -1374,7 +1425,7 @@ async def create_incident_endpoint(
 
 
 @router.post("/analytics/incidents/{incident_id}/transition")
-async def transition_incident_endpoint(
+def transition_incident_endpoint(
     incident_id: int,
     payload: IncidentTransitionRequest,
     db: Session = Depends(get_db),
@@ -1398,7 +1449,7 @@ async def transition_incident_endpoint(
 
 
 @router.post("/analytics/incidents/escalate-overdue")
-async def escalate_overdue_endpoint(
+def escalate_overdue_endpoint(
     db: Session = Depends(get_db),
     admin: None = Depends(require_admin),
 ):
@@ -1414,7 +1465,7 @@ async def escalate_overdue_endpoint(
 # =====================================================================
 
 @router.get("/analytics/notifications/config")
-async def get_notification_config():
+def get_notification_config():
     """Aktualny stan konfiguracji powiadomień (bez wrażliwych danych)."""
     cfg = _get_notification_config()
     return {
@@ -1432,7 +1483,7 @@ class TestNotificationRequest(BaseModel):
 
 
 @router.post("/analytics/notifications/test")
-async def test_notification(
+def test_notification(
     payload: TestNotificationRequest,
     admin: None = Depends(require_admin),
 ):
@@ -1446,13 +1497,13 @@ async def test_notification(
 # =====================================================================
 
 @router.get("/analytics/worker/status")
-async def worker_status():
+def worker_status():
     """Aktualny stan reevaluation workera."""
     return {"success": True, "data": get_worker_status()}
 
 
 @router.post("/analytics/worker/cycle")
-async def worker_manual_cycle(
+def worker_manual_cycle(
     admin: None = Depends(require_admin),
 ):
     """Ręcznie uruchom jeden cykl reewaluacji (debug / test)."""
@@ -1465,14 +1516,14 @@ async def worker_manual_cycle(
 # =====================================================================
 
 @router.get("/analytics/console")
-async def operator_console_bundle(db: Session = Depends(get_db)):
+def operator_console_bundle(db: Session = Depends(get_db)):
     """Pełny zagregowany widok konsoli operatora — jeden endpoint, pełny obraz."""
     data = get_operator_console(db)
     return {"success": True, "data": data}
 
 
 @router.get("/analytics/console/{section}")
-async def operator_console_section(
+def operator_console_section(
     section: str,
     db: Session = Depends(get_db),
 ):
@@ -1489,7 +1540,7 @@ async def operator_console_section(
 # =====================================================================
 
 @router.get("/analytics/incidents/{incident_id}/timeline")
-async def incident_timeline(
+def incident_timeline(
     incident_id: int,
     db: Session = Depends(get_db),
 ):
@@ -1502,7 +1553,7 @@ async def incident_timeline(
 
 
 @router.get("/analytics/incidents/{incident_id}/correlations")
-async def incident_correlations(
+def incident_correlations(
     incident_id: int,
     db: Session = Depends(get_db),
 ):
@@ -1515,7 +1566,7 @@ async def incident_correlations(
 
 
 @router.get("/analytics/policy-actions/{pa_id}/chain")
-async def policy_action_chain(
+def policy_action_chain(
     pa_id: int,
     db: Session = Depends(get_db),
 ):
@@ -1528,7 +1579,7 @@ async def policy_action_chain(
 
 
 @router.get("/analytics/promotions/{promotion_id}/chain")
-async def promotion_chain(
+def promotion_chain(
     promotion_id: int,
     db: Session = Depends(get_db),
 ):
@@ -1541,7 +1592,7 @@ async def promotion_chain(
 
 
 @router.get("/analytics/why-blocked/{operation}")
-async def why_blocked(
+def why_blocked(
     operation: str,
     db: Session = Depends(get_db),
 ):
@@ -1558,7 +1609,7 @@ async def why_blocked(
 # =====================================================================
 
 @router.get("/analytics/trading-effectiveness")
-async def trading_effectiveness(
+def trading_effectiveness(
     mode: str = "demo",
     db: Session = Depends(get_db),
 ):
@@ -1568,7 +1619,7 @@ async def trading_effectiveness(
 
 
 @router.get("/analytics/trading-effectiveness/symbols")
-async def trading_effectiveness_symbols(
+def trading_effectiveness_symbols(
     mode: str = "demo",
     db: Session = Depends(get_db),
 ):
@@ -1578,7 +1629,7 @@ async def trading_effectiveness_symbols(
 
 
 @router.get("/analytics/trading-effectiveness/reasons")
-async def trading_effectiveness_reasons(
+def trading_effectiveness_reasons(
     mode: str = "demo",
     db: Session = Depends(get_db),
 ):
@@ -1588,7 +1639,7 @@ async def trading_effectiveness_reasons(
 
 
 @router.get("/analytics/trading-effectiveness/strategies")
-async def trading_effectiveness_strategies(
+def trading_effectiveness_strategies(
     mode: str = "demo",
     db: Session = Depends(get_db),
 ):
@@ -1598,7 +1649,7 @@ async def trading_effectiveness_strategies(
 
 
 @router.get("/analytics/exit-quality")
-async def get_exit_quality(
+def get_exit_quality(
     mode: str = "demo",
     db: Session = Depends(get_db),
 ):
@@ -1611,7 +1662,7 @@ async def get_exit_quality(
 
 
 @router.get("/analytics/tuning-insights")
-async def tuning_insights_candidates(
+def tuning_insights_candidates(
     mode: str = "demo",
     db: Session = Depends(get_db),
 ):
@@ -1621,7 +1672,7 @@ async def tuning_insights_candidates(
 
 
 @router.get("/analytics/tuning-insights/summary")
-async def tuning_insights_summary(
+def tuning_insights_summary(
     mode: str = "demo",
     db: Session = Depends(get_db),
 ):
@@ -1634,7 +1685,7 @@ async def tuning_insights_summary(
 
 
 @router.get("/analytics/experiment-feed")
-async def experiment_feed(
+def experiment_feed(
     mode: str = "demo",
     db: Session = Depends(get_db),
 ):
@@ -1644,10 +1695,308 @@ async def experiment_feed(
 
 
 @router.get("/analytics/experiment-feed/summary")
-async def experiment_feed_summary_endpoint(
+def experiment_feed_summary_endpoint(
     mode: str = "demo",
     db: Session = Depends(get_db),
 ):
     """Skrót: ile paczek gotowych, ile konfliktów, ile czeka na dane."""
     data = experiment_feed_summary(db, mode=mode)
     return {"success": True, "data": data}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SYSTEM STATUS — stan kolektora, danych, połączeń
+# ─────────────────────────────────────────────────────────────────────────────
+
+@router.get("/system-status")
+def get_system_status(request: Request, db: Session = Depends(get_db)):
+    """
+    Diagnostyka systemu: czy collector działa, kiedy ostatni tick, ile symboli,
+    czy WS aktywny, czy Binance dostępny.
+    """
+    try:
+        collector = getattr(request.app.state, "collector", None)
+
+        collector_running = False
+        ws_running = False
+        watchlist: list = []
+        if collector is not None:
+            collector_running = getattr(collector, "running", False)
+            ws_running = getattr(collector, "ws_running", False)
+            watchlist = getattr(collector, "watchlist", []) or []
+
+        last_md = (
+            db.query(MarketData)
+            .order_by(desc(MarketData.timestamp))
+            .first()
+        )
+        last_tick_ts = last_md.timestamp.isoformat() if last_md else None
+        last_tick_age_s = None
+        data_stale = True
+        if last_md:
+            age = (utc_now_naive() - last_md.timestamp).total_seconds()
+            last_tick_age_s = int(age)
+            data_stale = age > 180
+
+        symbols_with_data = db.query(MarketData.symbol).distinct().count()
+
+        last_snap = (
+            db.query(AccountSnapshot)
+            .filter(AccountSnapshot.mode == "demo")
+            .order_by(desc(AccountSnapshot.timestamp))
+            .first()
+        )
+        last_snapshot_ts = last_snap.timestamp.isoformat() if last_snap else None
+
+        last_error = (
+            db.query(SystemLog)
+            .filter(SystemLog.level == "ERROR")
+            .order_by(desc(SystemLog.timestamp))
+            .first()
+        )
+        last_error_msg = last_error.message[:120] if last_error else None
+        last_error_ts = last_error.timestamp.isoformat() if last_error else None
+
+        return {
+            "success": True,
+            "data": {
+                "collector_running": collector_running,
+                "ws_running": ws_running,
+                "watchlist": watchlist,
+                "watchlist_count": len(watchlist),
+                "symbols_with_data": symbols_with_data,
+                "last_tick_ts": last_tick_ts,
+                "last_tick_age_s": last_tick_age_s,
+                "data_stale": data_stale,
+                "last_snapshot_ts": last_snapshot_ts,
+                "last_error_msg": last_error_msg,
+                "last_error_ts": last_error_ts,
+                "timestamp": utc_now_naive().isoformat(),
+            },
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error getting system status: {str(e)}")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# DEMO RESET — zeruje demo i ustawia nowy kapitał startowy
+# ─────────────────────────────────────────────────────────────────────────────
+
+class DemoResetRequest(BaseModel):
+    starting_balance: float = 500.0
+
+
+@router.post("/demo/reset-balance")
+def reset_demo_balance(
+    request: Request,
+    body: DemoResetRequest,
+    db: Session = Depends(get_db),
+):
+    """
+    Resetuje konto demo: zamyka pozycje demo, usuwa snapshoty i tworzy nowy
+    snapshot startowy z zadanym kapitałem (domyślnie 500 EUR).
+    """
+    try:
+        if body.starting_balance <= 0 or body.starting_balance > 100_000:
+            raise HTTPException(status_code=400, detail="Kapitał startowy musi być między 1 a 100 000 EUR")
+
+        # 1) Usuń pozycje demo
+        demo_positions = db.query(Position).filter(Position.mode == "demo").all()
+        positions_count = len(demo_positions)
+        for pos in demo_positions:
+            db.delete(pos)
+
+        # 2) Usuń WSZYSTKIE zlecenia demo (replay historii dawał stary stan)
+        demo_orders = db.query(Order).filter(Order.mode == "demo").all()
+        orders_count = len(demo_orders)
+        for order in demo_orders:
+            db.query(CostLedger).filter(CostLedger.order_id == order.id).delete()
+        for order in demo_orders:
+            db.delete(order)
+
+        # 3) Usuń oczekujące zlecenia demo
+        db.query(PendingOrder).filter(PendingOrder.mode == "demo").delete()
+
+        # 4) Usuń stare snapshoty demo
+        db.query(AccountSnapshot).filter(AccountSnapshot.mode == "demo").delete()
+
+        # 5) Zapisz nową wartość początkową jako override w DB
+        ib_row = db.query(RuntimeSetting).filter(RuntimeSetting.key == "demo_initial_balance").first()
+        if ib_row is None:
+            db.add(RuntimeSetting(key="demo_initial_balance", value=str(body.starting_balance), updated_at=utc_now_naive()))
+        else:
+            ib_row.value = str(body.starting_balance)
+            ib_row.updated_at = utc_now_naive()
+
+        snap = AccountSnapshot(
+            mode="demo",
+            equity=body.starting_balance,
+            balance=body.starting_balance,
+            free_margin=body.starting_balance,
+            used_margin=0.0,
+            margin_level=100.0,
+            unrealized_pnl=0.0,
+            timestamp=utc_now_naive(),
+        )
+        db.add(snap)
+        db.commit()
+
+        collector = getattr(request.app.state, "collector", None)
+        if collector is not None:
+            try:
+                collector.reset_demo_state()
+            except Exception:
+                pass
+
+        return {
+            "success": True,
+            "message": f"Demo zresetowane. Kapitał startowy: {body.starting_balance} EUR",
+            "starting_balance": body.starting_balance,
+            "positions_closed": positions_count,
+            "orders_deleted": orders_count,
+            "timestamp": utc_now_naive().isoformat(),
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error resetting demo: {str(e)}")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# BOT ACTIVITY — aktywność bota w ostatnich N minutach
+# ─────────────────────────────────────────────────────────────────────────────
+
+_REASON_PL: dict[str, str] = {
+    "all_gates_passed":                   "Wszystkie filtry OK — zlecenie złożone",
+    "pending_confirmed_execution":         "Zlecenie wykonane",
+    "signal_confidence_too_low":           "Pewność sygnału poniżej progu",
+    "signal_filters_not_met":              "Filtry techniczne (EMA/RSI) niezaliczone",
+    "active_pending_exists":               "Mamy otwarte zlecenie dla tego symbolu",
+    "buy_blocked_existing_position":       "Już mamy otwartą pozycję BUY",
+    "symbol_not_in_any_tier":              "Symbol nie jest w żadnym tierze",
+    "hold_mode_no_new_entries":            "Symbol w trybie HOLD — nie otwieramy nowych",
+    "symbol_cooldown_active":              "Cooldown po ostatniej transakcji",
+    "insufficient_cash_or_qty_below_min": "Za mało gotówki lub ilość poniżej minimum",
+    "cost_gate_failed":                    "Koszty transakcji zbyt wysokie vs oczekiwany zysk",
+    "max_open_positions_gate":             "Osiągnięto limit otwartych pozycji",
+    "pending_cooldown_active":             "Aktywny cooldown zlecenia oczekującego",
+    "sell_blocked_no_position":            "Brak pozycji do sprzedaży",
+    "tp_sl_exit_triggered":                "TP/SL osiągnięty — pozycja zamknięta",
+    "min_notional_guard":                  "Wartość zlecenia poniżej minimum giełdowego",
+    "tp_hit":                              "Take Profit osiągnięty — pozycja zamknięta",
+    "sl_hit":                              "Stop Loss osiągnięty — pozycja zamknięta",
+    "trailing_stop_hit":                   "Trailing Stop — pozycja zamknięta",
+    "manual_close":                        "Ręczne zamknięcie pozycji",
+    "partial_close":                       "Częściowe zamknięcie pozycji",
+    "hold_target_reached":                 "Cel portfelowy HOLD osiągnięty",
+    "no_trace":                            "Brak decyzji w tym oknie",
+}
+
+_EXIT_REASON_CODES = {"tp_hit", "sl_hit", "trailing_stop_hit", "manual_close", "partial_close", "hold_target_reached", "tp_sl_exit_triggered"}
+_BUY_REASON_CODES = {"all_gates_passed", "pending_confirmed_execution"}
+
+
+@router.get("/bot-activity")
+def get_bot_activity(
+    mode: str = Query("demo"),
+    minutes: int = Query(15, ge=1, le=120),
+    db: Session = Depends(get_db),
+):
+    """
+    Aktywność bota: ile symboli rozważył, ile odrzucił, ile kupił, ile zamknął
+    w ostatnich N minutach. Zwraca też 3 ostatnie akcje po polsku i otwarte pozycje.
+    """
+    try:
+        since = utc_now_naive() - timedelta(minutes=minutes)
+
+        traces = (
+            db.query(DecisionTrace)
+            .filter(DecisionTrace.mode == mode, DecisionTrace.timestamp >= since)
+            .order_by(desc(DecisionTrace.timestamp))
+            .limit(500)
+            .all()
+        )
+
+        considered = len({t.symbol for t in traces})
+        bought = sum(1 for t in traces if t.reason_code in _BUY_REASON_CODES)
+        closed = sum(1 for t in traces if t.reason_code in _EXIT_REASON_CODES)
+        rejected = len(traces) - bought - closed
+
+        last_actions = []
+        seen_ids: set = set()
+        for t in traces:
+            if t.id in seen_ids:
+                continue
+            seen_ids.add(t.id)
+            desc_pl = _REASON_PL.get(t.reason_code or "", t.reason_code or "—")
+            icon = "✅" if t.reason_code in _BUY_REASON_CODES else ("🔴" if t.reason_code in _EXIT_REASON_CODES else "⏳")
+            last_actions.append({
+                "symbol": t.symbol,
+                "reason_code": t.reason_code,
+                "description": f"{icon} {t.symbol}: {desc_pl}",
+                "action_type": t.action_type,
+                "ts": t.timestamp.isoformat() if t.timestamp else None,
+            })
+            if len(last_actions) >= 3:
+                break
+
+        # Otwarte pozycje z bieżącym kursem
+        positions_raw = (
+            db.query(Position)
+            .filter(Position.mode == mode)
+            .all()
+        )
+        open_positions = []
+        for p in positions_raw:
+            entry = float(p.entry_price or 0)
+            curr = float(p.current_price or entry)
+            qty = float(p.quantity or 0)
+            pnl_eur = float(p.unrealized_pnl or 0)
+            pnl_pct = ((curr - entry) / entry * 100) if entry > 0 else 0.0
+            tp = float(p.planned_tp) if p.planned_tp else None
+            sl = float(p.planned_sl) if p.planned_sl else None
+            if tp and curr >= tp:
+                hold_reason = f"Blisko TP ({tp:.2f})"
+            elif sl and curr <= sl:
+                hold_reason = f"Zagrożony SL ({sl:.2f})"
+            else:
+                hold_reason = f"Trzymamy — TP: {tp:.2f}" if tp else "Brak TP/SL"
+            open_positions.append({
+                "symbol": p.symbol,
+                "side": p.side,
+                "quantity": qty,
+                "entry_price": entry,
+                "current_price": curr,
+                "pnl_eur": round(pnl_eur, 4),
+                "pnl_pct": round(pnl_pct, 3),
+                "planned_tp": tp,
+                "planned_sl": sl,
+                "hold_reason": hold_reason,
+                "opened_at": p.opened_at.isoformat() if p.opened_at else None,
+            })
+
+        # Equity z ostatniego snapshot
+        snap = (
+            db.query(AccountSnapshot)
+            .filter(AccountSnapshot.mode == mode)
+            .order_by(desc(AccountSnapshot.timestamp))
+            .first()
+        )
+        equity = float(snap.equity) if snap else None
+
+        return {
+            "data": {
+                "mode": mode,
+                "window_minutes": minutes,
+                "considered": considered,
+                "rejected": rejected,
+                "bought": bought,
+                "closed": closed,
+                "last_actions": last_actions,
+                "open_positions": open_positions,
+                "equity": equity,
+                "timestamp": utc_now_naive().isoformat(),
+            }
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error getting bot activity: {str(e)}")

@@ -23,13 +23,14 @@ import logging
 import os
 import threading
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List
 
 from backend.database import (
     ConfigPromotion,
     ConfigRollback,
     SessionLocal,
+    utc_now_naive
 )
 from backend.governance import escalate_overdue_incidents, get_operator_queue, get_pipeline_status
 from backend.notification_hooks import dispatch_notification
@@ -59,7 +60,7 @@ def run_worker_cycle() -> Dict[str, Any]:
 
     Zwraca podsumowanie cyklu.
     """
-    cycle_start = datetime.utcnow()
+    cycle_start = utc_now_naive()
     summary: Dict[str, Any] = {
         "cycle_start": cycle_start.isoformat(),
         "steps": {},
@@ -89,7 +90,7 @@ def run_worker_cycle() -> Dict[str, Any]:
     finally:
         db.close()
 
-    cycle_end = datetime.utcnow()
+    cycle_end = utc_now_naive()
     summary["cycle_end"] = cycle_end.isoformat()
     summary["duration_seconds"] = round((cycle_end - cycle_start).total_seconds(), 2)
 

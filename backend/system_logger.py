@@ -2,9 +2,9 @@
 System logger that persists logs into the database.
 """
 from typing import Optional
-from datetime import datetime
+from datetime import datetime, timezone
 
-from backend.database import SessionLocal, SystemLog
+from backend.database import SessionLocal, SystemLog, utc_now_naive
 
 
 def log_to_db(
@@ -26,7 +26,7 @@ def log_to_db(
             module=module,
             message=message,
             exception=exception,
-            timestamp=datetime.utcnow(),
+            timestamp=utc_now_naive(),
         )
         db.add(entry)
         db.commit()

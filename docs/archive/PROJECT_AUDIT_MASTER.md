@@ -1,12 +1,22 @@
 # PROJECT AUDIT MASTER
 
 ## Audit State
-- Current stage: `ETAP Z - CANDIDATE VALIDATION / EXPERIMENT FEED`
-- Current file: `backend/candidate_validation.py`
-- Last completed file: `backend/candidate_validation.py`
-- Next stage: `Experiment auto-creation / operator UI`
-- Audit timestamp: `candidate validation completed, 167 tests green`
-- Pipeline status: **FULL LOOP + GOVERNANCE + NOTIFICATIONS + WORKER + CONSOLE + CORRELATION + TRADING EFFECTIVENESS + TUNING INSIGHTS + CANDIDATE VALIDATION**
+- Current stage: `ETAP C0-fix — PRZYWRÓCENIE RDZENIA BOTA`
+- Last completed stage: `ETAP C0-fix`
+- Next stage: `ETAP C — Symbol Selection`
+- Audit timestamp: `2026-03-26 — collector restored, full pipeline working, 171 tests green`
+- Pipeline status: **FULL LOOP + GOVERNANCE + NOTIFICATIONS + WORKER + CONSOLE + CORRELATION + TRADING EFFECTIVENESS + TUNING INSIGHTS + CANDIDATE VALIDATION + EXIT QUALITY + COLLECTOR RESTORED**
+
+### Stan operacyjny bota (2026-03-26)
+- Binance connectivity: ✅ OK
+- Data fetch: ✅ OK (13 symboli, klines + tickery live)
+- Collector runtime: ✅ OK (run_once() — pełny cykl end-to-end)
+- Signals: ✅ OK (13 świeżych sygnałów)
+- BlogPost/AI ranges: ✅ OK (nowy wpis id=78, range_map dostępny)
+- _demo_trading: ✅ OK (8 decision traces, 2 pending exits, 6 odrzuceń z uzasadnieniem)
+- Schema DB: ✅ NAPRAWIONA (26 tabel, 30 nowych kolumn via _ensure_schema)
+- Retencja danych: ✅ DODANA (_purge_stale_data: market_data >7d, pending >24h)
+- Testy: ✅ 171/171 PASSED
 
 ## Scope
 This document is the single audit state file for the repository. It tracks:
@@ -22,17 +32,26 @@ This document is the single audit state file for the repository. It tracks:
 
 **Stan po ETAP 3:** Warstwa governance (incidents, operator queue, SLA) działa. 86 testów green.
 
-**Stan po ETAP 4 (Pipeline Guard Integration):** Governance faktycznie egzekwuje blokady — `promote_recommendation()`, `execute_rollback()`, `create_experiment()` i `generate_recommendation()` wywołują `enforce_pipeline_permission()` przed jakąkolwiek logiką. Próba wykonania zablokowanej operacji zwraca HTTP 403 z pełnym opisem blokady (`PipelineFreezeError.to_dict()`). 91 testów green, w tym 5 dedykowanych testów guardów.
+**Stan po ETAP 4 (Pipeline Guard Integration):** Governance faktycznie egzekwuje blokady — `promote_recommendation()`, `execute_rollback()`, `create_experiment()` i `generate_recommendation()` wywołują `enforce_pipeline_permission()` przed jakąkolwiek logiką. 91 testów green.
 
-**Pozostałe ryzyka (z pierwszego audytu, częściowo zmitigowane):**
+**Stan po ETAP B (Exit Quality + Telegram):** MFE/MAE tracking na pozycjach, ExitQuality model, exit_quality_report. Telegram rewrite (operator-friendly). 171 testów green.
+
+**Stan po ETAP C0-fix (Przywrócenie rdzenia — 2026-03-26):**
+- Collector stał 28 dni (od 2026-02-26). Dysk 100% pełny. Schemat DB 8 tabel + 30 kolumn za kodem.
+- NAPRAWIONO: schema migration (26 tabel OK), zwolniono 736MB dysku, usunięto zombie MATICUSDT, expired 30 starych pending orders, dodano retencję danych (_purge_stale_data).
+- Collector uruchomiony — pełny pipeline end-to-end: Binance→tickery→klines→signals→BlogPost/ranges→_demo_trading→decision_traces.
+- Bot znów podejmuje decyzje: 2 pending exit orders + 6 odrzuceń z uzasadnieniem. 171 testów green.
+
+**Pozostałe ryzyka:**
 - ~~Trading logic, execution, data collection are coupled inside `backend/collector.py`.~~ Częściowo rozdzielone — central runtime settings, risk.py, accounting.py są wydzielone, ale collector nadal łączy zbyt wiele odpowiedzialności.
 - ~~No unified trade cost model.~~ Istnieje `cost_ledger`, `net_pnl` na zamówieniach, `accounting.py` jako źródło prawdy kosztowej.
 - ~~Demo accounting ignores transaction costs.~~ `compute_demo_account_state(...)` jest teraz cost-aware.
 - Signal endpoints auto-generate demo data — **nadal aktualny problem**.
-- Persistence uses ad hoc schema mutation — **nadal aktualny**, brak migracji.
+- ~~Persistence uses ad hoc schema mutation.~~ Istnieje `_ensure_schema()` z pełnym pokryciem kolumn. Brak Alembic, ale działające migracje.
 - Project structure declared in `README.md` does not match actual repository contents — **nadal aktualny**.
-- Test coverage is only smoke-level — **częściowo poprawiony** (71 testów, ale brak testów trading invariants).
+- Test coverage is only smoke-level — **częściowo poprawiony** (171 testów, ale brak testów trading invariants).
 - ~~Runtime configuration was fragmented.~~ Hardened: central registry + config snapshots + audit trail.
+- ~~Disk space not monitored.~~ Dodano `_purge_stale_data()` — retencja market_data >7d, pending orders >24h.
 
 ## Architecture Snapshot
 Current effective layers:

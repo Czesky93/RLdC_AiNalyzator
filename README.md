@@ -1,104 +1,110 @@
-# RLdC Trading Bot – Ultimate AI
+# RLdC AiNalyzator – Trading Bot v0.7 beta
 
-A comprehensive project for an advanced autonomous trading system integrating Quantum AI, Deep Reinforcement Learning, Blockchain Analysis, and HFT.
+Autonomiczny bot tradingowy na kryptowaluty z FastAPI backendem, Next.js portalem webowym i integracją z Binance + Telegram.
 
-## Overview
+## Przegląd systemu
 
-RLdC Trading Bot combines cutting-edge technologies to create a powerful autonomous trading platform:
+- 📈 **Silnik decyzyjny** – heurystyczny sygnalizator (RSI, EMA, trend, wolumen) bez zależności od OpenAI
+- 🔒 **10-warstwowy system ryzyka** – kill switch, daily drawdown, loss streak, limity ekspozycji
+- 🗄️ **SQLite z pełnym audytem** – każda decyzja logowana w `DecisionTrace` z `reason_code` i filtry diagnostyczne
+- 📊 **Portal webowy** – dark-theme dashboard z trybem DEMO/LIVE, wykresy TradingView, widoki pozycji i sygnałów
+- 🤖 **Telegram bot** – powiadomienia, potwierdzenia transakcji, podgląd statusu systemu
+- 🗂️ **Config Snapshot** – wersjonowanie konfiguracji, porównywanie wydajności między konfiguracjami
 
-- 🤖 **Quantum AI** - Portfolio optimization using quantum algorithms
-- 🧠 **Deep Reinforcement Learning** - Autonomous learning and market adaptation
-- ⛓️ **Blockchain Analysis** - Real-time on-chain analysis for cryptocurrencies
-- ⚡ **High-Frequency Trading** - Microsecond-level transaction execution
-- 📊 **Multi-Asset Support** - Stocks, forex, crypto, commodities, and futures
-- 🛡️ **AI-Powered Risk Management** - Advanced risk management and alerting
+## Struktura projektu
 
-## Project Structure
+```
+backend/          # Serwer FastAPI + silnik tradingowy
+  app.py          # Punkt startowy (API + kolektor)
+  collector.py    # Główna pętla decyzji — REST + WebSocket
+  risk.py         # 10 bram ryzyka w evaluate_risk()
+  database.py     # Modele SQLAlchemy + helpery DB
+  accounting.py   # PnL, koszty, snapshoty ryzyka
+  reporting.py    # Raporty analityczne
+  runtime_settings.py  # Konfiguracja z ENV + RuntimeSetting (hot-reload)
+  routers/        # Endpointy FastAPI
+    account.py    # Portfel, KPI, Stan systemu
+    market.py     # Klines, ticker, scanner, prognoza
+    orders.py     # Historia zleceń, statystyki
+    positions.py  # Otwarte pozycje, analiza
+    signals.py    # Sygnały, execution-trace, szansa rynkowa
+    control.py    # Sterowanie (start/stop kolektora, parametry)
+    portfolio.py  # Wealth, equity, prognozy portfela
+    blog.py       # Blog AI (posty generowane automatycznie)
+    debug.py      # /state-consistency — diagnostyka stanu
+    telegram_intel.py  # Telegram Intelligence — AI analiza wiadomości
+telegram_bot/     # Bot Telegram (powiadomienia + potwierdzenia)
+web_portal/       # Frontend Next.js 16 + Tailwind CSS v4
+tests/            # Testy smoke (181 testów)
+docs/             # Dokumentacja wewnętrzna
+```
 
-- `ai_trading/` - AI Trading Engine with ML/DRL models
-- `quantum_optimization/` - Quantum computing for portfolio optimization
-- `hft_engine/` - High-Frequency Trading engine
-- `blockchain_analysis/` - On-chain analysis for cryptocurrencies
-- `portfolio_management/` - Portfolio management and rebalancing
-- `recommendation_engine/` - AI recommendations and risk alerts
-- `web_portal/` - Web-based user interface
-- `telegram_bot/` - Telegram AI bot for conversational interaction
-- `infrastructure/` - Docker, Kubernetes, CI/CD configuration
-- `tests/` - Global test suite
-
-## Documentation
-
-- [Project Plan](docs/PROJECT_PLAN.md) - Full project architecture and implementation plan
-- [Design System](docs/DESIGN_SYSTEM.md) - Complete design system and UI guidelines
-
-## Design System
-
-The project uses a professional dark-themed design inspired by modern trading terminals:
-
-- **Dark Background**: `#0a1219` with card backgrounds `#111c26`
-- **Teal/Green Accents**: Primary color `#14b8a6` for actions and highlights
-- **Polish Interface**: All UI elements in Polish language
-- **Responsive Layout**: Mobile-first approach with breakpoints
-
-See [Design System Documentation](docs/DESIGN_SYSTEM.md) for complete guidelines.
-
-## Getting Started
-
-### Wymagania
+## Wymagania
 
 - Python 3.11+
 - Node.js 20.9+
+- Konto Binance z kluczami API (read + spot trading)
+- Bot Telegram (opcjonalnie — dla powiadomień)
 
-### Konfiguracja
+## Uruchomienie od zera (Ubuntu)
 
-1. Skopiuj `.env.example` do `.env` i uzupełnij wartości:
-   - `OPENAI_API_KEY` (wymagany - bez OpenAI bot nie startuje)
-   - `BINANCE_API_KEY`, `BINANCE_API_SECRET` (wymagane do portfela i listy symboli)
-   - `TELEGRAM_BOT_TOKEN` i `TELEGRAM_CHAT_ID` (dla bota)
-   - `PORTFOLIO_QUOTES=EUR,USDC` (quote do budowy symboli z portfela)
-   - `TRADING_MODE=demo` (demo lub live)
-
-### Uruchomienie backendu (API + kolektor)
+### 1. Klonowanie i środowisko
 
 ```bash
+git clone <repo-url>
+cd RLdC_AiNalyzator
+
 python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
+```
 
-# Start API (uruchamia kolektor REST + WS w tle)
+### 2. Konfiguracja `.env`
+
+```bash
+cp .env.example .env   # jeśli brak, utwórz ręcznie
+```
+
+Minimalne zmienne środowiskowe:
+
+```env
+BINANCE_API_KEY=...
+BINANCE_API_SECRET=...
+TRADING_MODE=demo            # demo lub live
+PORTFOLIO_QUOTES=EUR,USDC    # quote currencies z portfela Binance
+DEMO_INITIAL_BALANCE=10000   # startowy balans DEMO w EUR
+
+# Opcjonalnie — Telegram
+TELEGRAM_BOT_TOKEN=...
+TELEGRAM_CHAT_ID=...
+
+# Opcjonalnie — OpenAI (blog AI, analizy GPT)
+OPENAI_API_KEY=...
+```
+
+> **Ważne**: Bot działa bez `OPENAI_API_KEY` — sygnały generowane są heurystycznie.
+
+### 3. Start backendu
+
+```bash
+source .venv/bin/activate
 python -m backend.app
 ```
 
-API będzie dostępne pod `http://localhost:8000`
+API dostępne pod `http://localhost:8000`  
+Dokumentacja Swagger: `http://localhost:8000/docs`
 
-### Tryb developerski (hot-reload)
-
-Domyślnie hot-reload jest wyłączony (żeby nie spamować logów `watchfiles` i nie restartować backendu od zmian w DB/logach).
-
+**Tryb dev z hot-reload:**
 ```bash
 python -m backend.app --reload
 ```
 
-### Uruchomienie wszystkiego naraz
-
+**Start wszystkiego naraz (backend + portal):**
 ```bash
 python -m backend.app --all
 ```
 
-Dev (hot-reload backendu):
-
-```bash
-python -m backend.app --all --reload
-```
-
-### Uruchomienie bota Telegram
-
-```bash
-source .venv/bin/activate
-python -m telegram_bot.bot
-```
-
-### Uruchomienie web portalu
+### 4. Portal webowy (oddzielnie)
 
 ```bash
 cd web_portal
@@ -108,15 +114,45 @@ npm run dev
 
 Web UI: `http://localhost:3000`
 
-## Potwierdzanie transakcji (Telegram)
+### 5. Bot Telegram (opcjonalnie)
 
-Każda transakcja wymaga potwierdzenia przez Telegram.
+```bash
+source .venv/bin/activate
+python -m telegram_bot.bot
+```
 
-Komendy:
+## Testy
+
+```bash
+source .venv/bin/activate
+DISABLE_COLLECTOR=true python -m pytest tests/test_smoke.py --tb=short -q
+```
+
+## Potwierdzanie transakcji przez Telegram
+
+Komendy bota:
 - `/confirm <ID>` – potwierdza transakcję
 - `/reject <ID>` – odrzuca transakcję
+- `/status` – bieżący stan systemu
 
-Transakcje DEMO są wykonywane, ale muszą być potwierdzone do walidacji działania.
+## Kluczowe endpointy API
+
+| Endpoint | Opis |
+|----------|------|
+| `GET /api/account/system-status` | Stan kolektora, WS, tryb |
+| `GET /api/portfolio/wealth?mode=demo` | Equity, balans, PnL |
+| `GET /api/signals/latest?limit=50` | Ostatnie sygnały |
+| `GET /api/signals/execution-trace` | Historia decyzji z powodami |
+| `GET /api/market/scanner` | Top 5 par do handlu |
+| `POST /api/control/state` | Zmiana parametrów, start/stop |
+| `GET /api/reporting/analytics` | Pełny raport analityczny |
+
+## Design System
+
+Dark-theme oparty na kolorach terminala tradingowego:
+- Tło: `#0a1219`, karty: `#111c26`
+- Akcent teal: `#14b8a6`
+- Cały UI w języku polskim
 
 ## Reset bazy danych
 

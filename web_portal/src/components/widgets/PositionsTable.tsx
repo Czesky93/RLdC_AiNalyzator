@@ -2,73 +2,64 @@
 
 import { X } from 'lucide-react'
 import { useEffect, useState } from 'react'
-import { API_BASE } from '../../lib/api'
+import { getApiBase } from '../../lib/api'
 
 interface Position {
+  id: number
   symbol: string
   side: 'LONG' | 'SHORT'
   quantity: number
   entry_price: number
   current_price: number
-  pnl: number
+  unrealized_pnl: number
   pnl_percent: number
 }
 
-export default function PositionsTable() {
+export default function PositionsTable({ mode = 'demo' }: { mode?: 'demo' | 'live' }) {
   const [positions, setPositions] = useState<Position[]>([])
   const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
+    let cancelled = false
     const fetchPositions = async () => {
       try {
-        const res = await fetch(`${API_BASE}/api/positions`)
+        const base = getApiBase()
+        const res = await fetch(`${base}/api/positions?mode=${mode}`)
         if (res.ok) {
           const data = await res.json()
-          setPositions(data.positions || [])
+          if (!cancelled) setPositions(data.data || [])
+        } else {
+          if (!cancelled) setError('Błąd pobierania pozycji')
         }
-      } catch (error) {
-        console.error('Błąd pobierania pozycji:', error)
+      } catch (err) {
+        if (!cancelled) setError('Nie udało się pobrać pozycji')
       } finally {
-        setLoading(false)
+        if (!cancelled) setLoading(false)
       }
     }
 
     fetchPositions()
-    const interval = setInterval(fetchPositions, 5000)
-    return () => clearInterval(interval)
-  }, [])
-
-  // Mock data jeśli brak danych z API
-  const displayPositions = positions.length > 0 ? positions : [
-    {
-      symbol: 'BTCLUSDT',
-      side: 'LONG' as const,
-      quantity: 0.500,
-      entry_price: 63287.89,
-      current_price: 63360.00,
-      pnl: 36.06,
-      pnl_percent: 0.11
-    },
-    {
-      symbol: 'ETHUSDT',
-      side: 'SHORT' as const,
-      quantity: 5.0,
-      entry_price: 3128.90,
-      current_price: 3112.45,
-      pnl: 82.25,
-      pnl_percent: 0.53
+    const interval = setInterval(fetchPositions, 10000)
+    return () => {
+      cancelled = true
+      clearInterval(interval)
     }
-  ]
+  }, [mode])
+
+  const displayPositions = positions
 
   return (
     <div className="terminal-card rounded-lg p-4 border border-rldc-dark-border">
       <div className="flex items-center justify-between mb-3">
-        <h2 className="text-sm font-semibold text-slate-200">Open Orders & Positions</h2>
+        <h2 className="text-sm font-semibold text-slate-200">Otwarte Pozycje</h2>
         <div className="flex items-center space-x-2">
           <span className="text-[10px] uppercase tracking-widest text-teal-primary font-medium">
-            {displayPositions.length} positions
+            {displayPositions.length} pozycji
           </span>
-          <div className="text-[10px] uppercase tracking-widest text-slate-500">LIVE</div>
+          <div className={`text-[10px] uppercase tracking-widest font-semibold ${mode === 'live' ? 'text-amber-400' : 'text-slate-500'}`}>
+            {mode === 'live' ? 'LIVE' : 'DEMO'}
+          </div>
         </div>
       </div>
       
@@ -76,14 +67,14 @@ export default function PositionsTable() {
         <table className="w-full font-mono text-[11px]">
           <thead>
             <tr className="border-b border-rldc-dark-border text-left text-[10px] uppercase tracking-widest text-slate-500">
-              <th className="pb-3 font-medium">Number</th>
+              <th className="pb-3 font-medium">#</th>
               <th className="pb-3 font-medium">Symbol</th>
-              <th className="pb-3 font-medium">Side</th>
-              <th className="pb-3 font-medium text-right">Qty</th>
-              <th className="pb-3 font-medium text-right">Entry</th>
-              <th className="pb-3 font-medium text-right">Current</th>
+              <th className="pb-3 font-medium">Strona</th>
+              <th className="pb-3 font-medium text-right">Ilość</th>
+              <th className="pb-3 font-medium text-right">Cena kupna</th>
+              <th className="pb-3 font-medium text-right">Cena teraz</th>
               <th className="pb-3 font-medium text-right">P&L</th>
-              <th className="pb-3 font-medium text-center">Actions</th>
+              <th className="pb-3 font-medium text-center">Akcje</th>
             </tr>
           </thead>
           <tbody>
@@ -101,21 +92,23 @@ export default function PositionsTable() {
               </tr>
             ) : (
               displayPositions.map((position, idx) => {
-                const isPnlPositive = position.pnl >= 0
+                const pnl = position.unrealized_pnl ?? 0
+                const isPnlPositive = pnl >= 0
+                const fmtPrice = (v: number) => v < 1 ? v.toFixed(6) : v < 1000 ? v.toFixed(4) : v.toFixed(2)
                 return (
-                  <tr key={idx} className="table-row">
+                  <tr key={position.id ?? idx} className="table-row">
                     <td className="py-2.5 text-slate-400">{idx + 1}</td>
                     <td className="py-2.5 text-slate-300 font-medium">{position.symbol}</td>
                     <td className="py-2.5">
                       <span className={`badge-${position.side === 'LONG' ? 'success' : 'danger'}`}>
-                        {position.side}
+                        {position.side === 'LONG' ? 'LONG' : 'SHORT'}
                       </span>
                     </td>
                     <td className="py-2.5 text-right text-slate-300">{position.quantity}</td>
-                    <td className="py-2.5 text-right text-slate-400">${position.entry_price.toFixed(2)}</td>
-                    <td className="py-2.5 text-right text-slate-300">${position.current_price.toFixed(2)}</td>
+                    <td className="py-2.5 text-right text-slate-400">{fmtPrice(position.entry_price)} EUR</td>
+                    <td className="py-2.5 text-right text-slate-300">{fmtPrice(position.current_price)} EUR</td>
                     <td className={`py-2.5 text-right font-semibold ${isPnlPositive ? 'text-green-primary' : 'text-red-primary'}`}>
-                      {isPnlPositive ? '+' : ''}${position.pnl.toFixed(2)}
+                      {isPnlPositive ? '+' : ''}{pnl.toFixed(4)} EUR
                       <span className="text-xs ml-1">({isPnlPositive ? '+' : ''}{position.pnl_percent.toFixed(2)}%)</span>
                     </td>
                     <td className="py-2.5 text-center">
@@ -134,20 +127,20 @@ export default function PositionsTable() {
         </table>
       </div>
 
-      {/* Summary Footer */}
+      {/* Podsumowanie */}
       {displayPositions.length > 0 && (
         <div className="mt-4 pt-3 border-t border-rldc-dark-border flex justify-between items-center text-xs">
           <div className="text-slate-400">
-            Total Positions: <span className="text-slate-200 font-medium">{displayPositions.length}</span>
+            Pozycji: <span className="text-slate-200 font-medium">{displayPositions.length}</span>
           </div>
           <div className="text-slate-400">
-            Total P&L: <span className={`font-bold ${
-              displayPositions.reduce((sum, p) => sum + p.pnl, 0) >= 0 
-                ? 'text-green-primary' 
+            Łączny P&L: <span className={`font-bold ${
+              displayPositions.reduce((sum, p) => sum + (p.unrealized_pnl ?? 0), 0) >= 0
+                ? 'text-green-primary'
                 : 'text-red-primary'
             }`}>
-              {displayPositions.reduce((sum, p) => sum + p.pnl, 0) >= 0 ? '+' : ''}
-              ${displayPositions.reduce((sum, p) => sum + p.pnl, 0).toFixed(2)}
+              {displayPositions.reduce((sum, p) => sum + (p.unrealized_pnl ?? 0), 0) >= 0 ? '+' : ''}
+              {displayPositions.reduce((sum, p) => sum + (p.unrealized_pnl ?? 0), 0).toFixed(4)} EUR
             </span>
           </div>
         </div>

@@ -2,7 +2,7 @@
 
 import React, { useEffect, useMemo, useState } from 'react'
 import { Area, AreaChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts'
-import { API_BASE } from '../../lib/api'
+import { getApiBase } from '../../lib/api'
 
 type Point = {
   t: string
@@ -34,7 +34,7 @@ export default function EquityCurve({
       setLoading(true)
       setError(null)
       try {
-        const res = await fetch(`${API_BASE}/api/account/history?mode=${mode}&hours=${hours}`)
+        const res = await fetch(`${getApiBase()}/api/account/history?mode=${mode}&hours=${hours}`)
         if (!res.ok) throw new Error('Błąd pobierania historii')
         const json = await res.json()
         const items = (json.data || []) as any[]

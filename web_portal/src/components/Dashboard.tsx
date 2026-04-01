@@ -1,13 +1,13 @@
 'use client'
 
-import React, { useState } from 'react'
-import Topbar from './Topbar'
-import Sidebar from './Sidebar'
+import { useState } from 'react'
 import MainContent from './MainContent'
+import Sidebar from './Sidebar'
+import Topbar from './Topbar'
 
 export default function Dashboard() {
   const [activeView, setActiveView] = useState('dashboard')
-  const [tradingMode, setTradingMode] = useState<'live' | 'demo' | 'backtest'>('demo')
+  const [tradingMode, setTradingMode] = useState<'live' | 'demo'>('demo')
 
   return (
     <div className="min-h-screen text-slate-100 app-shell">
@@ -20,7 +20,9 @@ export default function Dashboard() {
       <div className="flex">
         <Sidebar 
           activeView={activeView} 
-          setActiveView={setActiveView} 
+          setActiveView={setActiveView}
+          tradingMode={tradingMode}
+          setTradingMode={setTradingMode}
         />
         <MainContent 
           activeView={activeView} 

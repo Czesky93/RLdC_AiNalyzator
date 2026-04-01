@@ -15,12 +15,12 @@ NIE rusza istniejących warstw backendowych.
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 from sqlalchemy.orm import Session
 
-from backend.database import Incident, PolicyAction
+from backend.database import Incident, PolicyAction, utc_now_naive
 from backend.notification_hooks import (
     notify_incident_created,
     notify_incident_escalated,
@@ -228,7 +228,7 @@ def create_incident(
 
     priority = pa.priority or "low"
     sla_mins = SLA_MINUTES.get(priority, 0)
-    now = datetime.utcnow()
+    now = utc_now_naive()
     sla_deadline = (now + timedelta(minutes=sla_mins)) if sla_mins > 0 else None
 
     incident = Incident(
@@ -287,7 +287,7 @@ def transition_incident(
             f"Dozwolone z '{row.status}': {allowed}"
         )
 
-    now = datetime.utcnow()
+    now = utc_now_naive()
     row.status = new_status
 
     if new_status == "acknowledged":
@@ -368,7 +368,7 @@ def get_operator_queue(db: Session) -> List[Dict[str, Any]]:
 
     for inc in active_incidents:
         pa = db.query(PolicyAction).filter(PolicyAction.id == inc.policy_action_id).first()
-        now = datetime.utcnow()
+        now = utc_now_naive()
         sla_remaining = None
         sla_breached = False
         if inc.sla_deadline:
@@ -429,7 +429,7 @@ def escalate_overdue_incidents(db: Session) -> List[Dict[str, Any]]:
     Wywołuj okresowo (np. co 5 min z workera).
     Zwraca listę eskalowanych incydentów.
     """
-    now = datetime.utcnow()
+    now = utc_now_naive()
     overdue = (
         db.query(Incident)
         .filter(

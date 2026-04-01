@@ -1,7 +1,7 @@
 'use client'
 
-import React, { useEffect, useMemo, useState } from 'react'
-import { API_BASE, withAdminToken } from '../../lib/api'
+import { useEffect, useMemo, useState } from 'react'
+import { getApiBase, withAdminToken } from '../../lib/api'
 
 type RangeRow = {
   symbol: string
@@ -90,7 +90,7 @@ export default function DecisionsRiskPanel({
     if (mode !== 'demo') return
     setPendingRefreshing(true)
     try {
-      const res = await fetch(`${API_BASE}/api/orders/pending?mode=demo&status=PENDING&limit=5&include_total=true`)
+      const res = await fetch(`${getApiBase()}/api/orders/pending?mode=${mode}&status=PENDING&limit=5&include_total=true`)
       if (!res.ok) throw new Error('Błąd pobierania pending')
       const json = await res.json()
       setPending((json?.data || []) as PendingRow[])
@@ -110,15 +110,15 @@ export default function DecisionsRiskPanel({
       setError(null)
       try {
         const tasks: Promise<Response>[] = [
-          fetch(`${API_BASE}/api/market/ranges`),
-          fetch(`${API_BASE}/api/account/risk?mode=${mode}`),
+          fetch(`${getApiBase()}/api/market/ranges`),
+          fetch(`${getApiBase()}/api/account/risk?mode=${mode}`),
         ]
         if (mode === 'demo') {
-          tasks.push(fetch(`${API_BASE}/api/control/state`))
-          tasks.push(fetch(`${API_BASE}/api/orders/pending?mode=demo&status=PENDING&limit=5`))
-          tasks.push(fetch(`${API_BASE}/api/orders/pending?mode=demo&status=PENDING&limit=1&include_total=true`))
+          tasks.push(fetch(`${getApiBase()}/api/control/state`))
+          tasks.push(fetch(`${getApiBase()}/api/orders/pending?mode=${mode}&status=PENDING&limit=5`))
+          tasks.push(fetch(`${getApiBase()}/api/orders/pending?mode=${mode}&status=PENDING&limit=1&include_total=true`))
         }
-        tasks.push(fetch(`${API_BASE}/api/market/ticker/${sym}`))
+        tasks.push(fetch(`${getApiBase()}/api/market/ticker/${sym}`))
         const res = await Promise.all(tasks)
         if (res.slice(0, mode === 'demo' ? 5 : 2).some((r) => !r.ok)) throw new Error('Błąd pobierania danych')
 
@@ -190,7 +190,7 @@ export default function DecisionsRiskPanel({
     setPendingAction(`${label} #${id}...`)
     try {
       const headers: Record<string, string> = withAdminToken()
-      const res = await fetch(`${API_BASE}/api/orders/pending/${id}/${action}`, { method: 'POST', headers })
+      const res = await fetch(`${getApiBase()}/api/orders/pending/${id}/${action}`, { method: 'POST', headers })
       if (!res.ok) throw new Error(res.status === 401 ? '401 Unauthorized (ADMIN_TOKEN?)' : 'Błąd akcji')
       setPendingAction('OK')
       // optimistic refresh: remove from list
@@ -208,7 +208,7 @@ export default function DecisionsRiskPanel({
     for (const row of pending) {
       try {
         const headers: Record<string, string> = withAdminToken()
-        const res = await fetch(`${API_BASE}/api/orders/pending/${Number(row.id)}/${action}`, { method: 'POST', headers })
+        const res = await fetch(`${getApiBase()}/api/orders/pending/${Number(row.id)}/${action}`, { method: 'POST', headers })
         if (!res.ok) throw new Error(res.status === 401 ? '401 Unauthorized (ADMIN_TOKEN?)' : 'Błąd akcji')
       } catch (e: any) {
         setPendingAction(String(e?.message || 'Błąd akcji'))
@@ -229,7 +229,7 @@ export default function DecisionsRiskPanel({
         return
       }
       const headers: Record<string, string> = withAdminToken({ 'Content-Type': 'application/json' })
-      const res = await fetch(`${API_BASE}/api/orders/pending?mode=demo`, {
+      const res = await fetch(`${getApiBase()}/api/orders/pending?mode=${mode}`, {
         method: 'POST',
         headers,
         body: JSON.stringify({

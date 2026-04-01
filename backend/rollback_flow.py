@@ -5,12 +5,12 @@ Rollback execution flow using the same runtime apply path as promotions.
 from __future__ import annotations
 
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List
 
 from sqlalchemy.orm import Session
 
-from backend.database import ConfigRollback, get_config_snapshot
+from backend.database import ConfigRollback, get_config_snapshot, utc_now_naive
 from backend.governance import enforce_pipeline_permission
 from backend.promotion_flow import _active_position_count, _current_runtime_snapshot_id, _snapshot_to_updates
 from backend.rollback_decision import get_rollback_decision
@@ -103,7 +103,7 @@ def execute_rollback(
     row.validation_summary_json = _json_text(validation_summary)
     if current_snapshot_id != row.from_snapshot_id:
         row.execution_status = "failed"
-        row.failed_at = datetime.utcnow()
+        row.failed_at = utc_now_naive()
         row.failure_reason = f"ROLLBACK_RUNTIME_DRIFT: active runtime snapshot {current_snapshot_id} does not match expected {row.from_snapshot_id}"
         db.commit()
         db.refresh(row)
@@ -118,7 +118,7 @@ def execute_rollback(
             active_position_count=_active_position_count(db),
         )
         row.execution_status = "executed"
-        row.executed_at = datetime.utcnow()
+        row.executed_at = utc_now_naive()
         row.runtime_apply_result_json = _json_text(
             {
                 **(apply_result or {}),
@@ -134,7 +134,7 @@ def execute_rollback(
         db.rollback()
         row = _get_rollback_row(db, rollback_id)
         row.execution_status = "failed"
-        row.failed_at = datetime.utcnow()
+        row.failed_at = utc_now_naive()
         row.failure_reason = str(exc)
         row.notes = notes or row.notes
         db.commit()

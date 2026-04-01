@@ -12,8 +12,8 @@ from sqlalchemy.orm import Session
 
 from backend.accounting import get_demo_quote_ccy
 from backend.auth import require_admin
-from backend.database import Position, get_db
-from backend.runtime_settings import RuntimeSettingsError, apply_runtime_updates, build_runtime_state
+from backend.database import MarketData, Position, get_db
+from backend.runtime_settings import RuntimeSettingsError, apply_runtime_updates, build_runtime_state, build_symbol_tier_map, get_runtime_config
 
 
 router = APIRouter()
@@ -46,6 +46,7 @@ class ControlStateUpdate(BaseModel):
     ai_enabled: Optional[bool] = None
     market_data_timeout_seconds: Optional[int] = None
     log_level: Optional[str] = None
+    symbol_tiers: Optional[Dict[str, Any]] = None
 
 
 def _active_position_count(db: Session) -> int:
@@ -80,7 +81,7 @@ def _update_payload(update: ControlStateUpdate) -> Dict[str, Any]:
 
 
 @router.get("/state")
-async def get_control_state(request: Request, db: Session = Depends(get_db)):
+def get_control_state(request: Request, db: Session = Depends(get_db)):
     try:
         return {"success": True, "data": _build_response_state(request, db)}
     except RuntimeSettingsError as exc:
@@ -90,7 +91,7 @@ async def get_control_state(request: Request, db: Session = Depends(get_db)):
 
 
 @router.post("/state")
-async def set_control_state(
+def set_control_state(
     request: Request,
     update: ControlStateUpdate,
     db: Session = Depends(get_db),
@@ -116,3 +117,69 @@ async def set_control_state(
         raise
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Error setting control state: {str(exc)}") from exc
+
+
+@router.get("/hold-status")
+def get_hold_status(db: Session = Depends(get_db)):
+    """
+    Zwraca status pozycji HOLD (np. WLFI) — aktualną wartość vs. cel.
+    Używane do wyświetlania paska postępu WLFI w UI.
+    """
+    try:
+        cfg = get_runtime_config(db)
+        tiers_cfg = cfg.get("symbol_tiers") or {}
+        tier_map = build_symbol_tier_map(tiers_cfg)
+
+        hold_symbols = [
+            sym for sym, overrides in tier_map.items()
+            if overrides.get("hold_mode")
+        ]
+
+        items = []
+        for sym in hold_symbols:
+            overrides = tier_map[sym]
+            target_eur = float(overrides.get("target_value_eur") or 0)
+
+            # szukamy aktualnej ceny z MarketData
+            from sqlalchemy import desc as _desc
+            md = (
+                db.query(MarketData)
+                .filter(MarketData.symbol == sym)
+                .order_by(_desc(MarketData.timestamp))
+                .first()
+            )
+            current_price = float(md.price) if md and md.price else None
+
+            # szukamy pozycji w DB (demo lub live)
+            pos = (
+                db.query(Position)
+                .filter(Position.symbol == sym)
+                .order_by(_desc(Position.opened_at))
+                .first()
+            )
+            quantity = float(pos.quantity) if pos and pos.quantity else None
+            if current_price and quantity:
+                position_value = round(current_price * quantity, 2)
+            elif pos and pos.current_price and quantity:
+                position_value = round(float(pos.current_price) * quantity, 2)
+            else:
+                position_value = None
+
+            progress_pct = None
+            if position_value is not None and target_eur > 0:
+                progress_pct = round(min(100.0, position_value / target_eur * 100), 1)
+
+            items.append({
+                "symbol": sym,
+                "quantity": quantity,
+                "current_price": current_price,
+                "position_value": position_value,
+                "target_eur": target_eur,
+                "progress_pct": progress_pct,
+                "reached": (position_value or 0) >= target_eur if target_eur > 0 else False,
+            })
+
+        return {"success": True, "data": items}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Error getting hold status: {str(exc)}") from exc
+

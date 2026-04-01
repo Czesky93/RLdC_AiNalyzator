@@ -6,12 +6,12 @@ from __future__ import annotations
 
 import json
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List
 
 from sqlalchemy.orm import Session
 
-from backend.database import ConfigRollback, RollbackMonitoring
+from backend.database import ConfigRollback, RollbackMonitoring, utc_now_naive
 from backend.experiments import snapshot_performance_report
 
 
@@ -87,7 +87,7 @@ def initialize_post_rollback_monitoring(db: Session, rollback_id: int, notes: st
     existing = db.query(RollbackMonitoring).filter(RollbackMonitoring.rollback_id == rollback_id).first()
     if existing is not None:
         return get_post_rollback_monitoring_record(db, int(existing.id))
-    start_at = rollback.executed_at or rollback.initiated_at or datetime.utcnow()
+    start_at = rollback.executed_at or rollback.initiated_at or utc_now_naive()
     row = RollbackMonitoring(
         rollback_id=rollback_id,
         promotion_id=rollback.promotion_id,
@@ -123,7 +123,7 @@ def evaluate_post_rollback_monitoring(db: Session, rollback_id: int, notes: str 
     mode = str(state.get("trading_mode") or "demo")
 
     pre_start = rollback.initiated_at
-    pre_end = rollback.executed_at or rollback.initiated_at or datetime.utcnow()
+    pre_end = rollback.executed_at or rollback.initiated_at or utc_now_naive()
     pre_summary = snapshot_performance_report(
         db,
         snapshot_id=rollback.from_snapshot_id,
@@ -132,8 +132,8 @@ def evaluate_post_rollback_monitoring(db: Session, rollback_id: int, notes: str 
         end_at=pre_end,
     )
 
-    start_at = record.evaluation_window_start or rollback.executed_at or rollback.initiated_at or datetime.utcnow()
-    now = datetime.utcnow()
+    start_at = record.evaluation_window_start or rollback.executed_at or rollback.initiated_at or utc_now_naive()
+    now = utc_now_naive()
     observed = snapshot_performance_report(
         db,
         snapshot_id=_post_apply_snapshot_id(rollback),

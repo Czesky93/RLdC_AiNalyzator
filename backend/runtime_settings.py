@@ -7,7 +7,7 @@ DB overrides remain optional: if a key is not present in DB, the system falls ba
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 import hashlib
 import json
 import os
@@ -15,7 +15,7 @@ from typing import Any, Callable, Dict, Iterable, Mapping, Optional
 
 from sqlalchemy.orm import Session
 
-from backend.database import RuntimeSetting, get_config_snapshot, save_config_snapshot
+from backend.database import RuntimeSetting, get_config_snapshot, save_config_snapshot, utc_now_naive
 from backend.system_logger import log_to_db
 
 
@@ -103,6 +103,42 @@ def _parse_mode(raw: Any) -> str:
     if value not in {"paper", "demo", "live"}:
         raise RuntimeSettingsError("trading_mode must be one of: paper, demo, live")
     return value
+
+
+def _parse_aggressiveness(raw: Any) -> str:
+    value = str(raw or "balanced").strip().lower()
+    if value not in {"safe", "balanced", "aggressive"}:
+        raise RuntimeSettingsError("trading_aggressiveness must be one of: safe, balanced, aggressive")
+    return value
+
+
+# Profile agresywności — nadpisują domyślne progi w collectorze
+AGGRESSIVENESS_PROFILES = {
+    "safe": {
+        "max_open_positions": 2,
+        "demo_min_signal_confidence": 0.70,
+        "demo_min_entry_score": 7.0,
+        "pending_order_cooldown_seconds": 900,
+        "risk_per_trade": 0.005,
+        "demo_allow_soft_buy_entries": False,
+    },
+    "balanced": {
+        "max_open_positions": 3,
+        "demo_min_signal_confidence": 0.55,
+        "demo_min_entry_score": 5.5,
+        "pending_order_cooldown_seconds": 300,
+        "risk_per_trade": 0.01,
+        "demo_allow_soft_buy_entries": True,
+    },
+    "aggressive": {
+        "max_open_positions": 5,
+        "demo_min_signal_confidence": 0.50,
+        "demo_min_entry_score": 4.5,
+        "pending_order_cooldown_seconds": 300,
+        "risk_per_trade": 0.02,
+        "demo_allow_soft_buy_entries": True,
+    },
+}
 
 
 def _parse_text(raw: Any) -> str:
@@ -210,6 +246,14 @@ _SETTINGS: Dict[str, SettingSpec] = {
         default=True,
         env_var="DEMO_TRADING_ENABLED",
     ),
+    "trading_aggressiveness": SettingSpec(
+        key="trading_aggressiveness",
+        section="mode",
+        parser=_parse_aggressiveness,
+        serializer=_serialize_text,
+        default="balanced",
+        env_var="TRADING_AGGRESSIVENESS",
+    ),
     "ws_enabled": SettingSpec(
         key="ws_enabled",
         section="data",
@@ -249,7 +293,7 @@ _SETTINGS: Dict[str, SettingSpec] = {
         section="trading",
         parser=_parse_positive_int,
         serializer=_serialize_int,
-        default=3,
+        default=5,
         env_var="MAX_OPEN_POSITIONS",
         validators=(_validate_positive("max_open_positions"),),
     ),
@@ -303,7 +347,7 @@ _SETTINGS: Dict[str, SettingSpec] = {
         section="risk",
         parser=_parse_positive_int,
         serializer=_serialize_int,
-        default=60,
+        default=15,  # DEMO: 15 min zamiast 60 — bot nie stoi godzinami
         env_var="COOLDOWN_AFTER_LOSS_STREAK_MINUTES",
         validators=(_validate_positive("cooldown_after_loss_streak_minutes"),),
     ),
@@ -485,7 +529,7 @@ _SETTINGS: Dict[str, SettingSpec] = {
         section="execution",
         parser=_parse_positive_float,
         serializer=_serialize_float,
-        default=0.75,
+        default=0.55,  # DEMO jest agresywny — obniżone z 0.75
         env_var="DEMO_MIN_SIGNAL_CONFIDENCE",
         validators=(_validate_probability("demo_min_signal_confidence"),),
     ),
@@ -531,9 +575,43 @@ _SETTINGS: Dict[str, SettingSpec] = {
         section="execution",
         parser=_parse_positive_int,
         serializer=_serialize_int,
-        default=3600,
+        default=300,  # 5 min — obniżone z 3600; dla DEMO szybka rotacja
         env_var="PENDING_ORDER_COOLDOWN_SECONDS",
         validators=(_validate_positive("pending_order_cooldown_seconds"),),
+    ),
+    # --- DEMO-specific controls ---
+    "demo_require_manual_confirm": SettingSpec(
+        key="demo_require_manual_confirm",
+        section="execution",
+        parser=_parse_required_bool,
+        serializer=_serialize_bool,
+        default=False,  # False = auto-execute; True = wymaga /confirm w Telegramie
+        env_var="DEMO_REQUIRE_MANUAL_CONFIRM",
+    ),
+    "demo_allow_soft_buy_entries": SettingSpec(
+        key="demo_allow_soft_buy_entries",
+        section="execution",
+        parser=_parse_required_bool,
+        serializer=_serialize_bool,
+        default=True,  # ROZWAŻ_ZAKUP traktuje jak akcjonalny kandydat
+        env_var="DEMO_ALLOW_SOFT_BUY_ENTRIES",
+    ),
+    "demo_use_heuristic_ranges_fallback": SettingSpec(
+        key="demo_use_heuristic_ranges_fallback",
+        section="execution",
+        parser=_parse_required_bool,
+        serializer=_serialize_bool,
+        default=True,  # gdy brak AI ranges, użyj ATR-based heurystyki
+        env_var="DEMO_USE_HEURISTIC_RANGES_FALLBACK",
+    ),
+    "demo_min_entry_score": SettingSpec(
+        key="demo_min_entry_score",
+        section="execution",
+        parser=_parse_positive_float,
+        serializer=_serialize_float,
+        default=5.5,
+        env_var="DEMO_MIN_ENTRY_SCORE",
+        validators=(_validate_positive("demo_min_entry_score"),),
     ),
     "max_ai_insights_age_seconds": SettingSpec(
         key="max_ai_insights_age_seconds",
@@ -596,7 +674,69 @@ _SETTINGS: Dict[str, SettingSpec] = {
         default="INFO",
         env_var="LOG_LEVEL",
     ),
+    # --- Symbol tiers: konfiguracja per-tier overrides ---
+    "symbol_tiers": SettingSpec(
+        key="symbol_tiers",
+        section="trading",
+        parser=lambda raw: json.loads(raw) if isinstance(raw, str) else (raw if isinstance(raw, dict) else {}),
+        serializer=lambda v: json.dumps(v, ensure_ascii=False) if isinstance(v, dict) else str(v or "{}"),
+        default={
+            "CORE": {
+                "symbols": ["BTCEUR", "BTCUSDC", "ETHEUR", "ETHUSDC", "SOLEUR", "SOLUSDC", "BNBEUR", "BNBUSDC"],
+                "min_confidence_add": 0.0,
+                "min_edge_multiplier_add": 0.0,
+                "risk_scale": 1.0,
+                "max_trades_per_day_per_symbol": 10,
+            },
+            "ALTCOIN": {
+                "symbols": ["ETCUSDC", "SHIBEUR", "SHIBUSDC", "SXTUSDC"],
+                "min_confidence_add": 0.05,
+                "min_edge_multiplier_add": 0.5,
+                "risk_scale": 0.7,
+                "max_trades_per_day_per_symbol": 3,
+            },
+            "SPECULATIVE": {
+                "symbols": ["WLFIEUR", "WLFIUSDC"],
+                "min_confidence_add": 0.10,
+                "min_edge_multiplier_add": 1.0,
+                "risk_scale": 0.3,
+                "max_trades_per_day_per_symbol": 2,
+            },
+        },
+        env_var="SYMBOL_TIERS",
+        clearable=True,
+    ),
 }
+
+
+# --- Tier helpers --------------------------------------------------------
+
+_TIER_DEFAULTS = {
+    "min_confidence_add": 0.0,
+    "min_edge_multiplier_add": 0.0,
+    "risk_scale": 1.0,
+    "max_trades_per_day_per_symbol": 2,
+}
+
+
+def build_symbol_tier_map(tiers_config: dict) -> Dict[str, dict]:
+    """Zbuduj lookup: symbol → tier overrides z konfiguracji tierów."""
+    result: Dict[str, dict] = {}
+    _HOLD_KEYS = ("hold_mode", "no_auto_exit", "no_new_entries", "target_value_eur")
+    for tier_name, tier_data in (tiers_config or {}).items():
+        if not isinstance(tier_data, dict):
+            continue
+        symbols = tier_data.get("symbols", [])
+        overrides = {k: tier_data.get(k, v) for k, v in _TIER_DEFAULTS.items()}
+        overrides["tier"] = tier_name
+        for hk in _HOLD_KEYS:
+            if hk in tier_data:
+                overrides[hk] = tier_data[hk]
+        for sym in symbols:
+            sym_norm = str(sym).strip().upper().replace("/", "").replace("-", "")
+            if sym_norm:
+                result[sym_norm] = overrides
+    return result
 
 
 def get_overrides(db: Session, keys: Iterable[str]) -> Dict[str, str]:
@@ -782,7 +922,7 @@ def upsert_overrides(db: Session, updates: Dict[str, Optional[str]]) -> None:
         rows = db.query(RuntimeSetting).filter(RuntimeSetting.key.in_(keys)).all()
         existing = {r.key: r for r in rows if r and r.key}
 
-    now = datetime.utcnow()
+    now = utc_now_naive()
     for key, value in updates.items():
         if not key:
             continue
@@ -854,7 +994,8 @@ def build_runtime_state(
         "config_snapshot": snapshot,
         "live_ready": len(live_guard_issues) == 0,
         "live_guard_issues": live_guard_issues,
-        "updated_at": datetime.utcnow().isoformat(),
+        "symbol_tiers": effective.get("symbol_tiers"),
+        "updated_at": utc_now_naive().isoformat(),
     }
 
 
@@ -873,7 +1014,8 @@ def get_live_guard_issues(config: Mapping[str, Any], active_position_count: int 
         if active_position_count > 0 and not config["kill_switch_enabled"]:
             issues.append("Open positions require kill_switch_enabled=true in live mode")
     if config["allow_live_trading"] and config["trading_mode"] != "live":
-        issues.append("allow_live_trading=true is only valid when trading_mode=live")
+        # Dual mode — demo + live mogą działać równolegle
+        pass
     return issues
 
 
@@ -951,7 +1093,7 @@ def apply_runtime_updates(
             "section": _SETTINGS[key].section,
             "old_value": before.get(key),
             "new_value": after.get(key),
-            "changed_at": datetime.utcnow().isoformat(),
+            "changed_at": utc_now_naive().isoformat(),
             "changed_by": actor,
         }
         audit_trail.append(entry)

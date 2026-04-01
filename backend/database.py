@@ -1,23 +1,56 @@
 """
 Database models and configuration for RLdC Trading Bot.
 """
+import logging
+
 from sqlalchemy import create_engine, Column, Integer, Float, String, DateTime, Boolean, Text, inspect, text
 from sqlalchemy.orm import declarative_base, sessionmaker
-from datetime import datetime
+from datetime import datetime, timezone
 import json
 import os
+
+logger = logging.getLogger(__name__)
 from dotenv import load_dotenv
+
+
+def utc_now_naive() -> datetime:
+    """
+    Zwraca aktualny czas UTC jako naive datetime (bez tzinfo).
+
+    Projekt używa UTC, ale SQLite przechowuje daty jako naive strings.
+    NIE wolno mieszać aware i naive w filtrach SQLAlchemy — to powoduje
+    ciche błędy (puste wyniki zapytań).
+    Używaj tej funkcji wszędzie tam, gdzie czas jest porównywany z kolumnami DB.
+    """
+    return datetime.now(timezone.utc).replace(tzinfo=None)
 
 _ENV_PATH = os.path.join(os.path.dirname(__file__), "..", ".env")
 load_dotenv(dotenv_path=_ENV_PATH, override=False)
 
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./trading_bot.db")
 
+_sqlite_connect_args: dict = {}
+if "sqlite" in DATABASE_URL:
+    _sqlite_connect_args = {"check_same_thread": False, "timeout": 30}
+
 engine = create_engine(
     DATABASE_URL,
-    connect_args={"check_same_thread": False} if "sqlite" in DATABASE_URL else {},
-    echo=False
+    connect_args=_sqlite_connect_args,
+    echo=False,
+    pool_pre_ping=True,
 )
+
+# WAL mode — pozwala na równoczesny odczyt i zapis (SQLite)
+if "sqlite" in DATABASE_URL:
+    from sqlalchemy import event as _sa_event
+
+    @_sa_event.listens_for(engine, "connect")
+    def _set_sqlite_pragma(dbapi_conn, connection_record):
+        cursor = dbapi_conn.cursor()
+        cursor.execute("PRAGMA journal_mode=WAL")
+        cursor.execute("PRAGMA busy_timeout=30000")
+        cursor.execute("PRAGMA synchronous=NORMAL")
+        cursor.close()
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
@@ -34,7 +67,7 @@ class MarketData(Base):
     volume = Column(Float)
     bid = Column(Float)
     ask = Column(Float)
-    timestamp = Column(DateTime, default=datetime.utcnow, index=True)
+    timestamp = Column(DateTime, default=utc_now_naive, index=True)
 
 
 class Kline(Base):
@@ -68,7 +101,7 @@ class Signal(Base):
     price = Column(Float, nullable=False)
     indicators = Column(Text)  # JSON z wskaźnikami
     reason = Column(Text)  # Uzasadnienie po polsku
-    timestamp = Column(DateTime, default=datetime.utcnow, index=True)
+    timestamp = Column(DateTime, default=utc_now_naive, index=True)
 
 
 class Order(Base):
@@ -96,7 +129,7 @@ class Order(Base):
     config_snapshot_id = Column(String(64), index=True)
     entry_reason_code = Column(String(80))
     exit_reason_code = Column(String(80))
-    timestamp = Column(DateTime, default=datetime.utcnow, index=True)
+    timestamp = Column(DateTime, default=utc_now_naive, index=True)
 
 
 class Position(Base):
@@ -122,8 +155,8 @@ class Position(Base):
     entry_reason_code = Column(String(80))
     exit_reason_code = Column(String(80))
     mode = Column(String(10), nullable=False)  # demo, live
-    opened_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    opened_at = Column(DateTime, default=utc_now_naive)
+    updated_at = Column(DateTime, default=utc_now_naive, onupdate=utc_now_naive)
     # Exit quality tracking (MFE/MAE)
     planned_tp = Column(Float)       # TP ustawiony przy wejściu
     planned_sl = Column(Float)       # SL ustawiony przy wejściu
@@ -131,6 +164,12 @@ class Position(Base):
     mae_price = Column(Float)        # Maximum Adverse Excursion — najgorsza cena od wejścia
     mfe_pnl = Column(Float)          # PnL w momencie MFE
     mae_pnl = Column(Float)          # PnL w momencie MAE
+    # Exit engine — warstwowe zarządzanie wyjściem
+    highest_price_seen = Column(Float)           # max cena od wejścia (na bieżąco)
+    trailing_active = Column(Boolean, default=False)  # czy trailing stop jest aktywny
+    trailing_stop_price = Column(Float)          # aktualny poziom trailing stop
+    partial_take_count = Column(Integer, default=0)   # ile razy już było częściowe zamknięcie
+    exit_plan_json = Column(Text)                # JSON z planem wyjścia
 
 
 class ExitQuality(Base):
@@ -164,7 +203,7 @@ class ExitQuality(Base):
     duration_seconds = Column(Float)  # czas trwania pozycji
     config_snapshot_id = Column(String(64), index=True)
     exit_reason_code = Column(String(80))
-    closed_at = Column(DateTime, default=datetime.utcnow, index=True)
+    closed_at = Column(DateTime, default=utc_now_naive, index=True)
 
 
 class AccountSnapshot(Base):
@@ -179,7 +218,7 @@ class AccountSnapshot(Base):
     margin_level = Column(Float)  # (equity / used_margin) * 100
     balance = Column(Float, nullable=False)
     unrealized_pnl = Column(Float)
-    timestamp = Column(DateTime, default=datetime.utcnow, index=True)
+    timestamp = Column(DateTime, default=utc_now_naive, index=True)
 
 
 class Alert(Base):
@@ -193,7 +232,7 @@ class Alert(Base):
     message = Column(Text, nullable=False)
     symbol = Column(String(20))
     is_sent = Column(Boolean, default=False)
-    timestamp = Column(DateTime, default=datetime.utcnow, index=True)
+    timestamp = Column(DateTime, default=utc_now_naive, index=True)
 
 
 class SystemLog(Base):
@@ -205,7 +244,7 @@ class SystemLog(Base):
     module = Column(String(50), nullable=False)
     message = Column(Text, nullable=False)
     exception = Column(Text)
-    timestamp = Column(DateTime, default=datetime.utcnow, index=True)
+    timestamp = Column(DateTime, default=utc_now_naive, index=True)
 
 
 class BlogPost(Base):
@@ -219,21 +258,33 @@ class BlogPost(Base):
     market_insights = Column(Text)  # JSON z insights
     status = Column(String(20), default="draft")  # draft, published
     published_at = Column(DateTime)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=utc_now_naive)
 
 
 class TelegramMessage(Base):
-    """Historia wiadomości Telegram"""
+    """Historia wiadomości Telegram — z klasyfikacją i parserem (Telegram Intelligence Layer)"""
     __tablename__ = "telegram_messages"
-    
+
     id = Column(Integer, primary_key=True, index=True)
     chat_id = Column(String(50), nullable=False)
-    message_type = Column(String(50), nullable=False)  # COMMAND, ALERT
+    message_type = Column(String(50), nullable=False)  # command | alert | signal | execution | status | error
     command = Column(String(50))
     message = Column(Text, nullable=False)
     is_sent = Column(Boolean, default=False)
     error = Column(Text)
-    timestamp = Column(DateTime, default=datetime.utcnow, index=True)
+    timestamp = Column(DateTime, default=utc_now_naive, index=True)
+    # Telegram Intelligence Layer — pola klasyfikacji
+    direction = Column(String(20))          # incoming | outgoing | internal
+    msg_category = Column(String(40))       # SIGNAL_MESSAGE | EXECUTION_MESSAGE | BLOCKER_MESSAGE | ...
+    severity = Column(String(20))           # info | warning | critical
+    source_module = Column(String(50))      # collector | telegram_bot | risk | orders | control | ui
+    parsed_symbol = Column(String(20))
+    parsed_side = Column(String(10))
+    parsed_confidence = Column(Float)
+    action_required = Column(Boolean, default=False)
+    parsed_payload_json = Column(Text)      # JSON z wyciągniętymi danymi
+    linked_order_id = Column(Integer)
+    linked_position_id = Column(Integer)
 
 
 class PendingOrder(Base):
@@ -251,7 +302,7 @@ class PendingOrder(Base):
     reason = Column(Text)
     config_snapshot_id = Column(String(64), index=True)
     strategy_name = Column(String(80))
-    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+    created_at = Column(DateTime, default=utc_now_naive, index=True)
     confirmed_at = Column(DateTime)
 
 
@@ -263,7 +314,7 @@ class RuntimeSetting(Base):
     id = Column(Integer, primary_key=True, index=True)
     key = Column(String(50), unique=True, index=True, nullable=False)
     value = Column(Text)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, index=True)
+    updated_at = Column(DateTime, default=utc_now_naive, onupdate=utc_now_naive, index=True)
 
 
 class ConfigSnapshot(Base):
@@ -272,7 +323,7 @@ class ConfigSnapshot(Base):
     __tablename__ = "config_snapshots"
 
     id = Column(String(64), primary_key=True, index=True)
-    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+    created_at = Column(DateTime, default=utc_now_naive, index=True)
     config_hash = Column(String(128), index=True, nullable=False)
     payload_json = Column(Text, nullable=False)
     source = Column(String(40), nullable=False, default="runtime_state")
@@ -299,7 +350,7 @@ class Experiment(Base):
     strategy_name = Column(String(80), index=True)
     start_at = Column(DateTime)
     end_at = Column(DateTime)
-    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+    created_at = Column(DateTime, default=utc_now_naive, index=True)
     started_at = Column(DateTime)
     ended_at = Column(DateTime)
     notes = Column(Text)
@@ -318,7 +369,7 @@ class ExperimentResult(Base):
     breakdown_json = Column(Text)
     verdict = Column(String(20))
     reason_codes_json = Column(Text)
-    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+    created_at = Column(DateTime, default=utc_now_naive, index=True)
 
 
 class Recommendation(Base):
@@ -338,7 +389,7 @@ class Recommendation(Base):
     net_effect_summary_json = Column(Text)
     risk_effect_summary_json = Column(Text)
     status = Column(String(20), nullable=False, default="open", index=True)
-    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+    created_at = Column(DateTime, default=utc_now_naive, index=True)
     notes = Column(Text)
 
 
@@ -350,7 +401,7 @@ class RecommendationReview(Base):
     id = Column(Integer, primary_key=True, index=True)
     recommendation_id = Column(Integer, nullable=False, index=True)
     review_status = Column(String(20), nullable=False, index=True)
-    reviewed_at = Column(DateTime, default=datetime.utcnow, index=True)
+    reviewed_at = Column(DateTime, default=utc_now_naive, index=True)
     reviewed_by = Column(String(120), nullable=False)
     decision_reason = Column(String(120))
     notes = Column(Text)
@@ -370,7 +421,7 @@ class ConfigPromotion(Base):
     from_snapshot_id = Column(String(64), nullable=False, index=True)
     to_snapshot_id = Column(String(64), nullable=False, index=True)
     status = Column(String(20), nullable=False, default="pending", index=True)
-    initiated_at = Column(DateTime, default=datetime.utcnow, index=True)
+    initiated_at = Column(DateTime, default=utc_now_naive, index=True)
     applied_at = Column(DateTime)
     failed_at = Column(DateTime)
     initiated_by = Column(String(120), nullable=False)
@@ -393,7 +444,7 @@ class PromotionMonitoring(Base):
     from_snapshot_id = Column(String(64), nullable=False, index=True)
     to_snapshot_id = Column(String(64), nullable=False, index=True)
     status = Column(String(24), nullable=False, default="pending", index=True)
-    started_at = Column(DateTime, default=datetime.utcnow, index=True)
+    started_at = Column(DateTime, default=utc_now_naive, index=True)
     last_evaluated_at = Column(DateTime)
     evaluation_window_start = Column(DateTime)
     evaluation_window_end = Column(DateTime)
@@ -423,7 +474,7 @@ class ConfigRollback(Base):
     from_snapshot_id = Column(String(64), nullable=False, index=True)
     to_snapshot_id = Column(String(64), nullable=False, index=True)
     rollback_snapshot_id = Column(String(64), index=True)
-    initiated_at = Column(DateTime, default=datetime.utcnow, index=True)
+    initiated_at = Column(DateTime, default=utc_now_naive, index=True)
     executed_at = Column(DateTime)
     failed_at = Column(DateTime)
     initiated_by = Column(String(120))
@@ -447,7 +498,7 @@ class RollbackMonitoring(Base):
     from_snapshot_id = Column(String(64), nullable=False, index=True)
     to_snapshot_id = Column(String(64), nullable=False, index=True)
     status = Column(String(24), nullable=False, default="pending", index=True)
-    started_at = Column(DateTime, default=datetime.utcnow, index=True)
+    started_at = Column(DateTime, default=utc_now_naive, index=True)
     last_evaluated_at = Column(DateTime)
     evaluation_window_start = Column(DateTime)
     evaluation_window_end = Column(DateTime)
@@ -480,7 +531,7 @@ class PolicyAction(Base):
     summary = Column(Text, nullable=False)
     reason_codes_json = Column(Text)
     status = Column(String(20), nullable=False, default="open", index=True)
-    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+    created_at = Column(DateTime, default=utc_now_naive, index=True)
     resolved_at = Column(DateTime)
     superseded_by = Column(Integer, index=True)
     notes = Column(Text)
@@ -502,7 +553,7 @@ class Incident(Base):
     resolved_by = Column(String(80))
     resolution_notes = Column(Text)
     sla_deadline = Column(DateTime)
-    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+    created_at = Column(DateTime, default=utc_now_naive, index=True)
 
 
 class DecisionTrace(Base):
@@ -511,7 +562,7 @@ class DecisionTrace(Base):
     __tablename__ = "decision_traces"
 
     id = Column(Integer, primary_key=True, index=True)
-    timestamp = Column(DateTime, default=datetime.utcnow, index=True)
+    timestamp = Column(DateTime, default=utc_now_naive, index=True)
     symbol = Column(String(20), index=True, nullable=False)
     timeframe = Column(String(10))
     mode = Column(String(10), nullable=False)
@@ -528,6 +579,27 @@ class DecisionTrace(Base):
     payload = Column(Text)
 
 
+class ForecastRecord(Base):
+    """Zapis prognozy ceny — do śledzenia trafności AI."""
+
+    __tablename__ = "forecast_records"
+
+    id = Column(Integer, primary_key=True, index=True)
+    symbol = Column(String(20), index=True, nullable=False)
+    horizon = Column(String(10), nullable=False)          # "1h", "4h", "24h"
+    forecast_ts = Column(DateTime, default=utc_now_naive, index=True)
+    forecast_price = Column(Float, nullable=False)        # przewidywana cena
+    current_price_at_forecast = Column(Float, nullable=False)
+    projected_pct = Column(Float)
+    direction = Column(String(20))                        # WZROST / SPADEK / BOCZNY
+    target_ts = Column(DateTime, index=True)              # kiedy sprawdzić
+    actual_price = Column(Float, nullable=True)
+    error_pct = Column(Float, nullable=True)              # abs((actual-forecast)/forecast)*100
+    correct_direction = Column(Boolean, nullable=True)    # czy kierunek był trafny
+    checked = Column(Boolean, default=False, index=True)
+    created_at = Column(DateTime, default=utc_now_naive)
+
+
 class CostLedger(Base):
     """Breakdown of expected and actual costs per order/position."""
 
@@ -537,7 +609,7 @@ class CostLedger(Base):
     order_id = Column(Integer, index=True)
     position_id = Column(Integer, index=True)
     symbol = Column(String(20), index=True, nullable=False)
-    timestamp = Column(DateTime, default=datetime.utcnow, index=True)
+    timestamp = Column(DateTime, default=utc_now_naive, index=True)
     cost_type = Column(String(40), nullable=False)
     expected_value = Column(Float)
     actual_value = Column(Float)
@@ -548,12 +620,100 @@ class CostLedger(Base):
     notes = Column(Text)
 
 
+class UserExpectation(Base):
+    """Oczekiwania użytkownika wobec symbolu lub całego portfela."""
+
+    __tablename__ = "user_expectations"
+
+    id = Column(Integer, primary_key=True, index=True)
+    symbol = Column(String(20), index=True, nullable=True)      # None = dotyczy całego portfela
+    mode = Column(String(10), nullable=False, default="demo", index=True)
+
+    # Typy celu: "target_value_eur", "target_price", "target_profit_pct",
+    #            "no_buy", "no_sell", "profile_mode"
+    expectation_type = Column(String(40), nullable=False)
+
+    # Cele ilościowe
+    target_value_eur = Column(Float, nullable=True)      # cel wartości pozycji w EUR
+    target_price = Column(Float, nullable=True)           # cel ceny symbolu
+    target_profit_pct = Column(Float, nullable=True)      # cel zysku procentowego
+
+    # Zakazy i reguły ochronne
+    no_buy = Column(Boolean, default=False)
+    no_sell = Column(Boolean, default=False)
+    no_auto_exit = Column(Boolean, default=False)
+
+    # Preferencje stylu działania
+    preferred_horizon = Column(String(20), nullable=True)  # "1d", "3d", "7d", "30d"
+    profile_mode = Column(String(30), nullable=True)        # "scalp", "swing", "long_term", "capital_protection"
+
+    notes = Column(Text, nullable=True)
+    is_active = Column(Boolean, default=True, index=True)
+    created_at = Column(DateTime, default=utc_now_naive, index=True)
+    updated_at = Column(DateTime, default=utc_now_naive, onupdate=utc_now_naive)
+
+
+class DecisionAudit(Base):
+    """Ślad warstw decyzji — która warstwa wygrała i dlaczego."""
+
+    __tablename__ = "decision_audit"
+
+    id = Column(Integer, primary_key=True, index=True)
+    symbol = Column(String(20), index=True, nullable=False)
+    mode = Column(String(10), nullable=False, index=True)
+
+    # Decyzje poszczególnych warstw (przed scaleniem)
+    symbol_signal = Column(String(20))         # BUY/SELL/HOLD z analizy technicznej
+    user_goal_decision = Column(String(30))    # z warstwy oczekiwań użytkownika
+    position_decision = Column(String(30))     # z warstwy zarządzania pozycją
+    portfolio_decision = Column(String(30))    # z warstwy trybu portfelowego / tiera
+
+    # Wynik finalny
+    final_action = Column(String(30), nullable=False)
+    winning_priority = Column(String(40))      # która warstwa zdecydowała
+    confidence = Column(Float)
+    expectation_id = Column(Integer, nullable=True)   # FK do user_expectations (nie przez ORM)
+
+    details_json = Column(Text)                # pełny kontekst w JSON
+    created_at = Column(DateTime, default=utc_now_naive, index=True)
+
+
+class GoalAssessment(Base):
+    """Ocena realności celu użytkownika — kalkulowana automatycznie."""
+
+    __tablename__ = "goal_assessments"
+
+    id = Column(Integer, primary_key=True, index=True)
+    symbol = Column(String(20), index=True, nullable=False)
+    expectation_id = Column(Integer, index=True, nullable=True)
+
+    target_type = Column(String(30))           # "value_eur", "price", "pct"
+    target_value = Column(Float)
+    current_value = Column(Float)
+    missing_value = Column(Float)
+    required_move_pct = Column(Float)
+
+    realism_score = Column(Float)              # 0.0–1.0
+    realism_label = Column(String(40))         # "bardzo_realny"..."mało_realny"
+
+    scenario_fast_days = Column(Float)
+    scenario_base_days = Column(Float)
+    scenario_slow_days = Column(Float)
+    blockers_json = Column(Text)
+
+    created_at = Column(DateTime, default=utc_now_naive, index=True)
+
+
 # Database initialization
 def init_db():
     """Inicjalizacja bazy danych - tworzenie tabel"""
-    Base.metadata.create_all(bind=engine)
+    try:
+        Base.metadata.create_all(bind=engine)
+    except Exception as exc:
+        logger.critical("Nie udało się utworzyć tabel: %s", exc)
+        raise
     _ensure_schema()
-    print("✅ Baza danych zainicjalizowana")
+    logger.info("Baza danych zainicjalizowana")
 
 
 def _ensure_schema():
@@ -569,9 +729,9 @@ def _ensure_schema():
         with engine.begin() as conn:
             try:
                 conn.execute(text(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {ddl}"))
-                print(f"✅ Dodano kolumnę '{column_name}' do tabeli '{table_name}'")
+                logger.info("Dodano kolumnę '%s' do tabeli '%s'", column_name, table_name)
             except Exception as exc:
-                print(f"⚠️ Nie udało się dodać kolumny '{column_name}' do '{table_name}': {exc}")
+                logger.warning("Nie udało się dodać kolumny '%s' do '%s': %s", column_name, table_name, exc)
 
     _ensure_column("klines", "timeframe", "VARCHAR(10)")
     for table_name in ("orders", "positions"):
@@ -586,6 +746,22 @@ def _ensure_schema():
         _ensure_column(table_name, "config_snapshot_id", "VARCHAR(64)")
         _ensure_column(table_name, "entry_reason_code", "VARCHAR(80)")
         _ensure_column(table_name, "exit_reason_code", "VARCHAR(80)")
+    # Exit quality tracking — pozycje
+    for col, ddl in [
+        ("planned_tp", "FLOAT"),
+        ("planned_sl", "FLOAT"),
+        ("mfe_price", "FLOAT"),
+        ("mae_price", "FLOAT"),
+        ("mfe_pnl", "FLOAT"),
+        ("mae_pnl", "FLOAT"),
+        ("highest_price_seen", "FLOAT"),
+        ("trailing_active", "BOOLEAN DEFAULT 0"),
+        ("trailing_stop_price", "FLOAT"),
+        ("partial_take_count", "INTEGER DEFAULT 0"),
+        ("exit_plan_json", "TEXT"),
+    ]:
+        _ensure_column("positions", col, ddl)
+
     _ensure_column("pending_orders", "config_snapshot_id", "VARCHAR(64)")
     _ensure_column("config_rollbacks", "execution_status", "VARCHAR(20) DEFAULT 'pending'")
     _ensure_column("pending_orders", "strategy_name", "VARCHAR(80)")
@@ -596,6 +772,18 @@ def _ensure_schema():
     _ensure_column("config_snapshots", "previous_snapshot_id", "VARCHAR(64)")
     _ensure_column("config_snapshots", "notes", "TEXT")
     _ensure_column("config_snapshots", "is_current", "BOOLEAN")
+    # Telegram Intelligence Layer — nowe kolumny w istniejącej tabeli
+    _ensure_column("telegram_messages", "direction", "VARCHAR(20)")
+    _ensure_column("telegram_messages", "msg_category", "VARCHAR(40)")
+    _ensure_column("telegram_messages", "severity", "VARCHAR(20)")
+    _ensure_column("telegram_messages", "source_module", "VARCHAR(50)")
+    _ensure_column("telegram_messages", "parsed_symbol", "VARCHAR(20)")
+    _ensure_column("telegram_messages", "parsed_side", "VARCHAR(10)")
+    _ensure_column("telegram_messages", "parsed_confidence", "FLOAT")
+    _ensure_column("telegram_messages", "action_required", "BOOLEAN")
+    _ensure_column("telegram_messages", "parsed_payload_json", "TEXT")
+    _ensure_column("telegram_messages", "linked_order_id", "INTEGER")
+    _ensure_column("telegram_messages", "linked_position_id", "INTEGER")
 
 
 def get_db():
@@ -640,6 +828,9 @@ def reset_database(scope: str = "full"):
         "incidents",
         "decision_traces",
         "cost_ledger",
+        "user_expectations",
+        "decision_audit",
+        "goal_assessments",
     ]
     tables_demo = [
         "signals",
@@ -653,6 +844,8 @@ def reset_database(scope: str = "full"):
         "pending_orders",
         "decision_traces",
         "cost_ledger",
+        "decision_audit",
+        "goal_assessments",
     ]
     to_clear = tables_full if scope == "full" else tables_demo
 
@@ -815,7 +1008,7 @@ def save_decision_trace(
     timestamp: datetime | None = None,
 ) -> DecisionTrace:
     trace = DecisionTrace(
-        timestamp=timestamp or datetime.utcnow(),
+        timestamp=timestamp or utc_now_naive(),
         symbol=symbol,
         timeframe=timeframe,
         mode=mode,
@@ -855,7 +1048,7 @@ def save_cost_entry(
         order_id=order_id,
         position_id=position_id,
         symbol=symbol,
-        timestamp=timestamp or datetime.utcnow(),
+        timestamp=timestamp or utc_now_naive(),
         cost_type=cost_type,
         expected_value=expected_value,
         actual_value=actual_value,

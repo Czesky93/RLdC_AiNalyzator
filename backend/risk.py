@@ -111,7 +111,15 @@ def evaluate_risk(context: RiskContext) -> RiskDecision:
         limit_breaches.append("kill_switch_gate")
 
     max_daily_drawdown = float(cfg.get("max_daily_drawdown", 0.03))
-    daily_drawdown_ratio = abs(float(rs.get("daily_net_drawdown") or 0.0)) / max(1.0, float(os.getenv("DEMO_INITIAL_BALANCE", "10000") or 10000)) if context.mode == "demo" else 0.0
+    if context.mode == "demo":
+        _initial_balance = max(1.0, float(os.getenv("DEMO_INITIAL_BALANCE", "10000") or 10000))
+        daily_drawdown_ratio = abs(float(rs.get("daily_net_drawdown") or 0.0)) / _initial_balance
+    else:
+        # LIVE: używamy całkowitego zaangażowania (exposure) lub fallback na live_balance_eur
+        _exposure = float(rs.get("total_exposure") or 0.0)
+        _live_balance = float(cfg.get("live_balance_eur") or os.getenv("LIVE_INITIAL_BALANCE", "0") or 0.0)
+        _base = max(1.0, _exposure if _exposure > 0 else _live_balance)
+        daily_drawdown_ratio = abs(float(rs.get("daily_net_drawdown") or 0.0)) / _base
     if allowed and daily_drawdown_ratio >= max_daily_drawdown:
         allowed = False
         action = "block_temporarily"
@@ -164,20 +172,30 @@ def evaluate_risk(context: RiskContext) -> RiskDecision:
         limit_breaches.append("exposure_gate_symbol")
 
     max_cost_leakage_ratio = float(cfg.get("max_cost_leakage_ratio", 0.5))
-    if allowed and float(symbol_perf.get("cost_leakage_ratio") or 0.0) > max_cost_leakage_ratio:
+    leakage_min_trades = int(cfg.get("leakage_gate_min_trades", 5))
+    sym_closed_trades = int(symbol_perf.get("closed_trades") or 0)
+    if (allowed
+        and sym_closed_trades >= leakage_min_trades
+        and float(symbol_perf.get("cost_leakage_ratio") or 0.0) > max_cost_leakage_ratio):
         allowed = False
         action = "block_symbol"
         reason_codes.append("leakage_gate_symbol")
         limit_breaches.append("leakage_gate_symbol")
 
     min_symbol_net_expectancy = float(cfg.get("min_symbol_net_expectancy", 0.0))
-    if allowed and float(symbol_perf.get("net_expectancy") or 0.0) < min_symbol_net_expectancy:
+    expectancy_min_trades = int(cfg.get("expectancy_gate_min_trades", 5))
+    if (allowed
+        and sym_closed_trades >= expectancy_min_trades
+        and float(symbol_perf.get("net_expectancy") or 0.0) < min_symbol_net_expectancy):
         allowed = False
         action = "block_symbol"
         reason_codes.append("expectancy_gate_symbol")
         limit_breaches.append("expectancy_gate_symbol")
 
-    if allowed and strategy_perf and float(strategy_perf.get("net_expectancy") or 0.0) < min_symbol_net_expectancy:
+    strat_closed_trades = int(strategy_perf.get("closed_trades") or 0) if strategy_perf else 0
+    if (allowed and strategy_perf
+        and strat_closed_trades >= expectancy_min_trades
+        and float(strategy_perf.get("net_expectancy") or 0.0) < min_symbol_net_expectancy):
         allowed = False
         action = "block_strategy"
         reason_codes.append("expectancy_gate_strategy")
