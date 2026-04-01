@@ -249,14 +249,23 @@ class DataCollector:
     def _has_openai_key(self) -> bool:
         return os.getenv("OPENAI_API_KEY", "").strip() != ""
 
+    def _has_any_ai_key(self) -> bool:
+        """Sprawdza czy jest skonfigurowany jakikolwiek provider AI (klucz lub Ollama)."""
+        return (
+            bool(os.getenv("OLLAMA_BASE_URL", "").strip())
+            or bool(os.getenv("GEMINI_API_KEY", "").strip())
+            or bool(os.getenv("GROQ_API_KEY", "").strip())
+            or bool(os.getenv("OPENAI_API_KEY", "").strip())
+        )
+
     def _log_openai_missing(self):
         now = utc_now_naive()
         if self.last_openai_missing_log_ts and (now - self.last_openai_missing_log_ts).total_seconds() < 300:
             return
         self.last_openai_missing_log_ts = now
-        msg = "Brak OPENAI_API_KEY — bot wstrzymany (OpenAI jest wymagany)."
-        logger.error(f"⛔ {msg}")
-        log_to_db("ERROR", "collector", msg)
+        msg = "Brak klucza AI (Gemini/Groq/OpenAI) — używam heurystyki ATR/Bollinger."
+        logger.warning(f"⚠️ {msg}")
+        log_to_db("WARNING", "collector", msg)
 
     def _log_no_watchlist(self, db: Session, hint: Optional[str] = None):
         now = utc_now_naive()
@@ -315,6 +324,8 @@ class DataCollector:
         self.last_report_ts = None
         self.last_risk_alert_ts = None
         self.last_crash_alert_ts = None
+        self._last_idle_alert_ts = None
+        self.last_snapshot_ts = None
 
     def _create_pending_order(
         self,
@@ -899,6 +910,18 @@ class DataCollector:
         # 1b) HOLD — sprawdź czy osiągnięto cel wartości
         self._check_hold_targets(db, tc)
 
+        # 1b2) AUTO-GOALS — ustaw planned_tp/sl dla pozycji bez celu (AI-driven)
+        self._auto_set_position_goals(db, tc)
+
+        # 1c) Rotacja kapitału — jeśli brak wolnych środków, zamknij najgorszą pozycję
+        rotated = self._maybe_rotate_capital(db, tc)
+        if rotated:
+            # Odśwież konfigurację tradingową po zwolnieniu kapitału
+            db.flush()
+            tc = self._load_trading_config(db, config, runtime_ctx, now, mode=mode)
+            if tc is None:
+                return
+
         # 2) Nowe wejścia — screening + gating
         entries = self._screen_entry_candidates(db, tc)
 
@@ -1354,6 +1377,26 @@ class DataCollector:
             ema_50 = ctx.get("ema_50")
             rsi = float(ctx.get("rsi") or 50.0)
 
+            # Prognoza AI (1h, ≤2h stara) — czy trzymać pozycję dłużej?
+            _fc_cutoff = now - timedelta(hours=2)
+            _latest_fc = (
+                db.query(ForecastRecord)
+                .filter(
+                    ForecastRecord.symbol == sym,
+                    ForecastRecord.checked == False,  # noqa: E712
+                    ForecastRecord.forecast_ts >= _fc_cutoff,
+                    ForecastRecord.horizon == "1h",
+                )
+                .order_by(ForecastRecord.forecast_ts.desc())
+                .first()
+            )
+            forecast_bullish = (
+                _latest_fc is not None
+                and _latest_fc.direction == "WZROST"
+                and _latest_fc.forecast_price is not None
+                and float(_latest_fc.forecast_price) > price * 1.005  # prognoza >0.5% powyżej ceny
+            )
+
             # Trailing stop — aktualizuj poziom jeśli aktywny
             trailing_active = bool(pos.trailing_active)
             trailing_stop = float(pos.trailing_stop_price) if pos.trailing_stop_price else None
@@ -1415,10 +1458,14 @@ class DataCollector:
             # ━━━ WARSTWA 3: TAKE PROFIT (częściowy lub pełny) ━━━━━━━━━━━━━
             if price >= take_profit:
                 # Oceń siłę trendu — czy kontynuować czy zamknąć
+                # forecast_bullish działa jako dodatkowy sygnał utrzymania pozycji
                 trend_strong = (
-                    ema_20 is not None and ema_50 is not None
-                    and float(ema_20) > float(ema_50)
-                    and 40.0 < rsi < 75.0
+                    (
+                        ema_20 is not None and ema_50 is not None
+                        and float(ema_20) > float(ema_50)
+                        and 40.0 < rsi < 75.0
+                    )
+                    or forecast_bullish  # AI prognoza wzrostu → trzymaj pozycję
                 )
                 partial_qty = round(qty * 0.25, 8)
                 can_partial = (partial_count < 2) and (partial_qty > 0) and (partial_qty < qty * 0.95)
@@ -1431,7 +1478,8 @@ class DataCollector:
                         db, symbol=sym, action="CREATE_PENDING_EXIT", reason_code=reason_code,
                         runtime_ctx=runtime_ctx, mode="demo",
                         signal_summary={"source": "exit_engine", "layer": "tp_soft", "price": price,
-                                        "tp": take_profit, "rsi": rsi, "ema_trend": "up"},
+                                        "tp": take_profit, "rsi": rsi, "ema_trend": "up",
+                                        "forecast_bullish": forecast_bullish},
                         risk_check={}, cost_check={"eligible": True}, execution_check={"eligible": True},
                         details={"partial_qty": partial_qty, "full_qty": qty, "partial_count": partial_count},
                     )
@@ -1458,7 +1506,8 @@ class DataCollector:
                         db, symbol=sym, action="CREATE_PENDING_EXIT", reason_code=reason_code,
                         runtime_ctx=runtime_ctx, mode="demo",
                         signal_summary={"source": "exit_engine", "layer": "tp_full", "price": price,
-                                        "tp": take_profit, "rsi": rsi, "trend_strong": trend_strong},
+                                        "tp": take_profit, "rsi": rsi, "trend_strong": trend_strong,
+                                        "forecast_bullish": forecast_bullish},
                         risk_check={}, cost_check={"eligible": True}, execution_check={"eligible": True},
                         details={"quantity": qty, "trend_strong": trend_strong, "partial_count": partial_count},
                     )
@@ -1624,6 +1673,223 @@ class DataCollector:
                 )
 
     # ------------------------------------------------------------------
+    # Etap 1d: rotacja kapitału — zamknij najgorszą pozycję gdy brak środków
+    # ------------------------------------------------------------------
+
+    def _maybe_rotate_capital(self, db: Session, tc: dict) -> bool:
+        """Jeśli brak wolnych środków i istnieją otwarte pozycje, zamknij najgorszą.
+
+        Logika:
+        - available_cash < min_order_notional AND mamy pozycje otwarte
+        - Zamknij pozycję z najniższym unrealized_pnl (stop bleeding)
+        - Utwórz CONFIRMED SELL → wykonaj natychmiast przez _execute_confirmed_pending_orders
+        - Zwraca True jeśli zlecenie sprzedaży zostało złożone.
+        """
+        available_cash = float(tc.get("available_cash", 0.0))
+        min_order_notional = float(tc.get("min_order_notional", 25.0))
+        positions = tc.get("positions", [])
+        if available_cash >= min_order_notional:
+            return False
+        if not positions:
+            return False
+
+        mode = tc.get("mode", "demo")
+        _has_active_pending = tc["_has_active_pending"]
+        _pending_in_cooldown = tc["_pending_in_cooldown"]
+        runtime_ctx = tc["runtime_ctx"]
+
+        # Pomiń pozycje z aktywnym pending lub w HOLD
+        tier_map = tc.get("tier_map", {})
+        closeable = []
+        for pos in positions:
+            sym = (pos.symbol or "").strip().upper().replace("/", "").replace("-", "")
+            sym_tier = tier_map.get(sym, {})
+            if sym_tier.get("hold_mode"):
+                continue
+            if _has_active_pending(pos.symbol) or _pending_in_cooldown(pos.symbol):
+                continue
+            if float(pos.quantity or 0) <= 0:
+                continue
+            closeable.append(pos)
+
+        if not closeable:
+            log_to_db("WARNING", "capital_rotation",
+                      f"Brak wolnych środków ({available_cash:.2f}) — wszystkie pozycje w HOLD lub pending. "
+                      "Nie można dokonać rotacji kapitału.", db=db)
+            return False
+
+        # Najgorsza pozycja = najniższy unrealized_pnl (stop bleeding)
+        worst = min(closeable, key=lambda p: float(p.unrealized_pnl or 0))
+        sym = worst.symbol
+        qty = float(worst.quantity)
+
+        # Oblicz PnL% jeszcze przed pobraniem ceny, na podstawie entry + current_price
+        _entry_pre = float(worst.entry_price or 0)
+        _cur_pre = float(worst.current_price or worst.entry_price or 0)
+        _pnl_pct_pre = (_cur_pre - _entry_pre) / _entry_pre * 100 if _entry_pre > 0 else 0.0
+
+        # GUARD: nie rotuj jeśli najgorsza pozycja jest na plusie — nie zamykamy zysków tylko dla nowego wejścia
+        if _pnl_pct_pre >= 0:
+            log_to_db("INFO", "capital_rotation",
+                      f"Rotacja kapitału pominięta: {sym} PnL={_pnl_pct_pre:+.1f}% — "
+                      f"wszystkie pozycje na plusie. Nie zamykamy zyskownych pozycji.",
+                      db=db)
+            logger.info(
+                "[CAPITAL_ROTATION] SKIP — %s PnL=%+.1f%% (all profitable, no rotation)",
+                sym, _pnl_pct_pre,
+            )
+            _mode_label_skip = mode.upper()
+            _pos_summary = ", ".join(
+                f"{p.symbol} PnL={((float(p.current_price or p.entry_price or 0) - float(p.entry_price or 0)) / float(p.entry_price or 1) * 100):+.1f}%"
+                for p in closeable
+            )
+            self._send_telegram_alert(
+                f"{_mode_label_skip}: BRAK ROTACJI",
+                f"⏸️ [{_mode_label_skip}] Brak wolnych środków ({available_cash:.2f} EUR)\n"
+                f"━━━━━━━━━━━━━━━━━━━━\n"
+                f"Rotacja pominięta — wszystkie pozycje zyskowne.\n"
+                f"Nie zamykam zysków, aby otworzyć nowe wejście.\n"
+                f"\nPozycje:\n{_pos_summary}\n"
+                f"━━━━━━━━━━━━━━━━━━━━\n"
+                f"Bot czeka na pojawienie się wolnych środków lub na TP/SL.",
+            )
+            return False
+
+        # Pobierz aktualną cenę
+        latest = (
+            db.query(MarketData)
+            .filter(MarketData.symbol == sym)
+            .order_by(MarketData.timestamp.desc())
+            .first()
+        )
+        price = float(latest.price) if latest else None
+        if price is None:
+            ticker = self.binance.get_ticker_price(sym)
+            if ticker and ticker.get("price"):
+                price = float(ticker["price"])
+        if not price:
+            return False
+
+        pnl = float(worst.unrealized_pnl or 0)
+        entry_price = float(worst.entry_price or price)
+        pnl_pct = (price - entry_price) / entry_price * 100 if entry_price > 0 else 0.0
+        pnl_emoji = "📉" if pnl < 0 else "📈"
+
+        pending_id = self._create_pending_order(
+            db=db, symbol=sym, side="SELL", price=price, qty=qty,
+            mode=mode,
+            reason=f"Rotacja kapitału: brak wolnych środków ({available_cash:.2f} < {min_order_notional:.0f}). "
+                   f"Zamykam najgorszą pozycję {sym} PnL={pnl_pct:+.1f}%.",
+            strategy_name="capital_rotation",
+        )
+
+        log_to_db("WARNING", "capital_rotation",
+                  f"Rotacja kapitału: {sym} SELL qty={qty:.6g} @ {price:.6f} | "
+                  f"PnL={pnl_pct:+.1f}% | wolne środki={available_cash:.2f} < min={min_order_notional:.0f} | "
+                  f"pending_id={pending_id}",
+                  db=db)
+
+        _mode_label = mode.upper()
+        msg = (
+            f"🔄 [{_mode_label}] ROTACJA KAPITAŁU\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"Powód: Brak wolnych środków na nowe zlecenie\n"
+            f"Wolne środki: {available_cash:.2f} (min: {min_order_notional:.0f})\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"Zamykam: {sym}\n"
+            f"Cena: {price:.6f} | Ilość: {qty:.6g}\n"
+            f"{pnl_emoji} PnL: {pnl_pct:+.2f}%\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"Kapitał zostanie uwolniony na lepszą okazję."
+        )
+        self._send_telegram_alert(f"{_mode_label}: ROTACJA KAPITAŁU", msg, force_send=True)
+
+        # Wykonaj sprzedaż natychmiast (pending jest już CONFIRMED z _create_pending_order)
+        try:
+            self._execute_confirmed_pending_orders(db)
+        except Exception as exc:
+            log_exception("capital_rotation", "Błąd wykonania rotacji kapitału", exc, db=db)
+
+        return True
+
+    # ------------------------------------------------------------------
+    # Etap 1d: AUTO-GOALS — AI ustala planned_tp/sl dla pozycji bez celu
+    # ------------------------------------------------------------------
+
+    def _auto_set_position_goals(self, db: Session, tc: dict) -> int:
+        """Automatycznie ustawia planned_tp/sl dla pozycji które ich nie mają.
+
+        Cel = entry_price + ATR × atr_take_mult.
+        Przy silnym trendzie 4h (EMA20 > EMA50 i RSI > 55) multiplikator rośnie o 30%.
+        Zwraca liczbę zaktualizowanych pozycji.
+        """
+        positions = tc.get("positions", [])
+        atr_take_mult = float(tc.get("atr_take_mult", 3.5))
+        atr_stop_mult = float(tc.get("atr_stop_mult", 2.0))
+        min_klines = int(tc.get("min_klines", 60))
+
+        set_count = 0
+        for pos in positions:
+            needs_tp = pos.planned_tp is None
+            needs_sl = pos.planned_sl is None
+            if not needs_tp and not needs_sl:
+                continue
+
+            sym = pos.symbol
+            if not sym or float(pos.quantity or 0) <= 0:
+                continue
+
+            entry = float(pos.entry_price or 0)
+            if entry <= 0:
+                continue
+
+            ctx = get_live_context(db, sym, timeframe="1h", limit=max(min_klines, 120))
+            if not ctx or not ctx.get("atr"):
+                continue
+            atr = float(ctx["atr"])
+            if atr <= 0:
+                continue
+
+            # HTF bias — ambitniejszy TP gdy 4h trend silny w górę
+            tp_mult = atr_take_mult
+            try:
+                htf_ctx = get_live_context(db, sym, timeframe="4h", limit=50)
+                if htf_ctx:
+                    ema20_4h = htf_ctx.get("ema_20")
+                    ema50_4h = htf_ctx.get("ema_50")
+                    rsi_4h = float(htf_ctx.get("rsi") or 50)
+                    if (
+                        ema20_4h and ema50_4h
+                        and float(ema20_4h) > float(ema50_4h)
+                        and rsi_4h > 55
+                    ):
+                        tp_mult = atr_take_mult * 1.3  # +30% TP w silnym trendzie
+            except Exception:
+                pass
+
+            if needs_tp:
+                pos.planned_tp = entry + atr * tp_mult
+            if needs_sl:
+                pos.planned_sl = entry - atr * atr_stop_mult
+
+            set_count += 1
+            log_to_db(
+                "INFO", "auto_goals",
+                f"Auto-cele: {sym} tp={pos.planned_tp:.6f} sl={pos.planned_sl:.6f} "
+                f"(entry={entry:.6f} ATR={atr:.6f} tp×{tp_mult:.1f} sl×{atr_stop_mult:.1f})",
+                db=db,
+            )
+            logger.info(
+                "[AUTO_GOALS] %s: tp=%.6f sl=%.6f (entry=%.6f ATR×%.1f)",
+                sym, pos.planned_tp, pos.planned_sl, entry, tp_mult,
+            )
+
+        if set_count:
+            db.flush()
+
+        return set_count
+
+    # ------------------------------------------------------------------
     # Etap 2: screening kandydatów wejścia + gating
     # ------------------------------------------------------------------
 
@@ -1668,6 +1934,16 @@ class DataCollector:
 
         available_cash = tc["available_cash"]
         _mode_label = str(tc.get("mode") or "demo").upper()
+
+        # Diagnostyka: ostrzeż gdy brak gotówki na nowe pozycje (rotacja kapitału nie pomogła)
+        if available_cash < min_order_notional:
+            log_to_db(
+                "WARNING", "screen_candidates",
+                f"[{_mode_label}] Brak gotówki ({available_cash:.2f} EUR < min {min_order_notional:.0f} EUR) "
+                f"— pomijam screening. Jeśli LIVE: uzupełnij saldo Binance; jeśli DEMO: sprawdź reset balansu.",
+                db=db,
+            )
+            return
 
         # Zbieramy kandydatów, sortujemy po expected value netto, potem tworzymy pending
         candidates: list[dict] = []
@@ -1973,6 +2249,10 @@ class DataCollector:
                     max_cash_for_trade = available_cash * max_cash_pct
                     max_affordable = max_cash_for_trade / float(price)
                     qty = min(qty, max_affordable)
+                    # Podnieś do min_order_notional gdy ATR-sizing daje za małą kwotę
+                    # (np. BTC: ryzyko 10 EUR / ATR 1000 EUR = 0.01 BTC = poniżej min)
+                    if qty * price < min_order_notional and max_affordable * price >= min_order_notional:
+                        qty = min_order_notional / float(price)
                 if qty < min_qty:
                     self._trace_decision(
                         db, symbol=symbol, action="SKIP", reason_code="insufficient_cash_or_qty_below_min",
@@ -2013,6 +2293,15 @@ class DataCollector:
             if is_extreme:
                 # Premia: idealne wejście → +1 do ratingu
                 rating = min(5, rating + 1)
+
+            # Bramka jakości wejścia — odrzuć słabe sygnały (rating < demo_min_entry_score)
+            if rating < demo_min_entry_score:
+                self._trace_decision(
+                    db, symbol=symbol, action="SKIP", reason_code="entry_score_below_min",
+                    runtime_ctx=runtime_ctx, mode="demo", signal_summary=signal_summary,
+                    risk_check={"rating": rating, "min_entry_score": demo_min_entry_score},
+                )
+                continue
 
             expected_move_ratio = (float(atr) * atr_take_mult) / float(price) if price > 0 else 0.0
             total_cost_ratio = (2 * taker_fee_rate) + (2 * slippage_bps / 10000.0) + (2 * spread_buffer_bps / 10000.0)
@@ -2387,18 +2676,17 @@ class DataCollector:
         
         db = SessionLocal()
         try:
-            provider = os.getenv("AI_PROVIDER", "openai").strip().lower()
-            # OpenAI jest wymagany tylko w trybie provider=openai.
-            # provider=auto może działać bez klucza (fallback -> heuristic).
-            if provider == "openai" and not self._has_openai_key():
+            provider = os.getenv("AI_PROVIDER", "auto").strip().lower()
+            # W trybie jednego providera — sprawdź czy klucz jest.
+            # W trybie auto — bot nigdy się nie zatrzymuje (fallback → heurystyka).
+            if provider in ("openai", "gemini", "groq") and not self._has_any_ai_key():
                 self._log_openai_missing()
-                return
-            if provider == "auto" and not self._has_openai_key():
-                # Nie wyłączaj bota — poinformuj w logach, że działa fallback.
+                # Nie blokuj bota — fallback do heurystyki zadziała w analysis.py
+            if provider == "auto" and not self._has_any_ai_key():
                 now = utc_now_naive()
                 if not self.last_openai_missing_log_ts or (now - self.last_openai_missing_log_ts).total_seconds() > 300:
                     self.last_openai_missing_log_ts = now
-                    msg = "Brak OPENAI_API_KEY — AI_PROVIDER=auto uruchamia fallback (heurystyka)."
+                    msg = "Brak kluczy AI (Gemini/Groq/OpenAI) — AI_PROVIDER=auto → heurystyka ATR/Bollinger."
                     logger.warning(f"⚠️ {msg}")
                     log_to_db("WARNING", "collector", msg, db=db)
 
@@ -2565,6 +2853,7 @@ class DataCollector:
             ("signals", "timestamp", timedelta(days=7)),
             ("system_logs", "timestamp", timedelta(days=14)),
             ("klines", "open_time", timedelta(days=30)),
+            ("decision_traces", "timestamp", timedelta(days=30)),
         ]
 
         total_deleted = 0

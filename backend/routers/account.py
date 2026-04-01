@@ -473,6 +473,68 @@ def get_openai_status(
         return {"success": True, "data": data}
 
 
+@router.get("/ai-status")
+def get_ai_status():
+    """
+    Status wszystkich skonfigurowanych providerów AI.
+    Szybka diagnostyka w UI — który provider jest aktywny.
+    """
+    provider = os.getenv("AI_PROVIDER", "auto").strip().lower()
+
+    def _check_key(env_name: str) -> dict:
+        key = (os.getenv(env_name, "") or "").strip()
+        return {"configured": bool(key), "key_len": len(key) if key else 0}
+
+    providers = {
+        "ollama": {
+            "configured": bool((os.getenv("OLLAMA_BASE_URL", "") or "").strip()),
+            "key_len": 0,
+            "model": os.getenv("OLLAMA_MODEL", "qwen2.5:1.5b"),
+            "docs": "https://ollama.com/download (lokalne, bez klucza)",
+        },
+        "gemini": {
+            **_check_key("GEMINI_API_KEY"),
+            "model": os.getenv("GEMINI_MODEL", "gemini-2.0-flash"),
+            "docs": "https://aistudio.google.com/apikey",
+        },
+        "groq": {
+            **_check_key("GROQ_API_KEY"),
+            "model": os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile"),
+            "docs": "https://console.groq.com/keys",
+        },
+        "openai": {
+            **_check_key("OPENAI_API_KEY"),
+            "model": os.getenv("OPENAI_MODEL", "gpt-5-mini"),
+            "docs": "https://platform.openai.com/api-keys",
+        },
+    }
+
+    # W trybie auto, kolejność prób
+    if provider == "auto":
+        chain = ["ollama", "gemini", "groq", "openai", "heuristic"]
+    elif provider in ("heuristic", "offline"):
+        chain = ["heuristic"]
+    else:
+        chain = [provider, "heuristic"]
+
+    active = "heuristic"
+    for p in chain:
+        if p != "heuristic" and providers.get(p, {}).get("configured"):
+            active = p
+            break
+
+    return {
+        "success": True,
+        "data": {
+            "ai_provider_setting": provider,
+            "active_provider": active,
+            "fallback_chain": chain,
+            "providers": providers,
+            "heuristic": "ATR + Bollinger (zawsze dostępna)",
+        },
+    }
+
+
 @router.get("/history")
 def get_account_history(
     mode: str = Query("demo", description="Tryb: demo lub live"),
