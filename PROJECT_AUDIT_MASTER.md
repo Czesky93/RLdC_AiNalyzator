@@ -1,6 +1,6 @@
 # PROJECT_AUDIT_MASTER.md — RLdC Trading BOT
 
-**Data audytu:** 2 kwietnia 2026
+**Data audytu:** 2 kwietnia 2026 (aktualizacja: sesja 2)
 **Wersja:** v0.7 beta
 **Testy:** 181/181 PASSED
 **TypeScript:** 0 błędów
@@ -95,7 +95,7 @@ Wszystkie 4 piony (A-D) są w znacznym stopniu domknięte.
 
 | Plik | Rola | Stan |
 |------|------|------|
-| `bot.py` | Komendy Telegram: /status /portfolio /risk /orders | ⚠️ DZIAŁA CZĘŚCIOWO |
+| `bot.py` | 18 komend Telegram: /status /portfolio /risk /confirm /reject /governance /freeze /incidents | ✅ DZIAŁA |
 
 ### Testy (`tests/`)
 
@@ -155,10 +155,10 @@ Wszystkie 4 piony (A-D) są w znacznym stopniu domknięte.
 
 | ID | Opis | Plik | Priorytet |
 |----|------|------|-----------|
-| DEBT-1 | Telegram: /confirm i /reject wymienione w /start ale NIE zaimplementowane | `telegram_bot/bot.py` | HIGH |
-| DEBT-2 | Telegram: /governance /freeze /incidents /logs /report — stub | `telegram_bot/bot.py` | LOW |
+| ~~DEBT-1~~ | ~~Telegram: /confirm i /reject~~ | `telegram_bot/bot.py` | ✅ ZAMKNIĘTY — już zaimplementowane (L371-424) |
+| ~~DEBT-2~~ | ~~Telegram: /governance /freeze /incidents /logs /report~~ | `telegram_bot/bot.py` | ✅ ZAMKNIĘTY — już zaimplementowane (L427-560) |
 | DEBT-3 | CORS: allow_origins=["*"] | `backend/app.py` | LOW |
-| DEBT-4 | Qty sizing nie odejmuje prowizji od ilości | `backend/collector.py` L2234+ | MEDIUM |
+| ~~DEBT-4~~ | ~~Qty sizing nie odejmuje prowizji~~ | `backend/collector.py` | ✅ NAPRAWIONY — max_cash_after_fees = max_cash/(1+fee) |
 | DEBT-5 | Brak LIMIT orders w LIVE (tylko MARKET) | `backend/routers/orders.py` L383 | LOW |
 | DEBT-6 | AccountSummary widget w frontend nieużywany | `web_portal/src/components/widgets/` | LOW |
 
@@ -191,10 +191,10 @@ Wszystkie 4 piony (A-D) są w znacznym stopniu domknięte.
 
 | ID | Zadanie | Priorytet | Plik/Moduł | Wpływ |
 |----|---------|-----------|------------|-------|
-| TASK-01 | LIVE CostLedger: użyj actual Binance commission z fills | CRITICAL | `collector.py` | Dokładność net PnL |
-| TASK-02 | Periodyczny sync pozycji DB ↔ Binance | CRITICAL | `collector.py` | Spójność portfela |
-| TASK-03 | Telegram /confirm i /reject implementacja | HIGH | `telegram_bot/bot.py` | UX LIVE trading |
-| TASK-04 | Qty sizing: odejmij prowizję od ilości | MEDIUM | `collector.py` | Dokładność allocation |
+| ~~TASK-01~~ | ~~LIVE CostLedger: actual Binance commission~~ | ~~CRITICAL~~ | `collector.py` | ✅ DONE (sesja 2, commit 9ac10b0) |
+| ~~TASK-02~~ | ~~Periodyczny sync pozycji DB ↔ Binance~~ | ~~CRITICAL~~ | `collector.py` | ✅ DONE (sesja 2, commit 9ac10b0) |
+| ~~TASK-03~~ | ~~Telegram /confirm i /reject~~ | ~~HIGH~~ | `telegram_bot/bot.py` | ✅ już zaimplementowane (false positive) |
+| ~~TASK-04~~ | ~~Qty sizing: odejmij prowizję~~ | ~~MEDIUM~~ | `collector.py` | ✅ DONE (sesja 2) |
 | TASK-05 | CORS allow_origins → proper domains | LOW | `app.py` | Bezpieczeństwo |
 
 ---
@@ -241,7 +241,7 @@ Wszystkie 4 piony (A-D) są w znacznym stopniu domknięte.
 - 181/181 smoke testów ✅ (ostatni run: sesja 01.04)
 
 ### Co zostało
-- TASK-01: Fix LIVE CostLedger fees
-- TASK-02: Binance position sync loop
-- TASK-03: Telegram /confirm /reject
-- Full regression test + commit
+- TASK-05: CORS allow_origins (LOW) — przed produkcją
+- DEBT-5: LIMIT orders w LIVE (LOW)
+- DEBT-6: AccountSummary widget cleanup (LOW)
+- Żadnych blokerów krytycznych ani ważnych

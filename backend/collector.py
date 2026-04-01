@@ -2315,7 +2315,10 @@ class DataCollector:
                     max_open = tc.get("max_open_positions", 3)
                     max_cash_pct = float(config.get("max_cash_pct_per_trade", 1.0 / max(max_open, 1)))
                     max_cash_for_trade = available_cash * max_cash_pct
-                    max_affordable = max_cash_for_trade / float(price)
+                    # Odlicz prowizję od dostępnych środków (entry + exit fee)
+                    _taker = float(config.get("taker_fee_rate", 0.001))
+                    max_cash_after_fees = max_cash_for_trade / (1 + _taker)
+                    max_affordable = max_cash_after_fees / float(price)
                     qty = min(qty, max_affordable)
                     # Podnieś do min_order_notional gdy ATR-sizing daje za małą kwotę
                     # (np. BTC: ryzyko 10 EUR / ATR 1000 EUR = 0.01 BTC = poniżej min)
