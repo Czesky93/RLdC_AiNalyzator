@@ -89,6 +89,7 @@ class DataCollector:
         self.symbol_params = {}
         self._load_persisted_symbol_params()
         self.last_snapshot_ts: Optional[datetime] = None
+        self._last_binance_sync_ts: Optional[datetime] = None
         
         logger.info(f"📊 DataCollector initialized")
         logger.info(f"   Watchlist: {', '.join(self.watchlist)}")
@@ -427,12 +428,17 @@ class DataCollector:
                         qty = total_qty_filled if total_qty_filled > 0 else qty
                     else:
                         exec_price = float(result.get("price", 0)) or float(pending.price)
+                    # Prowizja rzeczywista z fills Binance
+                    _live_actual_fee = sum(float(f.get("commission", 0)) for f in fills)
+                    _live_fee_asset = fills[0].get("commissionAsset", "") if fills else ""
                     binance_status = result.get("status", "FILLED")
-                    logger.info(f"✅ LIVE ORDER EXECUTED: {pending.side} {pending.symbol} qty={qty} @ {exec_price} status={binance_status}")
+                    logger.info(f"✅ LIVE ORDER EXECUTED: {pending.side} {pending.symbol} qty={qty} @ {exec_price} fee={_live_actual_fee} {_live_fee_asset} status={binance_status}")
                     log_to_db("INFO", "live_trading",
-                              f"LIVE {pending.side} {pending.symbol} qty={qty:.8g} @ {exec_price:.6f}",
+                              f"LIVE {pending.side} {pending.symbol} qty={qty:.8g} @ {exec_price:.6f} fee={_live_actual_fee:.8g} {_live_fee_asset}",
                               db=db)
                 else:
+                    _live_actual_fee = 0.0
+                    _live_fee_asset = ""
                     # ——— DEMO: symulacja po aktualnej cenie rynkowej ———
                     exec_price = pending.price
                     ticker = self.binance.get_ticker_price(pending.symbol)
@@ -461,20 +467,29 @@ class DataCollector:
                 taker_fee_rate = float(config.get("taker_fee_rate", 0.001))
                 slippage_bps = float(config.get("slippage_bps", 5.0))
                 spread_buffer_bps = float(config.get("spread_buffer_bps", 3.0))
-                fee_cost = notional * taker_fee_rate
+                fee_cost_estimated = notional * taker_fee_rate
                 slippage_cost = notional * (slippage_bps / 10000.0)
                 spread_cost = notional * (spread_buffer_bps / 10000.0)
+
+                # LIVE: rzeczywista prowizja z Binance fills; DEMO: szacunek
+                if p_mode == "live" and _live_actual_fee > 0:
+                    fee_cost = _live_actual_fee
+                    fee_notes = f"LIVE actual Binance commission ({_live_fee_asset})"
+                else:
+                    fee_cost = fee_cost_estimated
+                    fee_notes = f"{p_mode} execution fee estimate"
+
                 save_cost_entry(
                     db,
                     symbol=pending.symbol,
                     cost_type="taker_fee",
                     order_id=order.id,
-                    expected_value=fee_cost,
+                    expected_value=fee_cost_estimated,
                     actual_value=fee_cost,
                     notional=notional,
                     bps=taker_fee_rate * 10000.0,
                     config_snapshot_id=order.config_snapshot_id,
-                    notes="demo execution fee estimate",
+                    notes=fee_notes,
                 )
                 save_cost_entry(
                     db,
@@ -486,7 +501,7 @@ class DataCollector:
                     notional=notional,
                     bps=slippage_bps,
                     config_snapshot_id=order.config_snapshot_id,
-                    notes="demo execution slippage estimate",
+                    notes=f"{p_mode} execution slippage estimate",
                 )
                 save_cost_entry(
                     db,
@@ -498,7 +513,7 @@ class DataCollector:
                     notional=notional,
                     bps=spread_buffer_bps,
                     config_snapshot_id=order.config_snapshot_id,
-                    notes="demo execution spread estimate",
+                    notes=f"{p_mode} execution spread estimate",
                 )
 
                 position = (
@@ -751,6 +766,59 @@ class DataCollector:
             db.add(eq)
         except Exception as exc:
             log_exception("exit_quality", "Błąd zapisu ExitQuality", exc, db=db)
+
+    def _sync_binance_positions(self, db: Session) -> None:
+        """
+        Periodyczny monitoring: porównaj pozycje LIVE w DB z rzeczywistymi
+        saldami spot na Binance. Loguj niezgodności jako WARNING.
+        NIE auto-koryguje — informuje operatora.
+        """
+        tc = self._runtime_context(db)["config"]
+        if tc.get("trading_mode", "demo") != "live":
+            return
+        if not tc.get("allow_live_trading"):
+            return
+
+        try:
+            balances = self.binance.get_balances()
+        except Exception as exc:
+            log_exception("binance_sync", "Błąd pobierania saldów Binance", exc, db=db)
+            return
+        if not balances:
+            return
+
+        # Zbuduj mapę asset→quantity z Binance
+        binance_map: dict[str, float] = {}
+        for b in balances:
+            asset = b.get("asset", "")
+            total = float(b.get("total", 0))
+            if total > 0 and asset not in ("EUR", "USDC", "USDT", "BNB"):
+                binance_map[asset] = total
+
+        # Pobierz LIVE pozycje z DB
+        db_positions = db.query(Position).filter(Position.mode == "live").all()
+        db_map: dict[str, float] = {}
+        for pos in db_positions:
+            # Wyciągnij base asset z symbolu (np. BTCEUR → BTC, ETHUSDC → ETH)
+            sym = pos.symbol or ""
+            base = sym.replace("EUR", "").replace("USDC", "").replace("USDT", "")
+            if base:
+                db_map[base] = db_map.get(base, 0.0) + float(pos.quantity or 0)
+
+        # Porównaj
+        mismatches = []
+        all_assets = set(list(binance_map.keys()) + list(db_map.keys()))
+        for asset in sorted(all_assets):
+            binance_qty = binance_map.get(asset, 0.0)
+            db_qty = db_map.get(asset, 0.0)
+            if abs(binance_qty - db_qty) > max(1e-6, db_qty * 0.01):
+                mismatches.append(f"{asset}: Binance={binance_qty:.8g} DB={db_qty:.8g}")
+
+        if mismatches:
+            msg = "Niezgodność pozycji DB↔Binance: " + " | ".join(mismatches[:10])
+            log_to_db("WARNING", "binance_sync", msg, db=db)
+            logger.warning(f"⚠️ {msg}")
+            self._send_telegram_alert("SYNC: Niezgodność", msg)
 
     def _mark_to_market_positions(self, db: Session, mode: str = "demo") -> None:
         """
@@ -2747,6 +2815,15 @@ class DataCollector:
             self._mark_to_market_positions(db, mode="demo")
             self._mark_to_market_positions(db, mode="live")
             self._persist_demo_snapshot_if_due(db)
+
+            # Sync pozycji LIVE DB ↔ Binance (co 5 min)
+            try:
+                now_sync = utc_now_naive()
+                if not self._last_binance_sync_ts or (now_sync - self._last_binance_sync_ts).total_seconds() > 300:
+                    self._sync_binance_positions(db)
+                    self._last_binance_sync_ts = now_sync
+            except Exception as exc:
+                log_exception("collector", "Błąd sync Binance", exc, db=db)
 
             # Generuj sygnały heurystyczne co cykl (do DB dla collectora)
             try:

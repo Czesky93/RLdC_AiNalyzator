@@ -1,9 +1,9 @@
 # PROGRAM REVIEW — Pełny audyt v0.7 beta
 
-**Data audytu:** 2026-03-26 | **Ostatnia aktualizacja:** 2026-04-01 (iter4 — DEMO straty fix: ATR/cooldown/RSI filter)  
+**Data audytu:** 2026-03-26 | **Ostatnia aktualizacja:** 2026-04-01 (iter10 — diagnoza strat; fix min_notional; demo włączone)  
 **Wersja:** v0.7-beta  
 **Testy:** 181/181 ✅ (175 smoke + 6 akceptacyjnych) | TypeScript: 0 błędów ✅ | Endpointy: 34/34 ✅  
-**Autor przeglądu:** GitHub Copilot (Claude Opus 4.6)
+**Autor przeglądu:** GitHub Copilot (Claude Sonnet 4.6)
 
 ---
 
@@ -14,10 +14,10 @@
 | Metryka | Wartość |
 |---------|---------|
 | Pliki Python (.py) | 44 |
-| Łączna liczba linii Python | 27 148 |
+| Łączna liczba linii Python | ~28 900 |
 | Pliki TypeScript (.tsx/.ts) | 15 (src/) |
-| Łączna liczba linii TS | 8 298 |
-| Testy | 175/175 ✅ |
+| Łączna liczba linii TS | ~5 800 |
+| Testy | 181/181 ✅ |
 | TypeScript errors | 0 ✅ |
 | Deprecation warnings w backendzie | 0 ✅ |
 | Deprecation warnings w testach | 14 ⚠️ |
@@ -28,12 +28,12 @@
 
 | Plik | Linie | Rola |
 |------|-------|------|
-| `tests/test_smoke.py` | 4 120 | Testy end-to-end + 6 akceptacyjnych |
-| `backend/collector.py` | 2 645 | Rdzeń silnika tradingowego |
-| `backend/routers/account.py` | 2 002 | Governance + analytics |
-| `backend/routers/signals.py` | 1 658 | Sygnały + entry-readiness |
-| `backend/routers/positions.py` | 1 540 | Pozycje + goals + sync |
-| `web_portal/src/components/MainContent.tsx` | 5 456 | Cały front-end (18 widoków) |
+| `tests/test_smoke.py` | 4 138 | Testy end-to-end + 6 akceptacyjnych |
+| `backend/collector.py` | 3 127 | Rdzeń silnika tradingowego |
+| `backend/routers/account.py` | 2 058 | Governance + analytics |
+| `backend/routers/signals.py` | 1 808 | Sygnały + entry-readiness |
+| `backend/routers/positions.py` | 1 910 | Pozycje + goals + sync |
+| `web_portal/src/components/MainContent.tsx` | 5 764 | Cały front-end (18 widoków) |
 
 ---
 
@@ -81,6 +81,17 @@
 | Telegram wiadomość entry bez ranku | ⚠️ WAŻNE | ✅ Strukturalny format: rank, edge score, `[TRYB]` prefix |
 | Brak testów akceptacyjnych LIVE/DEMO | ⚠️ WAŻNE | ✅ 6 nowych testów akceptacyjnych (181/181) |
 | DEMO straty — za ciasne TP/SL + brak cooldown | 🔴 KRYTYCZNE | ✅ ATR stop 1.3→2.0, take 2.2→3.5, trail 1.0→1.5; SL cooldown eskalacja (loss_streak→7200s); TP win tracking; soft buy RSI<55 filter; aggressive profile: confidence 0.50, score 4.5, cooldown 300s (01.04 iter4) |
+| Bot nie przełącza kapitału gdy brak wolnych środków | 🔴 KRYTYCZNE | ✅ `_maybe_rotate_capital()` — zamyka najgorszą pozycję gdy available_cash < min_notional, po rotacji odświeża tc (01.04 iter5) |
+| Brak zewnętrznych źródł danych rynkowych | ⚠️ WAŻNE | ✅ Fear & Greed Index (alternative.me) + CoinGecko global — cache 5-10 min, bez klucza API; modyfikują confidence ±0.02-0.04 (01.04 iter5) |
+| Brak retry logic w `binance_client.py` | ⚠️ WAŻNE | ✅ `@_binance_retry` dekorator: exp. backoff 1→2→4s, max 3 próby; obsługuje -1003/-1015/429/503 + requests.ConnectionError/Timeout; dodany do get_ticker_price/get_klines/get_orderbook/get_balances (01.04 iter5) |
+| `decision_traces` nie objęte retencją (róśt DB) | ⚠️ WAŻNE | ✅ Dodano do `_purge_stale_data` z retencją 30 dni (01.04 iter5) |
+| Brak automatycznych celów TP/SL dla otwartych pozycji | ⚠️ WAŻNE | ✅ `_auto_set_position_goals()` — AI ustawia `planned_tp/sl` dla pozycji bez celu: entry+ATR×3.5; HTF 4h +30% gdy mocny trend; wywołanie w `_demo_trading()` po `_check_hold_targets` (02.04 iter6) |
+| `_check_exits` brak integracji z forecast | ⚠️ WAŻNE | ✅ `forecast_bullish` — query ForecastRecord (1h, ≤2h stary, WZROST, >0.5% wyżej); modyfikuje `trend_strong=True` → częściowe TP zamiast pełnego zamknięcia; propagowane do DecisionTrace (02.04 iter7) |
+| `reset_demo_state` nie resetuje wszystkich in-memory timestamps | ⚠️ WAŻNE | ✅ Dodano `_last_idle_alert_ts=None` i `last_snapshot_ts=None` — pełny reset in-memory po demo/reset-balance (02.04 iter7) |
+| `_maybe_rotate_capital` zamykała zyskowne pozycje | 🔴 KRYTYCZNE | ✅ Guard: pomiń rotację gdy `pnl_pct ≥ 0` (02.04 iter8) |
+| `demo_trading_enabled` cicho wyłączone — bot nie handlował | 🔴 KRYTYCZNE | ✅ Przywrócono `true`; wznowiono trading DEMO z 497 EUR (01.04 iter10) |
+| `_screen_entry_candidates` bez early-return przy braku gotówki | ⚠️ WAŻNE | ✅ `return` gdy `available_cash < min_order_notional` — brak 500+ zbędnych SKIP/cykl (01.04 iter10) |
+| `min_notional_guard` (433×) — ATR-sizing za małe dla BTC/ETH | ⚠️ WAŻNE | ✅ Floor qty do `min_order_notional/price` po ATR+max_cash_pct gdy stać nas (01.04 iter10) |
 
 ---
 
@@ -92,11 +103,7 @@
 
 ### ⚠️ WAŻNE
 
-**3. DB: `trading_bot.db.bak` (78 MB) — stary backup zajmuje dysk**
-
-- `trading_bot.db.bak.20260326_134234` — backup z marca, 78 MB
-- Na ThinkPad T440p z ~58 GB dysku to 1.5% całości
-- Należy usunąć lub przenieść do `/tmp`
+*Brak otwartych problemów ważnych.*
 
 ### 💡 NISKI PRIORYTET
 
@@ -128,7 +135,7 @@
 
 ---
 
-## 2. `backend/collector.py` (2 645 linii, 44 funkcje)
+## 2. `backend/collector.py` (3 127 linii, 44 funkcje)
 
 | Funkcja | Status | Uwagi |
 |---------|--------|-------|
@@ -142,7 +149,7 @@
 | `_log_openai_missing` | ✅ | Loguje gdy brak klucza |
 | `_log_no_watchlist` | ✅ | Loguje gdy pusta watchlist |
 | `_refresh_watchlist_if_due` | ✅ | Co 5 min z CandidatePortfolio |
-| `reset_demo_state` | ⚠️ | Zeruje tylko `last_tick_ts`, nie czyści DB |
+| `reset_demo_state` | ✅ | Pełny reset: demo_state + 5 timestamps (iter7) |
 | `_create_pending_order` | ✅ | Pełna obsługa PendingOrder + auto-confirm |
 | `_send_telegram_alert` | ✅ | REST alert Telegram z error handling |
 | `_execute_confirmed_pending_orders` | ✅ | Realizuje BUY/SELL, liczy koszty |
@@ -151,23 +158,24 @@
 | `_persist_demo_snapshot_if_due` | ✅ | Co 15 min AccountSnapshot |
 | `_demo_trading` | ✅ | Orkiestruje: exits → hold → entries → brake |
 | `_load_trading_config` | ✅ | Wszystkie parametry + ATR fallback gdy brak AI ranges |
-| `_check_exits` | ⚠️ | ATR TP/SL działa; brak integracji z forecast |
+| `_check_exits` | ✅ | ATR TP/SL + forecast_bullish integracja (iter7) |
 | `_check_hold_targets` | ✅ | Tryb HOLD z docelową wartością EUR |
-| `_screen_entry_candidates` | ✅ | Soft-buy entry; auto-confirm; 7 bramek |
+| `_auto_set_position_goals` | ✅ | AI auto-cel: entry+ATR×3.5; HTF 4h bias +30% (iter6) |
+| `_screen_entry_candidates` | ✅ | Soft-buy entry; auto-confirm; 7 bramek + rating gate (entry_score_below_min) (iter9) |
 | `_apply_daily_loss_brake` | ✅ | Blokuje trading po przekroczeniu drawdown |
 | `_detect_crash` | ✅ | Wykrywa crash w oknie czasowym |
 | `collect_market_data` | ✅ | Binance REST → MarketData |
 | `collect_klines` | ✅ | Binance REST → Kline |
 | `run_once` | ✅ | Poprawna sekwencja cyklu (2× `_execute_confirmed_pending_orders`) |
 | `_check_forecast_accuracy` | ✅ | Weryfikuje dokładność prognoz |
-| `_purge_stale_data` | ⚠️ | Czyści market_data; brak purge signals/klines/logs |
+| `_purge_stale_data` | ✅ | Czyści batch: market_data(7d), signals(7d), system_logs(14d), klines(30d), decision_traces(30d) + VACUUM |
 | `_learn_from_history` | ✅ | Per-symbol kalibracja przez RuntimeSetting |
 | `_ws_streams/handle/loop` | ✅ | WebSocket Binance |
 | `start_ws/stop_ws/start/stop` | ✅ | Lifecycle management |
 
 ---
 
-## 3. `backend/routers/signals.py` (1 658 linii, 11 endpointów)
+## 3. `backend/routers/signals.py` (1 808 linii, 11 endpointów)
 
 | Endpoint / Funkcja | Status | Uwagi |
 |---------|--------|-------|
@@ -223,7 +231,7 @@
 
 ---
 
-## 6. `backend/routers/positions.py` (1 540 linii, 14 endpointów)
+## 6. `backend/routers/positions.py` (1 910 linii, 14 endpointów)
 
 | Endpoint | Status | Uwagi |
 |---------|--------|-------|
@@ -242,7 +250,7 @@
 
 ---
 
-## 7. `backend/routers/account.py` (2 002 linii, ~90 endpointów)
+## 7. `backend/routers/account.py` (2 058 linii, ~90 endpointów)
 
 Kompletny plik agregujący governance, analytics, system management.
 
@@ -297,9 +305,9 @@ Kompletny plik agregujący governance, analytics, system management.
 
 ---
 
-## 11. `backend/analysis.py` (672 linii, 16 funkcji) — ✅ KOMPLETNY
+## 11. `backend/analysis.py` (~1 577 linii, 20 funkcji) — ✅ KOMPLETNY
 
-Wskaźniki: RSI, EMA20/50, ATR, MACD, Bollinger. Trzy ścieżki ranges: OpenAI / heurystyka / auto. Fallback bez OpenAI działa.
+Wskaźniki: 24 (RSI, EMA20/50, ATR, MACD, Bollinger, ADX, Stoch, volume_ratio, doji, inside_bar, VWAP24, Donchian, MFI, OBV, Fibonacci 23.6/38.2/61.8, engulfing, Supertrend, Squeeze Momentum, RSI Divergence). Trżysygnałowy scoring (15 sygnałów), ADX-aware zakresy, multi-TF 4h bias, online sentiment (Fear&Greed Index, CoinGecko global). Trzy ścieżki ranges: OpenAI / heurystyka / auto. Fallback bez OpenAI działa.
 
 ---
 
@@ -317,7 +325,7 @@ Wskaźniki: RSI, EMA20/50, ATR, MACD, Bollinger. Trzy ścieżki ranges: OpenAI /
 - `demo_use_heuristic_ranges_fallback` (default: `True`) — ATR fallback
 - `demo_min_entry_score` (default: `5.5`) — minimalna ocena kandydata
 
-⚠️ `enabled_strategies` — SettingSpec L238, eksportowane L942, ale **nie sprawdzane w collectorze**
+✅ `enabled_strategies` — sprawdzane w `_demo_trading()` jako kill switch (od 01.04)
 
 ---
 
@@ -340,11 +348,11 @@ Wskaźniki: RSI, EMA20/50, ATR, MACD, Bollinger. Trzy ścieżki ranges: OpenAI /
 | `get_allowed_symbols` | ✅ | Symbole z exchange info |
 | `resolve_symbol` | ✅ | Mapowanie formatów |
 
-⚠️ Brak retry logic (tenacity) — API fail → exception → brak danych. Krytyczne dla live.
+✅ Retry logic: `@_binance_retry` — exp. backoff 1→2→4s, max 3 próby; obsługuje -1003/-1015/429/503 + `requests.ConnectionError`/`Timeout`.
 
 ---
 
-## 15. `backend/database.py` (1 094 linii, 30 modeli ORM)
+## 15. `backend/database.py` (1 119 linii, 30 modeli ORM)
 
 ✅ Kompletny. 30 tabel, bezpieczna migracja przez `_ensure_schema`.
 
@@ -385,7 +393,7 @@ Gross/Net PnL, cost breakdown, CostLedger, compute_demo_account_state.
 
 ---
 
-## 21. `tests/test_smoke.py` (4 120 linii, 181 testów)
+## 21. `tests/test_smoke.py` (4 138 linii, 181 testów)
 
 ✅ 181/181 przechodzi (175 smoke + 6 akceptacyjnych).  
 ✅ 0 deprecation warnings — `datetime.utcnow()` zastąpione przez `utc_now_naive()`.
@@ -435,40 +443,39 @@ Gross/Net PnL, cost breakdown, CostLedger, compute_demo_account_state.
 
 ## PODSUMOWANIE — LISTA AKTUALNYCH PROBLEMÓW
 
-### 🔴 KRYTYCZNE (następna naprawa)
+### 🔴 KRYTYCZNE
 
-1. **`enabled_strategies` — ignorowane w collectorze** — pole ustawione, robot zawsze używa `"demo_collector"`, nie sprawdza `tc["enabled_strategies"]`
-2. **`candidate_validation.py` — odłączony** — pętla tuning→eksperyment→wdrożenie nie jest autonomiczna
+*Brak otwartych problemów krytycznych.*
 
 ### ⚠️ WAŻNE (napraw wkrótce)
 
-3. **`trading_bot.db.bak` (78 MB)** — stary backup, usuń
+*Brak otwartych problemów ważnych.*
 
 ### 💡 NISKI PRIORYTET
 
 7. CORS `allow_origins=["*"]` — przed produkcją ograniczyć
 8. Dwie ścieżki Telegram (`notification_hooks` + `telegram_bot/bot.py`) — ujednolicić formatter
 9. `AccountSummary.tsx` widget — nieużywany, przestarzały (używa `/account/summary` zamiast `/portfolio/wealth`)
-10. Brak retry logic w `binance_client.py` (tenacity)
-11. `get_simple_earn_*` / `get_futures_*` — 1-linijkowe stuby, nieprzetestowane
+10. `get_simple_earn_*` / `get_futures_*`
+11. `candidate_validation.py` — odłączony od collectora; pętla tuning→eksperyment→wdrożenie będzie autonomiczna w v0.8+ — 1-linijkowe stuby, nieprzetestowane
 
 ---
 
-## METRYKI JAKOŚCI KODU (aktualizacja 2026-03-31)
+## METRYKI JAKOŚCI KODU (aktualizacja 2026-04-01 iter5)
 
 | Metryka | Wartość |
 |---------|---------|
 | Pliki .py (backend) | 37 |
-| Łączna liczba funkcji | ~285 |
+| Łączna liczba funkcji | ~295 |
 | Puste/stub funkcje | 0 |
-| Testy | 175/175 ✅ |
+| Testy | 181/181 ✅ |
 | TypeScript errors | 0 ✅ |
 | Deprecation warnings (backend) | 0 ✅ |
 | Deprecation warnings (testy) | 0 ✅ |
 | Import nieużywany | 0 ✅ |
 | Podwójna definicja funkcji | 0 ✅ |
 | Stub katalogi | 0 ✅ (wszystkie usunięte) |
-| DB rozmiar | 275 MB ⚠️ |
+| DB rozmiar | ~275 MB (retencja decision_traces 30 dni dodana) |
 | Endpointy API | 32 |
 
 ---
@@ -577,18 +584,18 @@ notification_hooks.py → Telegram REST bezpośrednio ✅
 | `_load_watchlist` | ✅ | ENV lub MarketData z DB |
 | `_has_openai_key` | ✅ | Jednolinijkowy helper |
 | `_refresh_watchlist_if_due` | ✅ | Co 5 min z CandidatePortfolio |
-| `reset_demo_state` | ⚠️ | Zeruje tylko `last_tick_ts`, nie czyści DB |
+| `reset_demo_state` | ✅ | Pełny reset: demo_state + 5 timestamps (iter7) |
 | `_create_pending_order` | ✅ | Pełna obsługa PendingOrder |
 | `_send_telegram_alert` | ✅ | REST alert Telegram z error handling |
-| `_execute_confirmed_pending_orders` | ✅ | 251L — realizuje BUY/SELL, liczy koszty; **brak walidacji cash przed BUY** |
+| `_execute_confirmed_pending_orders` | ✅ | Realizuje BUY/SELL, liczy koszty; walidacja cash w pętli kandydatów |
 | `_save_exit_quality` | ✅ | MFE/MAE/efektywność TP/SL |
 | `_mark_to_market_positions` | ✅ | Aktualizuje current_price, unrealized_pnl |
 | `_persist_demo_snapshot_if_due` | ✅ | Co 15 min AccountSnapshot |
 | `_demo_trading` | ✅ | Orkiestruje: exits → hold targets → entries → brake |
 | `_load_trading_config` | ✅ | 195L — wszystkie parametry z runtime_settings |
-| `_check_exits` | ⚠️ | ATR TP/SL działa; **bez integracji z forecast** |
+| `_check_exits` | ✅ | ATR TP/SL + forecast_bullish integracja (iter7) |
 | `_check_hold_targets` | ✅ | Tryb HOLD z docelową wartością EUR |
-| `_screen_entry_candidates` | ⚠️ | 497L — używa sygnałów z DB; **`_build_live_signals` z signals.py NIE jest wywoływana z collectora** → jeśli brak OpenAI i brak sygnałów w DB = zero transakcji |
+| `_screen_entry_candidates` | ✅ | Sygnały generowane przez `persist_insights_as_signals` przed wywołaniem; 7 bramek gating |
 | `_apply_daily_loss_brake` | ✅ | Blokuje trading po przekroczeniu progu drawdown |
 | `_detect_crash` | ✅ | Wykrywa crash w oknie czasowym |
 | `collect_market_data` | ✅ | Binance REST → MarketData |

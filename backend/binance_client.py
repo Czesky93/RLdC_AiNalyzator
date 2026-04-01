@@ -19,6 +19,55 @@ load_dotenv(dotenv_path=_ENV_PATH, override=False)
 
 logger = logging.getLogger(__name__)
 
+# Kody błędów Binance wskazujące na chwilowe przeciążenie / rate limit
+_TRANSIENT_CODES = {-1003, -1015, -1016, 429, 503}
+# Maksymalna liczba prób dla metod z retry
+_MAX_RETRIES = 3
+
+
+def _binance_retry(func):
+    """Dekorator: ponawia wywołanie Binance przy przejściowych błędach sieciowych / rate limit.
+
+    Reaguje na:
+    - BinanceAPIException z kodem w _TRANSIENT_CODES (rate limit, serwis niedostępny)
+    - requests.ConnectionError / requests.Timeout (problemy sieciowe)
+
+    Strategia: exp. backoff 1s → 2s → 4s, łącznie 3 próby.
+    Błędy -1121 (invalid symbol) i inne nie są powtarzane.
+    """
+    from functools import wraps
+
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        delay = 1.0
+        for attempt in range(1, _MAX_RETRIES + 1):
+            try:
+                return func(*args, **kwargs)
+            except BinanceAPIException as exc:
+                code = getattr(exc, "code", None)
+                if code in _TRANSIENT_CODES and attempt < _MAX_RETRIES:
+                    logger.warning(
+                        "⏳ Binance rate limit / przeciążenie (kod %s), próba %d/%d, czekam %.0fs…",
+                        code, attempt, _MAX_RETRIES, delay,
+                    )
+                    time.sleep(delay)
+                    delay *= 2
+                else:
+                    raise
+            except (requests.ConnectionError, requests.Timeout) as exc:
+                if attempt < _MAX_RETRIES:
+                    logger.warning(
+                        "⏳ Błąd sieciowy Binance, próba %d/%d, czekam %.0fs… (%s)",
+                        attempt, _MAX_RETRIES, delay, exc,
+                    )
+                    time.sleep(delay)
+                    delay *= 2
+                else:
+                    raise
+        return None  # nie powinno się tu trafić
+
+    return wrapper
+
 
 class BinanceClient:
     """Klient REST API Binance z obsługą błędów i rate limiting"""
@@ -59,6 +108,7 @@ class BinanceClient:
         except Exception as exc:
             logger.warning(f"⚠️  Cannot sync Binance server time: {str(exc)}")
     
+    @_binance_retry
     def get_ticker_price(self, symbol: str) -> Optional[Dict]:
         """
         Pobierz aktualną cenę symbolu
@@ -106,6 +156,7 @@ class BinanceClient:
             logger.error(f"❌ Error getting all tickers: {str(e)}")
             return []
     
+    @_binance_retry
     def get_klines(
         self, 
         symbol: str, 
@@ -155,6 +206,7 @@ class BinanceClient:
             logger.error(f"❌ Error getting klines for {symbol}: {str(e)}")
             return None
     
+    @_binance_retry
     def get_orderbook(self, symbol: str, limit: int = 20) -> Optional[Dict]:
         """
         Pobierz orderbook (księgę zleceń)
@@ -533,6 +585,7 @@ class BinanceClient:
             logger.error(f"❌ Błąd pobierania exchangeInfo: {str(exc)}")
             return {}
 
+    @_binance_retry
     def get_balances(self) -> List[Dict]:
         """Pobierz saldo konta (wymaga API keys)."""
         if not self.api_key or not self.api_secret:

@@ -1,6 +1,39 @@
-# Plan działania — RLdC Trading Bot
+# TASK_QUEUE — RLdC Trading Bot
 
-## CHECKPOINT (1 kwietnia 2026, iteracja 4)
+## ZADANIA OTWARTE
+
+### CRITICAL
+
+| ID | Zadanie | Plik/Moduł | Wpływ na zysk/ryzyko/koszty | Status |
+|----|---------|------------|---------------------------|--------|
+| T-01 | LIVE CostLedger: użyj actual Binance `commission` z fills zamiast szacunków | `collector.py` L408-470 | Net PnL niedokładny → błędna ocena strategii | DO ZROBIENIA |
+| T-02 | Periodyczny sync pozycji DB ↔ Binance (balances, positions) | `collector.py` | Portfolio w WWW może nie odpowiadać Binance | DO ZROBIENIA |
+
+### HIGH
+
+| ID | Zadanie | Plik/Moduł | Wpływ | Status |
+|----|---------|------------|-------|--------|
+| T-03 | Telegram /confirm i /reject — implementacja | `telegram_bot/bot.py` | LIVE wymaga manual confirm, brak Telegram flow | DO ZROBIENIA |
+
+### MEDIUM
+
+| ID | Zadanie | Plik/Moduł | Wpływ | Status |
+|----|---------|------------|-------|--------|
+| T-04 | Qty sizing: odejmij prowizję (0.1%) od quantity | `collector.py` L2234+ | Micro-overallocacja 0.1% per trade | DO ZROBIENIA |
+
+### LOW
+
+| ID | Zadanie | Plik/Moduł | Wpływ | Status |
+|----|---------|------------|-------|--------|
+| T-05 | CORS allow_origins=["*"] → domeny produkcyjne | `app.py` | Bezpieczeństwo, OWASP | DO ZROBIENIA |
+| T-06 | Telegram governance stubs (/freeze /incidents /logs /report) | `telegram_bot/bot.py` | UX, informacyjność | DO ZROBIENIA |
+| T-07 | Usunięcie nieużywanego widgetu AccountSummary | `widgets/AccountSummary.tsx` | Czystość kodu | DO ZROBIENIA |
+
+---
+
+## HISTORIA CHECKPOINTÓW
+
+### CHECKPOINT (1 kwietnia 2026, iteracja 4)
 
 Bot aktywnie handluje w demo! 2 otwarte pozycje: BTCEUR + ETHEUR.
 Tryb **AGGRESSIVE** — obniżone progi wejścia, max 5 pozycji.

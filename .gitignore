@@ -86,3 +86,4 @@ htmlcov/
 *.ckpt
 *.safetensors
 models/checkpoints/
+a.zip
