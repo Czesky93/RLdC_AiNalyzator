@@ -467,6 +467,108 @@ _SETTINGS: Dict[str, SettingSpec] = {
         env_var="MIN_ORDER_NOTIONAL",
         validators=(_validate_positive("min_order_notional"),),
     ),
+    # --- Trading core: ATR-pct minimum ---
+    "min_atr_pct": SettingSpec(
+        key="min_atr_pct",
+        section="execution",
+        parser=_parse_positive_float,
+        serializer=_serialize_float,
+        default=0.005,
+        env_var="MIN_ATR_PCT",
+        validators=(_validate_non_negative("min_atr_pct"),),
+    ),
+    # --- Entry filters: RSI / volume / ADX ---
+    "rsi_buy_gate_max": SettingSpec(
+        key="rsi_buy_gate_max",
+        section="execution",
+        parser=_parse_positive_float,
+        serializer=_serialize_float,
+        default=0.0,  # 0 = wyłączone, >0 = podłoga progu RSI kupna
+        env_var="RSI_BUY_GATE_MAX",
+        validators=(_validate_non_negative("rsi_buy_gate_max"),),
+    ),
+    "rsi_sell_gate_min": SettingSpec(
+        key="rsi_sell_gate_min",
+        section="execution",
+        parser=_parse_positive_float,
+        serializer=_serialize_float,
+        default=0.0,  # 0 = wyłączone, >0 = sufit progu RSI sprzedaży
+        env_var="RSI_SELL_GATE_MIN",
+        validators=(_validate_non_negative("rsi_sell_gate_min"),),
+    ),
+    "min_volume_ratio": SettingSpec(
+        key="min_volume_ratio",
+        section="execution",
+        parser=_parse_positive_float,
+        serializer=_serialize_float,
+        default=0.0,  # 0 = wyłączone
+        env_var="MIN_VOLUME_RATIO",
+        validators=(_validate_non_negative("min_volume_ratio"),),
+    ),
+    "min_adx_for_entry": SettingSpec(
+        key="min_adx_for_entry",
+        section="execution",
+        parser=_parse_positive_float,
+        serializer=_serialize_float,
+        default=0.0,  # 0 = wyłączone
+        env_var="MIN_ADX_FOR_ENTRY",
+        validators=(_validate_non_negative("min_adx_for_entry"),),
+    ),
+    # --- Bear-regime filters ---
+    "bear_regime_min_conf": SettingSpec(
+        key="bear_regime_min_conf",
+        section="execution",
+        parser=_parse_positive_float,
+        serializer=_serialize_float,
+        default=0.7,
+        env_var="BEAR_REGIME_MIN_CONF",
+        validators=(_validate_probability("bear_regime_min_conf"),),
+    ),
+    "bear_oversold_bypass_conf": SettingSpec(
+        key="bear_oversold_bypass_conf",
+        section="execution",
+        parser=_parse_positive_float,
+        serializer=_serialize_float,
+        default=0.75,
+        env_var="BEAR_OVERSOLD_BYPASS_CONF",
+        validators=(_validate_probability("bear_oversold_bypass_conf"),),
+    ),
+    "extreme_oversold_rsi_threshold": SettingSpec(
+        key="extreme_oversold_rsi_threshold",
+        section="execution",
+        parser=_parse_positive_float,
+        serializer=_serialize_float,
+        default=25.0,
+        env_var="EXTREME_OVERSOLD_RSI_THRESHOLD",
+        validators=(_validate_positive("extreme_oversold_rsi_threshold"),),
+    ),
+    "bear_rsi_sell_gate": SettingSpec(
+        key="bear_rsi_sell_gate",
+        section="execution",
+        parser=_parse_positive_float,
+        serializer=_serialize_float,
+        default=55.0,
+        env_var="BEAR_RSI_SELL_GATE",
+        validators=(_validate_positive("bear_rsi_sell_gate"),),
+    ),
+    # --- Live order execution ---
+    "live_entry_order_type": SettingSpec(
+        key="live_entry_order_type",
+        section="execution",
+        parser=lambda raw: str(raw or "MARKET").strip().upper(),
+        serializer=_serialize_text,
+        default="MARKET",
+        env_var="LIVE_ENTRY_ORDER_TYPE",
+    ),
+    "limit_order_timeout": SettingSpec(
+        key="limit_order_timeout",
+        section="execution",
+        parser=_parse_positive_int,
+        serializer=_serialize_int,
+        default=300,
+        env_var="LIMIT_ORDER_TIMEOUT",
+        validators=(_validate_positive("limit_order_timeout"),),
+    ),
     # --- Trading core: ATR / TP-SL ---
     "atr_stop_mult": SettingSpec(
         key="atr_stop_mult",
@@ -575,9 +677,9 @@ _SETTINGS: Dict[str, SettingSpec] = {
         section="execution",
         parser=_parse_positive_int,
         serializer=_serialize_int,
-        default=300,  # 5 min — obniżone z 3600; dla DEMO szybka rotacja
+        default=300,  # 5 min — 0 = wyłączony cooldown
         env_var="PENDING_ORDER_COOLDOWN_SECONDS",
-        validators=(_validate_positive("pending_order_cooldown_seconds"),),
+        validators=(_validate_non_negative("pending_order_cooldown_seconds"),),
     ),
     # --- DEMO-specific controls ---
     "demo_require_manual_confirm": SettingSpec(
@@ -1057,7 +1159,7 @@ def apply_runtime_updates(
     after = _build_effective_flat_config(candidate_overrides)
     changed_keys = [key for key in override_updates.keys() if before.get(key) != after.get(key)]
     if not changed_keys:
-        return {"changed": [], "state": build_runtime_state(db, active_position_count=active_position_count)}
+        return {"changed": [], "state": build_runtime_state(db, active_position_count=active_position_count), "snapshot": previous_snapshot}
 
     if active_position_count > 0 and any(key in _LIVE_GUARD_KEYS for key in changed_keys):
         raise RuntimeSettingsError(

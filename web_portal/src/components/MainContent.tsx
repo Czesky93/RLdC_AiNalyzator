@@ -587,13 +587,11 @@ function SymbolDetailPanel({
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-stretch justify-end"
-      style={{ background: 'rgba(0,0,0,0.6)' }}
+      className="fixed inset-0 z-50 flex items-stretch justify-end bg-black/60"
       onClick={(e) => { if (e.target === e.currentTarget) onClose() }}
     >
       <div
-        className="w-full max-w-xl bg-[#0a1420] border-l border-rldc-dark-border overflow-y-auto flex flex-col"
-        style={{ boxShadow: '-8px 0 32px rgba(0,0,0,0.5)' }}
+        className="w-full max-w-xl bg-[#0a1420] border-l border-rldc-dark-border overflow-y-auto flex flex-col shadow-[-8px_0_32px_rgba(0,0,0,0.5)]"
       >
         {/* Nagłówek */}
         <div className="flex items-center justify-between px-5 py-4 border-b border-rldc-dark-border sticky top-0 bg-[#0a1420] z-10">
@@ -1817,16 +1815,14 @@ function CommandCenterView({ mode, onSymbolClick }: { mode: 'demo' | 'live'; onS
         }
         return (
           <div className="mb-5 rounded-xl border border-rldc-dark-border bg-rldc-dark-card/60 overflow-hidden">
-            <div
-              className="w-full flex items-center justify-between px-5 py-3 hover:bg-white/[0.03] transition cursor-pointer"
-              onClick={() => setShowExpectations(v => !v)}
-              role="button"
-              tabIndex={0}
-              onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') setShowExpectations(v => !v) }}
-            >
-              <div className="flex items-center gap-3">
+            <div className="w-full flex items-center justify-between px-5 py-3">
+              <button
+                type="button"
+                className="flex-1 flex items-center gap-3 text-left hover:bg-white/[0.03] transition cursor-pointer bg-transparent border-0 p-0 min-w-0"
+                onClick={() => setShowExpectations(v => !v)}
+              >
                 <span className="text-base">🎯</span>
-                <div className="text-left">
+                <div className="text-left min-w-0">
                   <div className="text-sm font-semibold text-slate-200">Cele użytkownika</div>
                   <div className="text-[11px] text-slate-500">
                     {exps.length > 0
@@ -1835,10 +1831,11 @@ function CommandCenterView({ mode, onSymbolClick }: { mode: 'demo' | 'live'; onS
                     }
                   </div>
                 </div>
-              </div>
-              <div className="flex items-center gap-2">
+              </button>
+              <div className="flex items-center gap-2 ml-2 shrink-0">
                 <button
-                  onClick={e => { e.stopPropagation(); setShowExpForm(v => !v); setShowExpectations(true) }}
+                  type="button"
+                  onClick={() => { setShowExpForm(v => !v); setShowExpectations(true) }}
                   className="px-2.5 py-1 rounded text-[11px] font-bold bg-rldc-dark-bg border border-rldc-dark-border text-slate-400 hover:text-slate-200 hover:border-slate-500 transition"
                 >+ Dodaj cel</button>
                 <span className="text-slate-500 text-xs">{showExpectations ? '▲' : '▼'}</span>
@@ -2254,9 +2251,8 @@ function CommandCenterView({ mode, onSymbolClick }: { mode: 'demo' | 'live'; onS
                       <span className="font-bold text-sm text-slate-100">
                         {d.symbol.replace('EUR', '/EUR').replace('USDT', '/USDT').replace('USDC', '/USDC')}
                       </span>
-                      <span className={`px-2.5 py-0.5 rounded-full text-xs font-black ${accentColor} bg-current/10`}
-                        style={{ backgroundColor: 'transparent', border: '1px solid currentcolor', opacity: 1 }}>
-                        <span className={accentColor}>{d.final_action_pl}</span>
+                      <span className={`px-2.5 py-0.5 rounded-full text-xs font-black bg-transparent border border-current ${accentColor}`}>
+                        {d.final_action_pl}
                       </span>
                       <span className={`text-[10px] ml-auto ${priColor[d.priority_rule] || 'text-slate-500'}`}>
                         {priLabel[d.priority_rule] || d.priority_rule}
