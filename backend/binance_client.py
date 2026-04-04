@@ -84,13 +84,18 @@ class BinanceClient:
         self.api_secret = api_secret or os.getenv("BINANCE_API_SECRET", "")
         self.time_offset_ms = 0
         
-        # Inicjalizacja klienta - działa bez kluczy dla publicznych danych
-        if self.api_key and self.api_secret:
-            self.client = Client(self.api_key, self.api_secret)
-            logger.info("✅ Binance client initialized with API keys")
-        else:
-            self.client = Client()
-            logger.info("⚠️  Binance client initialized without API keys (public data only)")
+        # Inicjalizacja klienta - działa bez kluczy dla publicznych danych.
+        # ping=False zapobiega błędowi ConnectionError przy braku dostępu do sieci (np. testy, offline).
+        try:
+            if self.api_key and self.api_secret:
+                self.client = Client(self.api_key, self.api_secret, ping=False)
+                logger.info("✅ Binance client initialized with API keys")
+            else:
+                self.client = Client(ping=False)
+                logger.info("⚠️  Binance client initialized without API keys (public data only)")
+        except Exception as exc:
+            logger.warning(f"⚠️  Binance client init failed (offline?): {exc}")
+            self.client = None
 
         self._sync_time()
 
