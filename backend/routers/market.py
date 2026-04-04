@@ -316,6 +316,7 @@ def get_price_ranges(
                 "sell_action": r.get("sell_action"),
                 "sell_target": r.get("sell_target"),
                 "comment": r.get("comment"),
+                "origin": r.get("origin", "unknown"),
                 "timestamp": ins.get("timestamp"),
             })
 
@@ -815,3 +816,14 @@ def get_allowed_symbols_endpoint(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Błąd allowed-symbols: {str(e)}")
 
+
+
+@router.get("/regime")
+def get_market_regime_endpoint():
+    """Aktualny reżim rynkowy (CRASH/BEAR/BEAR_SOFT/SIDEWAYS/BULL) z F&G + CoinGecko."""
+    try:
+        from backend.analysis import get_market_regime as _get_regime
+        regime = _get_regime()
+        return {"success": True, "data": regime}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Błąd regime: {str(e)}")

@@ -37,6 +37,17 @@ logger = logging.getLogger(__name__)
 # Stałe
 # ---------------------------------------------------------------------------
 
+POLICY_ACTIONS = {
+    "NO_ACTION",
+    "CONTINUE_MONITORING",
+    "REQUIRE_MANUAL_REVIEW",
+    "PREPARE_ROLLBACK",
+    "FREEZE_PROMOTIONS",
+    "FREEZE_EXPERIMENTS",
+    "ESCALATE_TO_OPERATOR",
+    "CLOSE_INCIDENT",
+}
+
 _PRIORITY_ORDER = {"low": 0, "medium": 1, "high": 2, "critical": 3}
 
 

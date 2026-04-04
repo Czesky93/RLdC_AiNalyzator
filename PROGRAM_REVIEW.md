@@ -1,6 +1,6 @@
 # PROGRAM REVIEW — Pełny audyt v0.7 beta
 
-**Data audytu:** 2026-03-26 | **Ostatnia aktualizacja:** 2026-04-01 (iter10 — diagnoza strat; fix min_notional; demo włączone)  
+**Data audytu:** 2026-03-26 | **Ostatnia aktualizacja:** 2026-04-02 (sesja 19 — T-08 Faza 1 LIMIT orders; range origin tracking; T-18 walidacja operacyjna)  
 **Wersja:** v0.7-beta  
 **Testy:** 181/181 ✅ (175 smoke + 6 akceptacyjnych) | TypeScript: 0 błędów ✅ | Endpointy: 34/34 ✅  
 **Autor przeglądu:** GitHub Copilot (Claude Sonnet 4.6)
@@ -92,6 +92,15 @@
 | `demo_trading_enabled` cicho wyłączone — bot nie handlował | 🔴 KRYTYCZNE | ✅ Przywrócono `true`; wznowiono trading DEMO z 497 EUR (01.04 iter10) |
 | `_screen_entry_candidates` bez early-return przy braku gotówki | ⚠️ WAŻNE | ✅ `return` gdy `available_cash < min_order_notional` — brak 500+ zbędnych SKIP/cykl (01.04 iter10) |
 | `min_notional_guard` (433×) — ATR-sizing za małe dla BTC/ETH | ⚠️ WAŻNE | ✅ Floor qty do `min_order_notional/price` po ATR+max_cash_pct gdy stać nas (01.04 iter10) |
+| `enabled_strategies` ignorowane w collectorze | 🔴 KRYTYCZNE | ✅ Kill switch: `if "default" not in enabled_strats: return` (01.04 sesja) — potwierdzone w `_demo_trading()` L1282 |
+| **`min_order_notional` default 25→60** (SettingSpec vs DB vs signals.py niespójne) | ⚠️ WAŻNE | ✅ SettingSpec default → 60.0, spójne z DB i `routers/signals.py` (02.04 sesja 15) |
+| `bear_regime_min_conf` hardcoded 0.82, niekonfigurowalne przez API | ⚠️ WAŻNE | ✅ Dodano `SettingSpec(default=0.82, env_var="BEAR_REGIME_MIN_CONF")` + `_LIVE_GUARD_KEYS` (02.04 sesja 15) |
+| Ollama pierwsze w AI fallback chain (lokalne AI zawsze próbowane) | ⚠️ WAŻNE | ✅ Chain zmieniony na `gemini→groq→openai→ollama→heuristic` w `analysis.py` L1641 + `account.py` L514 (02.04 sesja 16) |
+| Ranking kandydatów wejść po surowym ATR/price zamiast jakości sygnału | ⚠️ WAŻNE | ✅ `composite_score = edge_net_score × confidence × (rating/5.0)` — `_screen_entry_candidates` L2937; sort po composite_score (02.04 sesja 16) |
+| AI cost — pełna watchlista przez API co cykl | ⚠️ WAŻNE | ✅ T-18: top-5 symboli (confidence×volume_ratio) do AI, reszta heuristic; ~90% mniej tokenów API (02.04 sesja 18) |
+| TRADING_METRICS_SPEC.md — błędne wartości kosztów (0.56% round-trip) | ⚠️ WAŻNE | ✅ Poprawiono: slippage 0.0005, spread 0.0003, round-trip=0.36%, cost_gate=0.9% (02.04 sesja 18) |
+| Range dicts bez pola `origin` — brak widoczności AI vs heuristic | ⚠️ WAŻNE | ✅ `_heuristic_ranges()` zwraca `"origin": "heuristic"`; `_parse_ranges_response()` zapisuje `"origin": "ai:{provider}"`; `persist_insights_as_signals` persists `range_origin` w indicators; `/api/market/ranges` zwraca origin; decision_traces zawierają `range_origin` (02.04 sesja 19) |
+| LIMIT orders niemożliwe przez config — hardkodowany MARKET | ⚠️ WAŻNE | ✅ T-08 Faza 1: `_create_pending_order(order_type)` param; `_execute_confirmed_pending_orders` używa `pending.order_type`; SettingSpec `live_entry_order_type` (default: MARKET, env: LIVE_ENTRY_ORDER_TYPE); SELL zawsze MARKET; round-trip 0.36%→0.31% gdy LIMIT BUY aktywne (02.04 sesja 19) |
 
 ---
 
@@ -103,31 +112,38 @@
 
 ### ⚠️ WAŻNE
 
-*Brak otwartych problemów ważnych.*
+**1. SQLite WAL growth** *(monitoruj)*
+
+- `trading_bot.db-wal` rośnie do ~450 MB przy długim działaniu backendu bez checkpoint
+- Przyczyna: PASSIVE auto-checkpoint blokowany przez aktywnych czytelników (collector 60s cykl)
+- Rozwiązanie: TRUNCATE checkpoint (zrobione ręcznie 02.04) — WAL skurczony do 0, odzyskano 451 MB
+- Długofalowe: rozważ `PRAGMA wal_autocheckpoint=100` po starcie backendu (mniejszy WAL, częstsze checkpointy)
+
+**2. `Orderbook.tsx` i `AccountSummary.tsx` — nieużywane widgety**
+
+- Oba komponenty istnieją w `web_portal/src/components/widgets/` ale NIE są importowane w `MainContent.tsx`
+- `Orderbook.tsx` używa `/api/market/orderbook/BTCEUR` (poprawne EUR), wyświetla ceny ze znakiem `$` zamiast `€` (drobny bug)
+- `AccountSummary.tsx` używa przestarzałego `/api/account/summary` zamiast `/api/portfolio/wealth`
+- Wskazane: usunąć oba lub zintegrować z istniejącymi widokami
 
 ### 💡 NISKI PRIORYTET
 
-**8. CORS `allow_origins=["*"]`**
+**4. CORS `allow_origins=["*"]`**
 
 - `backend/app.py:76` — otwarte dla wszystkich origin
 - Akceptowalne w fazie DEMO/dev, niedopuszczalne w produkcji
 - Przed live: ogranicz do `["http://localhost:3000", "https://twoja-domena.pl"]`
 
-**9. Dwie ścieżki Telegram**
+**5. Dwie ścieżki Telegram**
 
 - `notification_hooks.py` — REST do Telegram Bot API
 - `telegram_bot/bot.py` — python-telegram-bot
 - Różne formaty wiadomości, możliwe duplikaty przy incydentach
 - Wskazane: unified message formatter
 
-**10. `AccountSummary.tsx` widget — używa `/api/account/summary`**
+**6. `get_simple_earn_*` / `get_futures_*` — 1-linijkowe stuby, nieprzetestowane**
 
-- Widget istnieje ale NIE jest renderowany nigdzie w MainContent.tsx
-- Endpoint `/api/account/summary` nadal działa
-- Widget stary, niespójny ze stanem systemu (nie propaguje `mode` dynamicznie)
-- Wskazane: usunąć widget lub zaktualizować do `/api/portfolio/wealth`
-
-**11. `candidate_validation.py` — warstwa prezentacyjna, NIE trading**
+**7. `candidate_validation.py` — warstwa prezentacyjna, NIE trading**
 
 - Importowany w `account.py` do wyświetlania feeds (tuning suggestions) w UI
 - Celowo NIE podłączony do collectora — pipeline eksperymentów jest semi-manualny w v0.7
@@ -150,9 +166,9 @@
 | `_log_no_watchlist` | ✅ | Loguje gdy pusta watchlist |
 | `_refresh_watchlist_if_due` | ✅ | Co 5 min z CandidatePortfolio |
 | `reset_demo_state` | ✅ | Pełny reset: demo_state + 5 timestamps (iter7) |
-| `_create_pending_order` | ✅ | Pełna obsługa PendingOrder + auto-confirm |
+| `_create_pending_order` | ✅ | Pełna obsługa PendingOrder + auto-confirm; parametr `order_type` (MARKET/LIMIT) — T-08 Faza 1 |
 | `_send_telegram_alert` | ✅ | REST alert Telegram z error handling |
-| `_execute_confirmed_pending_orders` | ✅ | Realizuje BUY/SELL, liczy koszty |
+| `_execute_confirmed_pending_orders` | ✅ | Realizuje BUY/SELL, liczy koszty; `exec_order_type = pending.order_type or "MARKET"` — T-08 Faza 1 |
 | `_save_exit_quality` | ✅ | MFE/MAE/efektywność TP/SL |
 | `_mark_to_market_positions` | ✅ | Aktualizuje current_price, unrealized_pnl |
 | `_persist_demo_snapshot_if_due` | ✅ | Co 15 min AccountSnapshot |
@@ -435,7 +451,7 @@ Gross/Net PnL, cost breakdown, CostLedger, compute_demo_account_state.
 | ExitDiagnosticsView | `/api/debug/last-exits` | ✅ |
 | TelegramIntelView | `/api/telegram-intel/state` | ✅ |
 | DecisionsRiskPanel | `/api/orders/pending` | ✅ |
-| Orderbook.tsx | `/api/market/orderbook/BTCUSDT` | ⚠️ hardcoded BTCUSDT! |
+| Orderbook.tsx | `/api/market/orderbook/BTCEUR` | ⚠️ widget nieużywany w MainContent; `$` zamiast `€` w wyświetlaniu |
 | AccountSummary.tsx | `/api/account/summary` | ⚠️ widget nieużywany w MainContent |
 | OpenOrders.tsx | `/api/positions` | ✅ (mylące nazewnictwo) |
 
@@ -443,25 +459,26 @@ Gross/Net PnL, cost breakdown, CostLedger, compute_demo_account_state.
 
 ## PODSUMOWANIE — LISTA AKTUALNYCH PROBLEMÓW
 
-### 🔴 KRYTYCZNE
+### 🔴 KRYTYCZNE (następna naprawa)
 
-*Brak otwartych problemów krytycznych.*
+1. **`enabled_strategies` — ignorowane w collectorze** — pole ustawione, robot zawsze używa `"demo_collector"`, nie sprawdza `tc["enabled_strategies"]`
+2. **`candidate_validation.py` — odłączony** — pętla tuning→eksperyment→wdrożenie nie jest autonomiczna
 
 ### ⚠️ WAŻNE (napraw wkrótce)
 
-*Brak otwartych problemów ważnych.*
+3. **`trading_bot.db.bak` (78 MB)** — stary backup, usuń
 
 ### 💡 NISKI PRIORYTET
 
 7. CORS `allow_origins=["*"]` — przed produkcją ograniczyć
 8. Dwie ścieżki Telegram (`notification_hooks` + `telegram_bot/bot.py`) — ujednolicić formatter
 9. `AccountSummary.tsx` widget — nieużywany, przestarzały (używa `/account/summary` zamiast `/portfolio/wealth`)
-10. `get_simple_earn_*` / `get_futures_*`
-11. `candidate_validation.py` — odłączony od collectora; pętla tuning→eksperyment→wdrożenie będzie autonomiczna w v0.8+ — 1-linijkowe stuby, nieprzetestowane
+10. Brak retry logic w `binance_client.py` (tenacity)
+11. `get_simple_earn_*` / `get_futures_*` — 1-linijkowe stuby, nieprzetestowane
 
 ---
 
-## METRYKI JAKOŚCI KODU (aktualizacja 2026-04-01 iter5)
+## METRYKI JAKOŚCI KODU (aktualizacja 2026-04-02 sesja 16)
 
 | Metryka | Wartość |
 |---------|---------|
@@ -475,8 +492,10 @@ Gross/Net PnL, cost breakdown, CostLedger, compute_demo_account_state.
 | Import nieużywany | 0 ✅ |
 | Podwójna definicja funkcji | 0 ✅ |
 | Stub katalogi | 0 ✅ (wszystkie usunięte) |
-| DB rozmiar | ~275 MB (retencja decision_traces 30 dni dodana) |
-| Endpointy API | 32 |
+| DB rozmiar | ~440 MB main + WAL (po checkpoint 0 MB WAL) |
+| Endpointy API | 34 |
+| Krytyczne blokery otwarte | 0 ✅ |
+| Dokumenty strategii | STRATEGY_RULES.md, TRADING_METRICS_SPEC.md ✅ |
 
 ---
 
@@ -505,25 +524,38 @@ notification_hooks.py → Telegram REST bezpośrednio ✅
 
 ---
 
-## STATUS WERSJI v0.7 BETA (aktualizacja 2026-03-31)
+## STATUS WERSJI v0.7 BETA (aktualizacja 2026-04-02 sesja 16)
+
+**Feature Freeze — 4 piony ZAMKNIĘTE ✅:**
+- **Pion A — Live Data**: `_build_live_signals` zwraca real RSI+EMA sygnały; heuristic ATR fallback gdy brak AI ranges
+- **Pion B — Portfel**: Binance balance w UI, equity→AccountSnapshot co 15 min, mark_to_market_positions co cykl
+- **Pion C — Symbol Detail**: `SymbolDetailPanel` (L495 MainContent.tsx) — wykres ticker + forecast + buy/sell + goal analysis — klikalne z całego UI
+- **Pion D — Decision Engine**: `_learn_from_history` z persistencją do RuntimeSetting; `create_order` live → Binance API; `daily_drawdown` live przez `risk.py`
 
 **Co działa (kompletne):**
-- Collector zbiera dane, handluje w trybie DEMO, auto-otwiera pozycje (5 blokerów naprawione)
-- Real RSI/EMA analiza sygnałów; heurystyczny fallback ATR gdy brak OpenAI ranges
-- Market Scanner, Forecast, Entry Readiness endpoints
-- CommandCenterView z BestOpportunity, FinalDecisions, SystemStatusBar
-- ExitDiagnosticsView z bannerem gotowości + kandydatami + diagnostyką spójności
+- Collector zbiera dane, handluje w trybie DEMO, auto-otwiera pozycje
+- 38 symboli w watchliście (CORE/ALTCOIN/SPECULATIVE/SCANNER tiers)
+- Candidate ranking: `composite_score = edge × confidence × (rating/5)`
+- Market regime (CRASH/BEAR/BEAR_SOFT/SIDEWAYS/BULL) z F&G + CoinGecko
+- AI fallback chain: `gemini → groq → openai → ollama → heuristic`
+- Real RSI/EMA analiza sygnałów; heurystyczny fallback ATR gdy brak AI ranges
+- Market Scanner, Forecast, Entry Readiness, Wait-Status endpoints
+- CommandCenterView z BestOpportunity, FinalDecisions, SystemStatusBar, regime badge
+- ExitDiagnosticsView, PositionAnalysisView, TradeDeskView, TelegramIntelView
 - Telegram bot (18 komend, autoryzacja, write-endpointy z ADMIN_TOKEN)
 - Pełny governance pipeline (experiments → rekomendacje → promocja → monitoring → rollback)
-- Dokładna kalkulacja kosztów (fee, slippage, spread)
-- Globalny przełącznik DEMO/LIVE — jedno źródło prawdy
-- SymbolDetailPanel, Forecast overlay, WLFI status
-- LIVE order execution przez Binance API (`place_order` zaimplementowane)
-- Sync pozycji z Binance (`POST /positions/sync-from-binance`)
+- Dokładna kalkulacja kosztów (fee, slippage, spread; gross/net PnL)
+- SymbolDetailPanel — klikalne: wykres + forecast + buy/sell + goal
+- LIVE order execution przez Binance API (`place_order`, retry backoff)
+- Sync pozycji z Binance (`sync-from-binance`, auto-import w cyklu)
+- `_learn_from_history` persystuje kalibrację per-symbol do DB
+- WAL checkpoint (TRUNCATE) — utrzymuje DB < 500 MB
 
-**Co jest niekompletne / do naprawy:**
-- `enabled_strategies` — setting istnieje, collector ignoruje
-- CORS dla produkcji — przed live
+**Co jest niekompletne / do rozważenia:**
+- CORS dla produkcji — przed live ogranicz `allow_origins`
+- OpenAI API key 401 (błędny klucz) — nie blokuje systemu (Gemini jest pierwszy)
+- SQLite WAL growth monitoring — wymaga ręcznego TRUNCATE co kilka dni
+- `AccountSummary.tsx` i `Orderbook.tsx` widgets — nieużywane, do usunięcia lub integracji
 
 ---
 

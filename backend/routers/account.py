@@ -317,6 +317,31 @@ def get_account_summary(
                 (earn_total + futures_wallet_balance) * eur_per_usdt, 2
             )
 
+            # unrealized PnL z tabeli pozycji (entry price vs current price)
+            live_open_pos = db.query(Position).filter(
+                Position.mode == "live", Position.quantity > 0
+            ).all()
+            unrealized_total = round(
+                sum((p.unrealized_pnl or 0.0) for p in live_open_pos), 4
+            )
+
+            # realized PnL 24h z tabeli orderów
+            from datetime import timedelta
+            _cutoff_24h = utc_now_naive() - timedelta(hours=24)
+            _live_sells_24h = (
+                db.query(Order)
+                .filter(
+                    Order.mode == "live",
+                    Order.side == "SELL",
+                    Order.status == "FILLED",
+                    Order.timestamp >= _cutoff_24h,
+                )
+                .all()
+            )
+            realized_pnl_24h = round(
+                sum((o.net_pnl or 0.0) for o in _live_sells_24h), 4
+            )
+
             data = {
                 "mode": "live",
                 "equity": round(total_equity, 2),
@@ -324,7 +349,8 @@ def get_account_summary(
                 "used_margin": round(total_equity - free_cash_eur, 2),
                 "margin_level": 200.0,
                 "balance": round(total_equity, 2),
-                "unrealized_pnl": 0.0,
+                "unrealized_pnl": unrealized_total,
+                "realized_pnl_24h": realized_pnl_24h,
                 "timestamp": utc_now_naive().isoformat(),
                 "balances": spot_balances[:15],
                 "spot_positions": spot_positions,
@@ -511,7 +537,7 @@ def get_ai_status():
 
     # W trybie auto, kolejność prób
     if provider == "auto":
-        chain = ["ollama", "gemini", "groq", "openai", "heuristic"]
+        chain = ["gemini", "groq", "openai", "ollama", "heuristic"]
     elif provider in ("heuristic", "offline"):
         chain = ["heuristic"]
     else:
@@ -1810,9 +1836,11 @@ def get_system_status(request: Request, db: Session = Depends(get_db)):
         )
         last_snapshot_ts = last_snap.timestamp.isoformat() if last_snap else None
 
+        # Pokaż ostatni błąd tylko jeśli jest młodszy niż 10 minut — starsze oznaczają że system się naprawił
+        _error_window = utc_now_naive() - timedelta(minutes=10)
         last_error = (
             db.query(SystemLog)
-            .filter(SystemLog.level == "ERROR")
+            .filter(SystemLog.level == "ERROR", SystemLog.timestamp >= _error_window)
             .order_by(desc(SystemLog.timestamp))
             .first()
         )

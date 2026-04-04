@@ -16,12 +16,16 @@ Warstwa czysto prezentacyjna / read-only.
 from __future__ import annotations
 
 import logging
+import json
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 from sqlalchemy.orm import Session
 
 from backend.database import (
+    ConfigPromotion,
+    ConfigRollback,
+    DecisionTrace,
     Incident,
     PolicyAction,
     PromotionMonitoring,
@@ -46,6 +50,15 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Sekcje składowe konsoli
 # ---------------------------------------------------------------------------
+
+def _load_json_blob(raw: Optional[str]) -> Dict[str, Any]:
+    if not raw:
+        return {}
+    try:
+        data = json.loads(raw)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
 
 def _section_active_incidents(db: Session, limit: int = 50) -> Dict[str, Any]:
     """Aktywne incydenty (niefinalne)."""
@@ -231,6 +244,84 @@ def _section_recent_system_events(db: Session, limit: int = 30) -> Dict[str, Any
     }
 
 
+def _section_decision_intelligence(db: Session, limit: int = 30) -> Dict[str, Any]:
+    """Najnowsze decyzje tradingowe z planem, rewizją i economics."""
+    rows = (
+        db.query(DecisionTrace)
+        .order_by(DecisionTrace.timestamp.desc())
+        .limit(limit)
+        .all()
+    )
+
+    items: List[Dict[str, Any]] = []
+    blocked_count = 0
+    revision_required_count = 0
+    negative_net_count = 0
+
+    for row in rows:
+        plan = _load_json_blob(row.plan_json)
+        snapshot = _load_json_blob(row.snapshot_json)
+        risk_gate = _load_json_blob(row.risk_gate_result)
+        cost_gate = _load_json_blob(row.cost_gate_result)
+        execution_gate = _load_json_blob(row.execution_gate_result)
+        payload = _load_json_blob(row.payload)
+
+        expected_net = plan.get("expected_net_profit")
+        requires_revision = bool(plan.get("requires_revision"))
+        action = plan.get("action")
+        plan_status = plan.get("plan_status")
+
+        if str(row.action_type).lower() == "skip":
+            blocked_count += 1
+        if requires_revision:
+            revision_required_count += 1
+        try:
+            if expected_net is not None and float(expected_net) < 0:
+                negative_net_count += 1
+        except Exception:
+            pass
+
+        items.append({
+            "id": int(row.id),
+            "timestamp": row.timestamp.isoformat() if row.timestamp else None,
+            "symbol": row.symbol,
+            "mode": row.mode,
+            "action_type": row.action_type,
+            "reason_code": row.reason_code,
+            "strategy_name": row.strategy_name,
+            "signal_summary": row.signal_summary,
+            "position_id": row.position_id,
+            "order_id": row.order_id,
+            "plan_status": plan_status,
+            "action": action,
+            "break_even_price": plan.get("break_even_price"),
+            "expected_net_profit": expected_net,
+            "expected_net_profit_pct": plan.get("expected_net_profit_pct"),
+            "take_profit_price": plan.get("take_profit_price"),
+            "stop_loss_price": plan.get("stop_loss_price"),
+            "confidence_score": plan.get("confidence_score"),
+            "risk_score": plan.get("risk_score"),
+            "trade_quality_score": plan.get("trade_quality_score"),
+            "cost_efficiency_score": plan.get("cost_efficiency_score"),
+            "requires_revision": requires_revision,
+            "invalidation_reason": plan.get("invalidation_reason"),
+            "market_price": ((snapshot.get("market") or {}).get("price")),
+            "market_stale": ((snapshot.get("source_freshness") or {}).get("is_stale")),
+            "risk_allowed": risk_gate.get("allowed"),
+            "cost_eligible": cost_gate.get("eligible"),
+            "execution_allowed": execution_gate.get("allowed"),
+            "payload": payload,
+        })
+
+    return {
+        "count": len(items),
+        "blocked_count": blocked_count,
+        "revision_required_count": revision_required_count,
+        "negative_expected_net_count": negative_net_count,
+        "items": items,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Helper
 # ---------------------------------------------------------------------------
@@ -265,6 +356,7 @@ def get_operator_console(db: Session) -> Dict[str, Any]:
         "operator_queue": lambda: _section_operator_queue(db),
         "worker_status": lambda: _section_worker_status(),
         "monitoring_summary": lambda: _section_monitoring_summary(db),
+        "decision_intelligence": lambda: _section_decision_intelligence(db),
         "recent_notifications": lambda: _section_recent_notifications(db),
         "recent_blocked_operations": lambda: _section_recent_blocked_operations(db),
         "recent_system_events": lambda: _section_recent_system_events(db),
@@ -292,6 +384,7 @@ def get_console_section(db: Session, section: str) -> Dict[str, Any]:
         "operator_queue": lambda: _section_operator_queue(db),
         "worker_status": lambda: _section_worker_status(),
         "monitoring_summary": lambda: _section_monitoring_summary(db),
+        "decision_intelligence": lambda: _section_decision_intelligence(db),
         "recent_notifications": lambda: _section_recent_notifications(db),
         "recent_blocked_operations": lambda: _section_recent_blocked_operations(db),
         "recent_system_events": lambda: _section_recent_system_events(db),

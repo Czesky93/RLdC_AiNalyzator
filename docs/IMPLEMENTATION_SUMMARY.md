@@ -248,7 +248,7 @@ Stworzono 3 kompleksowe dokumenty:
 ## Screenshots
 
 ### Dashboard View
-![Dashboard](https://github.com/user-attachments/assets/28a95ed9-2711-49df-83ee-7e33f8705597)
+![Dashboard](https://github.com/user-attachments/assets/28a95ed9-2711-49df-83e<e-7e33f8705597)
 
 Widoczne elementy:
 - ✅ Dark theme (#0a1219)

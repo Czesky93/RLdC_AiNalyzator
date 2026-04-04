@@ -38,6 +38,9 @@ engine = create_engine(
     connect_args=_sqlite_connect_args,
     echo=False,
     pool_pre_ping=True,
+    pool_size=int(os.getenv("DB_POOL_SIZE", "20")),
+    max_overflow=int(os.getenv("DB_MAX_OVERFLOW", "40")),
+    pool_timeout=int(os.getenv("DB_POOL_TIMEOUT", "30")),
 )
 
 # WAL mode — pozwala na równoczesny odczyt i zapis (SQLite)
@@ -101,6 +104,12 @@ class Signal(Base):
     price = Column(Float, nullable=False)
     indicators = Column(Text)  # JSON z wskaźnikami
     reason = Column(Text)  # Uzasadnienie po polsku
+    snapshot_json = Column(Text)  # Pełny snapshot wejściowy dla decision engine
+    plan_json = Column(Text)  # Ustrukturyzowany plan transakcji
+    plan_status = Column(String(32), default="draft", index=True)
+    requires_revision = Column(Boolean, default=False, index=True)
+    invalidation_reason = Column(Text)
+    last_consulted_at = Column(DateTime, default=utc_now_naive, index=True)
     timestamp = Column(DateTime, default=utc_now_naive, index=True)
 
 
@@ -129,6 +138,12 @@ class Order(Base):
     config_snapshot_id = Column(String(64), index=True)
     entry_reason_code = Column(String(80))
     exit_reason_code = Column(String(80))
+    error_reason = Column(Text)
+    exchange_order_id = Column(String(80), index=True)
+    notes = Column(Text)
+    created_at = Column(DateTime, default=utc_now_naive, index=True)
+    filled_at = Column(DateTime, index=True)
+    decision_plan_json = Column(Text)
     timestamp = Column(DateTime, default=utc_now_naive, index=True)
 
 
@@ -170,6 +185,11 @@ class Position(Base):
     trailing_stop_price = Column(Float)          # aktualny poziom trailing stop
     partial_take_count = Column(Integer, default=0)   # ile razy już było częściowe zamknięcie
     exit_plan_json = Column(Text)                # JSON z planem wyjścia
+    decision_plan_json = Column(Text)            # JSON z pełnym planem transakcji
+    plan_status = Column(String(32), default="draft", index=True)
+    requires_revision = Column(Boolean, default=False, index=True)
+    invalidation_reason = Column(Text)
+    last_consulted_at = Column(DateTime, index=True)
 
 
 class ExitQuality(Base):
@@ -302,6 +322,15 @@ class PendingOrder(Base):
     reason = Column(Text)
     config_snapshot_id = Column(String(64), index=True)
     strategy_name = Column(String(80))
+    exit_reason_code = Column(String(80))
+    decision_plan_json = Column(Text)
+    plan_status = Column(String(32), default="pending", index=True)
+    requires_revision = Column(Boolean, default=False, index=True)
+    invalidation_reason = Column(Text)
+    last_consulted_at = Column(DateTime, index=True)
+    exchange_order_id = Column(String(80), index=True)
+    expires_at = Column(DateTime, index=True)
+    last_checked_at = Column(DateTime, index=True)
     created_at = Column(DateTime, default=utc_now_naive, index=True)
     confirmed_at = Column(DateTime)
 
@@ -576,6 +605,9 @@ class DecisionTrace(Base):
     config_snapshot_id = Column(String(64), index=True)
     position_id = Column(Integer, index=True)
     order_id = Column(Integer, index=True)
+    snapshot_json = Column(Text)
+    plan_json = Column(Text)
+    revision_of_trace_id = Column(Integer, index=True)
     payload = Column(Text)
 
 
@@ -718,12 +750,14 @@ def init_db():
 
 def _ensure_schema():
     """Minimalna migracja schematu (bez Alembic)."""
-    inspector = inspect(engine)
 
     def _ensure_column(table_name: str, column_name: str, ddl: str) -> None:
-        if table_name not in inspector.get_table_names():
+        # Tworzymy świeży inspector PER CALL — unikamy cache'owania schematu
+        # po ALTER TABLE, który nie odświeża wewnętrznego cache inspectora.
+        fresh_inspector = inspect(engine)
+        if table_name not in fresh_inspector.get_table_names():
             return
-        columns = {col["name"] for col in inspector.get_columns(table_name)}
+        columns = {col["name"] for col in fresh_inspector.get_columns(table_name)}
         if column_name in columns:
             return
         with engine.begin() as conn:
@@ -746,6 +780,19 @@ def _ensure_schema():
         _ensure_column(table_name, "config_snapshot_id", "VARCHAR(64)")
         _ensure_column(table_name, "entry_reason_code", "VARCHAR(80)")
         _ensure_column(table_name, "exit_reason_code", "VARCHAR(80)")
+        if table_name == "orders":
+            _ensure_column(table_name, "error_reason", "TEXT")
+            _ensure_column(table_name, "exchange_order_id", "VARCHAR(80)")
+            _ensure_column(table_name, "notes", "TEXT")
+            _ensure_column(table_name, "created_at", "DATETIME")
+            _ensure_column(table_name, "filled_at", "DATETIME")
+            _ensure_column(table_name, "decision_plan_json", "TEXT")
+        if table_name == "positions":
+            _ensure_column(table_name, "decision_plan_json", "TEXT")
+            _ensure_column(table_name, "plan_status", "VARCHAR(32)")
+            _ensure_column(table_name, "requires_revision", "BOOLEAN DEFAULT 0")
+            _ensure_column(table_name, "invalidation_reason", "TEXT")
+            _ensure_column(table_name, "last_consulted_at", "DATETIME")
     # Exit quality tracking — pozycje
     for col, ddl in [
         ("planned_tp", "FLOAT"),
@@ -763,8 +810,26 @@ def _ensure_schema():
         _ensure_column("positions", col, ddl)
 
     _ensure_column("pending_orders", "config_snapshot_id", "VARCHAR(64)")
-    _ensure_column("config_rollbacks", "execution_status", "VARCHAR(20) DEFAULT 'pending'")
     _ensure_column("pending_orders", "strategy_name", "VARCHAR(80)")
+    _ensure_column("pending_orders", "exit_reason_code", "VARCHAR(80)")
+    _ensure_column("pending_orders", "decision_plan_json", "TEXT")
+    _ensure_column("pending_orders", "plan_status", "VARCHAR(32)")
+    _ensure_column("pending_orders", "requires_revision", "BOOLEAN DEFAULT 0")
+    _ensure_column("pending_orders", "invalidation_reason", "TEXT")
+    _ensure_column("pending_orders", "last_consulted_at", "DATETIME")
+    _ensure_column("pending_orders", "exchange_order_id", "VARCHAR(80)")
+    _ensure_column("pending_orders", "expires_at", "DATETIME")
+    _ensure_column("pending_orders", "last_checked_at", "DATETIME")
+    _ensure_column("signals", "snapshot_json", "TEXT")
+    _ensure_column("signals", "plan_json", "TEXT")
+    _ensure_column("signals", "plan_status", "VARCHAR(32)")
+    _ensure_column("signals", "requires_revision", "BOOLEAN DEFAULT 0")
+    _ensure_column("signals", "invalidation_reason", "TEXT")
+    _ensure_column("signals", "last_consulted_at", "DATETIME")
+    _ensure_column("decision_traces", "snapshot_json", "TEXT")
+    _ensure_column("decision_traces", "plan_json", "TEXT")
+    _ensure_column("decision_traces", "revision_of_trace_id", "INTEGER")
+    _ensure_column("config_rollbacks", "execution_status", "VARCHAR(20) DEFAULT 'pending'")
     _ensure_column("config_snapshots", "config_hash", "VARCHAR(128)")
     _ensure_column("config_snapshots", "payload_json", "TEXT")
     _ensure_column("config_snapshots", "source", "VARCHAR(40)")
@@ -1004,6 +1069,9 @@ def save_decision_trace(
     config_snapshot_id: str | None = None,
     position_id: int | None = None,
     order_id: int | None = None,
+    snapshot_json=None,
+    plan_json=None,
+    revision_of_trace_id: int | None = None,
     payload=None,
     timestamp: datetime | None = None,
 ) -> DecisionTrace:
@@ -1022,6 +1090,9 @@ def save_decision_trace(
         config_snapshot_id=config_snapshot_id,
         position_id=position_id,
         order_id=order_id,
+        snapshot_json=_json_text(snapshot_json),
+        plan_json=_json_text(plan_json),
+        revision_of_trace_id=revision_of_trace_id,
         payload=_json_text(payload),
     )
     db.add(trace)

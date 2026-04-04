@@ -5,17 +5,57 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 from sqlalchemy import desc
-from typing import Optional
+from typing import Optional, Dict, Any
 from datetime import datetime, timedelta, timezone
 from pydantic import BaseModel
 import io
 import csv
+import json
 
 from backend.database import get_db, Order, Alert, PendingOrder, MarketData, Position, utc_now_naive
 from backend.auth import require_admin
 from backend.binance_client import get_binance_client
+from backend.analysis import build_market_snapshot, consult_trade_plan, evaluate_plan_revision
+from backend.accounting import build_profitability_guard
 
 router = APIRouter()
+
+
+def _load_plan_json(raw: Optional[str]) -> Optional[Dict[str, Any]]:
+    if not raw:
+        return None
+    try:
+        data = json.loads(raw)
+        return data if isinstance(data, dict) else None
+    except Exception:
+        return None
+
+
+def _plan_payload(plan: Optional[Dict[str, Any]], item: Any) -> Dict[str, Any]:
+    plan = plan or {}
+    last_consulted_at = getattr(item, "last_consulted_at", None)
+    return {
+        "plan_status": getattr(item, "plan_status", None) or plan.get("plan_status"),
+        "action": plan.get("action"),
+        "entry_price": plan.get("entry_price"),
+        "acceptable_entry_range": plan.get("acceptable_entry_range"),
+        "take_profit_price": plan.get("take_profit_price"),
+        "stop_loss_price": plan.get("stop_loss_price"),
+        "break_even_price": plan.get("break_even_price"),
+        "trailing_activation_price": plan.get("trailing_activation_price"),
+        "trailing_distance": plan.get("trailing_distance"),
+        "expected_total_cost": plan.get("expected_total_cost"),
+        "expected_net_profit": plan.get("expected_net_profit"),
+        "expected_net_profit_pct": plan.get("expected_net_profit_pct"),
+        "confidence_score": plan.get("confidence_score"),
+        "risk_score": plan.get("risk_score"),
+        "trade_quality_score": plan.get("trade_quality_score"),
+        "cost_efficiency_score": plan.get("cost_efficiency_score"),
+        "requires_revision": bool(getattr(item, "requires_revision", False) or plan.get("requires_revision")),
+        "invalidation_reason": getattr(item, "invalidation_reason", None) or plan.get("invalidation_reason"),
+        "last_consulted_at": last_consulted_at.isoformat() if isinstance(last_consulted_at, datetime) else plan.get("last_consulted_at"),
+        "plan": plan,
+    }
 
 
 class OrderCreate(BaseModel):
@@ -64,6 +104,7 @@ def get_orders(
         # Formatuj dane
         result = []
         for order in orders:
+            plan = _load_plan_json(getattr(order, "decision_plan_json", None))
             # Spróbuj znaleźć powiązany alert z powodem
             reason = None
             alert = db.query(Alert).filter(
@@ -85,7 +126,10 @@ def get_orders(
                 "executed_price": order.executed_price,
                 "executed_quantity": order.executed_quantity,
                 "timestamp": order.timestamp.isoformat(),
-                "reason": reason
+                "reason": reason,
+                "exchange_order_id": order.exchange_order_id,
+                "notes": order.notes,
+                **_plan_payload(plan, order),
             })
         
         return {
@@ -115,6 +159,7 @@ def get_pending_orders(
         items = query.order_by(desc(PendingOrder.created_at)).limit(limit).all()
         data = []
         for p in items:
+            plan = _load_plan_json(getattr(p, "decision_plan_json", None))
             data.append({
                 "id": p.id,
                 "symbol": p.symbol,
@@ -126,6 +171,7 @@ def get_pending_orders(
                 "reason": p.reason,
                 "created_at": p.created_at.isoformat() if p.created_at else None,
                 "confirmed_at": p.confirmed_at.isoformat() if p.confirmed_at else None,
+                **_plan_payload(plan, p),
             })
         payload = {"success": True, "mode": mode, "data": data, "count": len(data)}
         if include_total:
@@ -186,6 +232,10 @@ def create_pending_order(
     if price_f <= 0:
         raise HTTPException(status_code=400, detail="Price must be positive")
 
+    snapshot = build_market_snapshot(db, symbol, mode=mode)
+    plan = consult_trade_plan(snapshot) if snapshot else None
+    revision = evaluate_plan_revision(snapshot or {}, plan or {}) if snapshot and plan else None
+
     p = PendingOrder(
         symbol=symbol,
         side=side,
@@ -196,6 +246,11 @@ def create_pending_order(
         status="PENDING",
         reason=(payload.reason or None),
         created_at=utc_now_naive(),
+        decision_plan_json=json.dumps(plan, ensure_ascii=False) if plan else None,
+        plan_status=(plan or {}).get("plan_status"),
+        requires_revision=bool(revision and revision.get("requires_revision")),
+        invalidation_reason=(revision or {}).get("reason") if revision else None,
+        last_consulted_at=utc_now_naive() if plan else None,
     )
     db.add(p)
     db.commit()
@@ -211,6 +266,7 @@ def create_pending_order(
             "status": p.status,
             "reason": p.reason,
             "created_at": p.created_at.isoformat() if p.created_at else None,
+            **_plan_payload(plan, p),
         },
     }
 
@@ -311,6 +367,10 @@ def create_order(
             raise HTTPException(status_code=400, detail="Nieprawidłowy typ. Użyj MARKET lub LIMIT")
         if order.quantity <= 0:
             raise HTTPException(status_code=400, detail="Ilość musi być większa od zera")
+        symbol = (order.symbol or "").strip().replace(" ", "").replace("/", "").replace("-", "").upper()
+        snapshot = build_market_snapshot(db, symbol, mode=mode)
+        plan = consult_trade_plan(snapshot) if snapshot else None
+        revision = evaluate_plan_revision(snapshot or {}, plan or {}) if snapshot and plan else None
 
         # ─── DEMO ───────────────────────────────────────────────────────────────
         if mode == "demo":
@@ -319,19 +379,19 @@ def create_order(
             else:
                 md = (
                     db.query(MarketData)
-                    .filter(MarketData.symbol == order.symbol)
+                    .filter(MarketData.symbol == symbol)
                     .order_by(MarketData.timestamp.desc())
                     .first()
                 )
                 if not md or not md.price:
                     raise HTTPException(
                         status_code=400,
-                        detail=f"Brak danych rynkowych dla {order.symbol}. Uruchom kolektor."
+                        detail=f"Brak danych rynkowych dla {symbol}. Uruchom kolektor."
                     )
                 executed_price = float(md.price)
 
             new_order = Order(
-                symbol=order.symbol,
+                symbol=symbol,
                 side=order.side,
                 order_type=order.order_type,
                 price=order.price,
@@ -341,6 +401,7 @@ def create_order(
                 executed_price=executed_price,
                 executed_quantity=order.quantity,
                 timestamp=utc_now_naive(),
+                decision_plan_json=json.dumps(plan, ensure_ascii=False) if plan else None,
             )
             db.add(new_order)
             db.commit()
@@ -348,7 +409,7 @@ def create_order(
 
             return {
                 "success": True,
-                "message": f"Zlecenie demo {order.side} {order.quantity} {order.symbol} @ {executed_price:.4f}",
+                "message": f"Zlecenie demo {order.side} {order.quantity} {symbol} @ {executed_price:.4f}",
                 "data": {
                     "id": new_order.id,
                     "symbol": new_order.symbol,
@@ -360,6 +421,7 @@ def create_order(
                     "executed_quantity": new_order.executed_quantity,
                     "timestamp": new_order.timestamp.isoformat(),
                     "mode": "demo",
+                    **_plan_payload(plan, new_order),
                 },
             }
 
@@ -380,12 +442,58 @@ def create_order(
                 detail="Tryb LIVE obsługuje tylko MARKET orders. Zmień order_type na MARKET."
             )
 
+        if not snapshot or not plan:
+            raise HTTPException(status_code=409, detail="Brak kompletnego planu transakcji dla zlecenia LIVE")
+
+        market_price = float(snapshot.get("price") or 0.0)
+        qty = binance.normalize_quantity(symbol, float(order.quantity))
+        if qty <= 0:
+            raise HTTPException(status_code=409, detail="Ilość po normalizacji Binance jest zerowa")
+
+        allowed = binance.get_allowed_symbols().get(symbol) or {}
+        min_qty = float(allowed.get("min_qty") or 0.0)
+        min_notional = float(allowed.get("min_notional") or 0.0)
+        if min_qty > 0 and qty < min_qty:
+            raise HTTPException(status_code=409, detail=f"Ilość {qty} jest poniżej minQty {min_qty} dla {symbol}")
+        if min_notional > 0 and market_price > 0 and qty * market_price < min_notional:
+            raise HTTPException(
+                status_code=409,
+                detail=f"Wartość zlecenia {qty * market_price:.4f} jest poniżej minNotional {min_notional} dla {symbol}",
+            )
+
+        if order.side == "BUY":
+            if str(plan.get("action") or "").upper() != "BUY":
+                raise HTTPException(status_code=409, detail="Plan transakcji nie pozwala na BUY w obecnych warunkach")
+            if float(plan.get("expected_net_profit") or 0.0) <= float(plan.get("expected_total_cost") or 0.0):
+                raise HTTPException(status_code=409, detail="BUY zablokowany: oczekiwany zysk netto nie pokrywa kosztów")
+        if order.side == "SELL":
+            sell_guard = build_profitability_guard(
+                entry_price=float((snapshot.get("position") or {}).get("entry_price") or market_price),
+                quantity=qty,
+                target_price=float(plan.get("take_profit_price") or market_price),
+                stop_price=float(plan.get("stop_loss_price") or market_price),
+                taker_fee_rate=float(snapshot.get("costs", {}).get("fee_rate") or 0.001),
+                spread_bps=float((snapshot.get("market") or {}).get("spread_pct") or 0.03) * 100.0,
+                slippage_bps=float(snapshot.get("costs", {}).get("slippage_rate") or 0.0005) * 10000.0,
+            )
+            sell_reason = str(plan.get("decision_reason") or plan.get("invalidation_reason") or "").lower()
+            sell_ok = (
+                str(plan.get("action") or "").upper() in {"SELL", "REDUCE"}
+                and (
+                    bool(sell_guard.get("eligible"))
+                    or bool(revision and revision.get("requires_revision"))
+                    or any(tag in sell_reason for tag in ("hard_stop_loss", "risk_exit", "plan_invalidated"))
+                )
+            )
+            if not sell_ok:
+                raise HTTPException(status_code=409, detail="SELL zablokowany: brak twardego powodu lub przewagi netto")
+
         # Złóż zlecenie na Binance
         result = binance.place_order(
-            symbol=order.symbol,
+            symbol=symbol,
             side=order.side,
             order_type="MARKET",
-            quantity=order.quantity,
+            quantity=qty,
         )
 
         if result is None:
@@ -404,7 +512,7 @@ def create_order(
 
         # Pobierz fills (cena wykonania)
         fills = result.get("fills") or []
-        exec_qty = float(result.get("executedQty", order.quantity) or order.quantity)
+        exec_qty = float(result.get("executedQty", qty) or qty)
         cum_quote = float(result.get("cummulativeQuoteQty", 0) or 0)
         executed_price = (cum_quote / exec_qty) if exec_qty > 0 else 0.0
 
@@ -420,7 +528,7 @@ def create_order(
 
         # Zapis do DB
         new_order = Order(
-            symbol=order.symbol,
+            symbol=symbol,
             side=order.side,
             order_type="MARKET",
             price=None,
@@ -430,6 +538,9 @@ def create_order(
             executed_price=executed_price if executed_price > 0 else None,
             executed_quantity=exec_qty,
             timestamp=utc_now_naive(),
+            exchange_order_id=str(binance_order_id or ""),
+            notes=f"fee={total_fee} {fee_asset}",
+            decision_plan_json=json.dumps(plan, ensure_ascii=False),
         )
         db.add(new_order)
         db.flush()
@@ -438,7 +549,7 @@ def create_order(
         if order.side == "BUY" and binance_status in ("FILLED", "PARTIALLY_FILLED") and executed_price > 0:
             existing = (
                 db.query(Position)
-                .filter(Position.symbol == order.symbol, Position.mode == "live")
+                .filter(Position.symbol == symbol, Position.mode == "live")
                 .first()
             )
             if existing:
@@ -450,9 +561,14 @@ def create_order(
                 existing.quantity = total_qty
                 existing.current_price = executed_price
                 existing.unrealized_pnl = 0.0
+                existing.decision_plan_json = json.dumps(plan, ensure_ascii=False)
+                existing.plan_status = plan.get("plan_status")
+                existing.requires_revision = bool(revision and revision.get("requires_revision"))
+                existing.invalidation_reason = (revision or {}).get("reason") if revision else None
+                existing.last_consulted_at = utc_now_naive()
             else:
                 pos = Position(
-                    symbol=order.symbol,
+                    symbol=symbol,
                     side="BUY",
                     entry_price=executed_price,
                     current_price=executed_price,
@@ -460,6 +576,11 @@ def create_order(
                     unrealized_pnl=0.0,
                     mode="live",
                     opened_at=utc_now_naive(),
+                    decision_plan_json=json.dumps(plan, ensure_ascii=False),
+                    plan_status=plan.get("plan_status"),
+                    requires_revision=bool(revision and revision.get("requires_revision")),
+                    invalidation_reason=(revision or {}).get("reason") if revision else None,
+                    last_consulted_at=utc_now_naive(),
                 )
                 db.add(pos)
 
@@ -467,7 +588,7 @@ def create_order(
         if order.side == "SELL" and binance_status in ("FILLED", "PARTIALLY_FILLED"):
             existing = (
                 db.query(Position)
-                .filter(Position.symbol == order.symbol, Position.mode == "live")
+                .filter(Position.symbol == symbol, Position.mode == "live")
                 .first()
             )
             if existing:
@@ -476,6 +597,11 @@ def create_order(
                     db.delete(existing)
                 else:
                     existing.quantity = remaining
+                    existing.decision_plan_json = json.dumps(plan, ensure_ascii=False)
+                    existing.plan_status = plan.get("plan_status")
+                    existing.requires_revision = bool(revision and revision.get("requires_revision"))
+                    existing.invalidation_reason = (revision or {}).get("reason") if revision else None
+                    existing.last_consulted_at = utc_now_naive()
 
         db.commit()
         db.refresh(new_order)
@@ -483,7 +609,7 @@ def create_order(
         return {
             "success": True,
             "message": (
-                f"✓ Zlecenie LIVE {order.side} {exec_qty} {order.symbol} "
+                f"✓ Zlecenie LIVE {order.side} {exec_qty} {symbol} "
                 f"@ {executed_price:.4f} EUR · prowizja {total_fee:.8f} {fee_asset}"
             ),
             "data": {
@@ -500,6 +626,7 @@ def create_order(
                 "fee_asset": fee_asset,
                 "timestamp": new_order.timestamp.isoformat(),
                 "mode": "live",
+                **_plan_payload(plan, new_order),
             },
         }
 

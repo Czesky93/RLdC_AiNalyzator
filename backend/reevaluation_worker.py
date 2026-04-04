@@ -47,6 +47,11 @@ logger = logging.getLogger(__name__)
 DEFAULT_INTERVAL_SECONDS = int(os.getenv("WORKER_INTERVAL_SECONDS", "300"))
 WORKER_ENABLED = os.getenv("WORKER_ENABLED", "true").lower() in ("1", "true", "yes")
 
+# Stan poprzedniego cyklu dla delta-based alertów kolejki operatora
+# -1 oznacza "pierwsza iteracja" — alert nie zostanie wysłany dopóki nie wzrośnie
+_QUEUE_LAST_CRITICAL_COUNT: int = -1
+_QUEUE_LAST_SLA_BREACHED: int = -1
+
 
 # ---------------------------------------------------------------------------
 # Pojedynczy cykl workera
@@ -163,7 +168,7 @@ def _step_reevaluate_rollback_monitoring(db) -> Dict[str, Any]:
         active_rollbacks = (
             db.query(ConfigRollback)
             .filter(
-                ConfigRollback.execution_status == "applied",
+                ConfigRollback.execution_status == "executed",  # BUG FIX: było "applied"
                 ConfigRollback.post_rollback_monitoring_status.in_(["pending", "collecting"]),
             )
             .all()
@@ -198,6 +203,7 @@ def _step_reevaluate_rollback_monitoring(db) -> Dict[str, Any]:
 
 def _step_refresh_operator_queue(db) -> Dict[str, Any]:
     """Krok 4: odświeżenie operator queue i raport."""
+    global _QUEUE_LAST_CRITICAL_COUNT, _QUEUE_LAST_SLA_BREACHED
     try:
         queue = get_operator_queue(db)
         critical_count = sum(1 for q in queue if q.get("priority") == "critical")
@@ -210,8 +216,13 @@ def _step_refresh_operator_queue(db) -> Dict[str, Any]:
             "sla_breached_count": sla_breached,
         }
 
-        # Powiadom jeśli jest coś krytycznego
-        if critical_count > 0 or sla_breached > 0:
+        # Powiadom TYLKO gdy sytuacja się POGORSZYŁA (delta > 0) względem poprzedniego cyklu.
+        # Nie spamuj co 5 minut jeśli stan jest stały.
+        state_worsened = (
+            critical_count > _QUEUE_LAST_CRITICAL_COUNT
+            or sla_breached > _QUEUE_LAST_SLA_BREACHED
+        )
+        if (critical_count > 0 or sla_breached > 0) and state_worsened:
             try:
                 dispatch_notification(
                     "worker_queue_alert",
@@ -221,6 +232,10 @@ def _step_refresh_operator_queue(db) -> Dict[str, Any]:
                 )
             except Exception as exc:
                 logger.error("Błąd wysyłki powiadomienia queue: %s", exc)
+
+        # Aktualizuj zapamiętany stan (zawsze, nie tylko gdy gorszy)
+        _QUEUE_LAST_CRITICAL_COUNT = critical_count
+        _QUEUE_LAST_SLA_BREACHED = sla_breached
 
         return result
     except Exception as exc:

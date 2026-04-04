@@ -45,7 +45,7 @@ export default function Orderbook() {
             <div className="text-xs text-slate-500 mb-2">BID</div>
             {data.bids.map((b, idx) => (
               <div key={`b-${idx}`} className="flex items-center justify-between text-rldc-green-primary">
-                <span>${b[0].toFixed(2)}</span>
+                <span>{b[0].toFixed(2)} €</span>
                 <span>{b[1].toFixed(4)}</span>
               </div>
             ))}
@@ -54,7 +54,7 @@ export default function Orderbook() {
             <div className="text-xs text-slate-500 mb-2">ASK</div>
             {data.asks.map((a, idx) => (
               <div key={`a-${idx}`} className="flex items-center justify-between text-rldc-red-primary">
-                <span>${a[0].toFixed(2)}</span>
+                <span>{a[0].toFixed(2)} €</span>
                 <span>{a[1].toFixed(4)}</span>
               </div>
             ))}
