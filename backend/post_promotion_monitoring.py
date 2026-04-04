@@ -93,16 +93,16 @@ def initialize_monitoring_record(db: Session, promotion_id: int, notes: str | No
 
 def _min_trade_count() -> int:
     try:
-        return max(1, int(os.getenv("POST_PROMOTION_MIN_TRADE_COUNT", "2") or 2))
+        return max(1, int(os.getenv("POST_PROMOTION_MIN_TRADE_COUNT", "20") or 20))
     except Exception:
-        return 2
+        return 20
 
 
 def _min_window_seconds() -> int:
     try:
-        return max(0, int(os.getenv("POST_PROMOTION_MIN_WINDOW_SECONDS", "0") or 0))
+        return max(0, int(os.getenv("POST_PROMOTION_MIN_WINDOW_SECONDS", "7200") or 7200))
     except Exception:
-        return 0
+        return 7200
 
 
 def evaluate_monitoring(db: Session, promotion_id: int, notes: str | None = None) -> Dict[str, Any]:
@@ -139,6 +139,10 @@ def evaluate_monitoring(db: Session, promotion_id: int, notes: str | None = None
     observed_expectancy = float(observed.get("net_expectancy") or 0.0)
     baseline_risk = int(baseline_reference.get("risk_actions_count") or 0)
     observed_risk = int(observed.get("risk_actions_count") or 0)
+    baseline_win_rate = float(baseline_reference.get("win_rate_net") or 0.0)
+    observed_win_rate = float(observed.get("win_rate_net") or 0.0)
+    baseline_pf = float(baseline_reference.get("profit_factor_net") or 0.0)
+    observed_pf = float(observed.get("profit_factor_net") or 0.0)
     observed_trades = int(observed.get("trade_count") or 0)
     elapsed_seconds = max(0.0, (now - start_at).total_seconds())
 
@@ -170,6 +174,11 @@ def evaluate_monitoring(db: Session, promotion_id: int, notes: str | None = None
         if observed_expectancy < baseline_expectancy:
             degraded += 1
             reason_codes.append("POST_PROMOTION_EXPECTANCY_DOWN")
+        # win_rate i profit_factor — dodatkowe sygnały ostrzegawcze (nie wchodzą do rollback_candidate logiki)
+        if baseline_win_rate > 0.01 and observed_win_rate < baseline_win_rate * 0.80 - 0.01:
+            reason_codes.append("POST_PROMOTION_WIN_RATE_DOWN")
+        if baseline_pf > 0.1 and observed_pf < baseline_pf * 0.75 - 0.01:
+            reason_codes.append("POST_PROMOTION_PROFIT_FACTOR_DOWN")
 
         if degraded == 0:
             status = "healthy"
@@ -188,12 +197,32 @@ def evaluate_monitoring(db: Session, promotion_id: int, notes: str | None = None
         confidence += 0.10
     confidence = max(0.05, min(0.99, confidence))
 
+    # Composite strategy score = weighted sum of kluczowych metryk (info dla operatora)
+    _score_baseline = (
+        0.35 * baseline_net
+        + 0.20 * baseline_expectancy
+        + 0.20 * baseline_win_rate
+        - 0.15 * baseline_dd
+        - 0.10 * (baseline_leak * 100)
+    )
+    _score_observed = (
+        0.35 * observed_net
+        + 0.20 * observed_expectancy
+        + 0.20 * observed_win_rate
+        - 0.15 * observed_dd
+        - 0.10 * (observed_leak * 100)
+    )
     deviation_summary = {
         "net_pnl_delta": observed_net - baseline_net,
         "cost_leakage_delta": observed_leak - baseline_leak,
         "drawdown_delta": observed_dd - baseline_dd,
         "net_expectancy_delta": observed_expectancy - baseline_expectancy,
         "risk_actions_delta": observed_risk - baseline_risk,
+        "win_rate_delta": observed_win_rate - baseline_win_rate,
+        "profit_factor_delta": observed_pf - baseline_pf,
+        "strategy_score_baseline": round(_score_baseline, 4),
+        "strategy_score_observed": round(_score_observed, 4),
+        "strategy_score_delta": round(_score_observed - _score_baseline, 4),
         "trade_count": observed_trades,
         "elapsed_seconds": elapsed_seconds,
     }

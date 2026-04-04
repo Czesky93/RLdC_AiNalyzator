@@ -2,6 +2,7 @@
 
 import React, { useEffect, useState } from 'react'
 import { ADMIN_TOKEN_STORAGE_KEY, getAdminToken, getApiBase, withAdminToken } from '../lib/api'
+import ControlCenter from './widgets/ControlCenter'
 import DecisionRisk from './widgets/DecisionRisk'
 import DecisionsRiskPanel from './widgets/DecisionsRiskPanel'
 import EquityCurve from './widgets/EquityCurve'
@@ -601,11 +602,16 @@ function SymbolDetailPanel({
             <span className="text-xl font-bold text-slate-100">{displaySymbol}</span>
             {latestSignal && (
               <span className={`px-2 py-0.5 rounded text-xs font-bold ${
-                latestSignal.signal_type === 'BUY' ? 'bg-rldc-green-primary/20 text-rldc-green-primary' :
-                latestSignal.signal_type === 'SELL' ? 'bg-rldc-red-primary/20 text-rldc-red-primary' :
+                (latestSignal.action || latestSignal.signal_type) === 'BUY' ? 'bg-rldc-green-primary/20 text-rldc-green-primary' :
+                (latestSignal.action || latestSignal.signal_type) === 'SELL' ? 'bg-rldc-red-primary/20 text-rldc-red-primary' :
                 'bg-slate-500/20 text-slate-400'
               }`}>
-                {latestSignal.signal_type === 'BUY' ? 'SYGNAŁ KUP' : latestSignal.signal_type === 'SELL' ? 'SYGNAŁ SPRZEDAJ' : 'OBSERWUJ'}
+                {latestSignal.action === 'BUY' ? 'PLAN: KUP' :
+                 latestSignal.action === 'SELL' ? 'PLAN: SPRZEDAJ' :
+                 latestSignal.action === 'HOLD' ? 'PLAN: TRZYMAJ' :
+                 latestSignal.action === 'WAIT' ? 'PLAN: CZEKAJ' :
+                 latestSignal.signal_type === 'BUY' ? 'SYGNAŁ KUP' :
+                 latestSignal.signal_type === 'SELL' ? 'SYGNAŁ SPRZEDAJ' : 'OBSERWUJ'}
               </span>
             )}
             {card && (
@@ -701,14 +707,14 @@ function SymbolDetailPanel({
                 <div>
                   <div className="text-[10px] text-slate-500 mb-0.5">Kupiono po</div>
                   <div className="text-xl font-mono font-bold text-slate-300">
-                    {card.entry_price < 1 ? card.entry_price.toFixed(6) : card.entry_price.toFixed(4)} <span className="text-sm font-normal text-slate-500">EUR</span>
+                    {card.entry_price != null ? (card.entry_price < 1 ? card.entry_price.toFixed(6) : card.entry_price.toFixed(4)) : '--'} <span className="text-sm font-normal text-slate-500">EUR</span>
                   </div>
                 </div>
               ) : latestSignal ? (
                 <div>
-                  <div className="text-[10px] text-slate-500 mb-0.5">Pewność sygnału</div>
+                  <div className="text-[10px] text-slate-500 mb-0.5">Pewność planu</div>
                   <div className="text-xl font-mono font-bold text-slate-100">
-                    {Math.round((latestSignal.confidence || 0) * 100)}<span className="text-sm font-normal text-slate-500">%</span>
+                    {Math.round(((latestSignal.confidence_score ?? latestSignal.confidence) || 0) * 100)}<span className="text-sm font-normal text-slate-500">%</span>
                   </div>
                 </div>
               ) : null}
@@ -756,30 +762,41 @@ function SymbolDetailPanel({
                   {card.rsi ?? '--'}
                 </div>
               </div>
-              {card.planned_tp != null && (
+              {(card.take_profit_price ?? card.planned_tp) != null && (
                 <div>
                   <div className="text-[10px] text-slate-500">Cel zysku</div>
                   <div className="text-sm font-mono text-rldc-green-primary mt-0.5">
-                    {card.planned_tp < 1 ? card.planned_tp.toFixed(6) : card.planned_tp.toFixed(4)}
+                    {(card.take_profit_price ?? card.planned_tp) < 1 ? (card.take_profit_price ?? card.planned_tp).toFixed(6) : (card.take_profit_price ?? card.planned_tp).toFixed(4)}
                   </div>
                   {currentPrice != null && (
                     <div className="text-[10px] text-rldc-green-primary/70">
-                      +{(((card.planned_tp - currentPrice) / currentPrice) * 100).toFixed(1)}%
+                      +{((((card.take_profit_price ?? card.planned_tp) - currentPrice) / currentPrice) * 100).toFixed(1)}%
                     </div>
                   )}
                 </div>
               )}
-              {card.planned_sl != null && (
+              {(card.stop_loss_price ?? card.planned_sl) != null && (
                 <div>
                   <div className="text-[10px] text-slate-500">Stop straty</div>
                   <div className="text-sm font-mono text-rldc-red-primary mt-0.5">
-                    {card.planned_sl < 1 ? card.planned_sl.toFixed(6) : card.planned_sl.toFixed(4)}
+                    {(card.stop_loss_price ?? card.planned_sl) < 1 ? (card.stop_loss_price ?? card.planned_sl).toFixed(6) : (card.stop_loss_price ?? card.planned_sl).toFixed(4)}
                   </div>
                   {currentPrice != null && (
                     <div className="text-[10px] text-rldc-red-primary/70">
-                      {(((card.planned_sl - currentPrice) / currentPrice) * 100).toFixed(1)}%
+                      {((((card.stop_loss_price ?? card.planned_sl) - currentPrice) / currentPrice) * 100).toFixed(1)}%
                     </div>
                   )}
+                </div>
+              )}
+              {(card.break_even_price != null || card.expected_net_profit != null) && (
+                <div>
+                  <div className="text-[10px] text-slate-500">Opłacalność</div>
+                  <div className="text-sm font-mono text-slate-200 mt-0.5">
+                    BE {card.break_even_price != null ? (card.break_even_price < 1 ? card.break_even_price.toFixed(6) : card.break_even_price.toFixed(4)) : '--'}
+                  </div>
+                  <div className={`text-[10px] ${(card.expected_net_profit ?? 0) >= 0 ? 'text-rldc-green-primary/70' : 'text-rldc-red-primary/70'}`}>
+                    Netto {card.expected_net_profit != null ? `${card.expected_net_profit >= 0 ? '+' : ''}${card.expected_net_profit.toFixed(2)} EUR` : '--'}
+                  </div>
                 </div>
               )}
             </div>
@@ -1197,12 +1214,18 @@ function SymbolDetailPanel({
               } else {
                 decision = card.decision; summary = 'Obserwuj rynek i czekaj na wyraźniejszy sygnał.'
               }
-            } else if (latestSignal?.signal_type === 'BUY') {
+            } else if (latestSignal?.action === 'BUY' || latestSignal?.signal_type === 'BUY') {
               decision = 'KANDYDAT DO WEJŚCIA'; decColor = 'text-rldc-green-primary'; decBg = 'bg-rldc-green-primary/10 border-rldc-green-primary/30'
-              summary = `Sygnał kupna z pewnością ${Math.round((latestSignal.confidence || 0) * 100)}%. Nie masz jeszcze pozycji na tym instrumencie.`
-            } else if (latestSignal?.signal_type === 'SELL') {
+              const conf = Math.round(((latestSignal.confidence_score ?? latestSignal.confidence) || 0) * 100)
+              const entry = latestSignal.entry_price != null ? `Wejście: ${latestSignal.entry_price.toFixed(latestSignal.entry_price < 1 ? 6 : 4)} EUR. ` : ''
+              const target = latestSignal.take_profit_price != null ? `TP: ${latestSignal.take_profit_price.toFixed(latestSignal.take_profit_price < 1 ? 6 : 4)} EUR. ` : ''
+              const risk = latestSignal.stop_loss_price != null ? `SL: ${latestSignal.stop_loss_price.toFixed(latestSignal.stop_loss_price < 1 ? 6 : 4)} EUR. ` : ''
+              const net = latestSignal.expected_net_profit != null ? `Oczekiwany wynik netto: ${latestSignal.expected_net_profit >= 0 ? '+' : ''}${latestSignal.expected_net_profit.toFixed(2)} EUR.` : ''
+              summary = `Plan kupna z pewnością ${conf}%. ${entry}${target}${risk}${net}`.trim()
+            } else if (latestSignal?.action === 'SELL' || latestSignal?.signal_type === 'SELL') {
               decision = 'NIE WCHODŹ'; decColor = 'text-rldc-red-primary'; decBg = 'bg-rldc-red-primary/10 border-rldc-red-primary/30'
-              summary = 'Sygnał sprzedaży — rynek może dalej spadać. Nie otwieraj pozycji.'
+              const reason = latestSignal.invalidation_reason ? ` Powód: ${latestSignal.invalidation_reason}.` : ''
+              summary = `Plan nie wspiera wejścia long.${reason}`
             } else {
               decision = 'OBSERWUJ'
             }
@@ -1705,6 +1728,35 @@ function CommandCenterView({ mode, onSymbolClick }: { mode: 'demo' | 'live'; onS
         </div>
       )}
 
+      {/* ━━━ REŻIM RYNKOWY BADGE ━━━ */}
+      {waitStatus?.market_regime && (() => {
+        const mr = waitStatus.market_regime
+        const isCrash = mr.name === 'CRASH'
+        const isBear = mr.name === 'BEAR'
+        const isBearSoft = mr.name === 'BEAR_SOFT'
+        const isBull = mr.name === 'BULL'
+        const blocked = mr.buy_blocked
+        if (!blocked && !isBearSoft) return null  // SIDEWAYS/BULL — normalny tryb, bez banera
+        const bgClass = isCrash ? 'bg-red-900/20 border-red-500/40' :
+                        isBear  ? 'bg-orange-900/20 border-orange-500/40' :
+                                  'bg-yellow-900/20 border-yellow-500/30'
+        const textClass = isCrash ? 'text-red-400' : isBear ? 'text-orange-400' : 'text-yellow-400'
+        const label = isCrash ? '🔴 CRASH' : isBear ? '🟠 BESSA' : '🟡 SŁABA BESSA'
+        return (
+          <div className={`mb-5 rounded-lg border px-4 py-2.5 flex items-center justify-between gap-3 ${bgClass}`}>
+            <div className="flex items-center gap-3">
+              <span className={`text-sm font-bold ${textClass}`}>{label}</span>
+              <span className="text-xs text-slate-400">{mr.reason?.replace(/^[🔴🟠🟡]\s*[A-Z_]+:\s*/, '')}</span>
+            </div>
+            {blocked && mr.bear_min_conf != null && (
+              <span className={`text-xs font-medium px-2 py-0.5 rounded-full border ${textClass} border-current/30 bg-current/5`}>
+                BUY wymaga pewności ≥ {Math.round(mr.bear_min_conf * 100)}%
+              </span>
+            )}
+          </div>
+        )
+      })()}
+
       {/* ━━━ NAJLEPSZA OKAZJA TERAZ ━━━ */}
       {bestOpp && !bestOpp._info && (
         <div className={`mb-5 rounded-xl border-2 px-5 py-4 flex items-center justify-between gap-4 ${
@@ -1735,6 +1787,24 @@ function CommandCenterView({ mode, onSymbolClick }: { mode: 'demo' | 'live'; onS
               </div>
               {bestOpp.reason && (
                 <div className="text-xs text-slate-500 mt-1">{bestOpp.reason}</div>
+              )}
+              {(bestOpp.opportunity?.entry_price != null || bestOpp.opportunity?.take_profit_price != null || bestOpp.opportunity?.expected_net_profit != null) && (
+                <div className="mt-2 text-xs text-slate-400 leading-relaxed">
+                  {bestOpp.opportunity?.entry_price != null && (
+                    <span className="mr-3">Entry: {bestOpp.opportunity.entry_price.toFixed(bestOpp.opportunity.entry_price < 1 ? 6 : 4)} EUR</span>
+                  )}
+                  {bestOpp.opportunity?.take_profit_price != null && (
+                    <span className="mr-3">TP: {bestOpp.opportunity.take_profit_price.toFixed(bestOpp.opportunity.take_profit_price < 1 ? 6 : 4)} EUR</span>
+                  )}
+                  {bestOpp.opportunity?.stop_loss_price != null && (
+                    <span className="mr-3">SL: {bestOpp.opportunity.stop_loss_price.toFixed(bestOpp.opportunity.stop_loss_price < 1 ? 6 : 4)} EUR</span>
+                  )}
+                  {bestOpp.opportunity?.expected_net_profit != null && (
+                    <span className={bestOpp.opportunity.expected_net_profit >= 0 ? 'text-rldc-green-primary/80' : 'text-rldc-red-primary/80'}>
+                      Netto: {bestOpp.opportunity.expected_net_profit >= 0 ? '+' : ''}{bestOpp.opportunity.expected_net_profit.toFixed(2)} EUR
+                    </span>
+                  )}
+                </div>
               )}
             </div>
           </div>
@@ -2041,6 +2111,7 @@ function CommandCenterView({ mode, onSymbolClick }: { mode: 'demo' | 'live'; onS
                 const isHoldTarget = action === 'HOLD_TARGET'
                 const isBuy = action === 'BUY' || action === 'KANDYDAT_DO_WEJŚCIA' || action === 'WEJŚCIE_AKTYWNE'
                 const isSell = action === 'SELL'
+                const isWatchlistSell = action === 'RYNEK_SPRZEDAŻY'  // P2-03: SELL bez pozycji — informacyjny
                 const isBlocked = action === 'DO_NOT_ADD' || action === 'WAIT' || action === 'WAIT_FOR_SIGNAL'
 
                 const accentColor =
@@ -2049,6 +2120,7 @@ function CommandCenterView({ mode, onSymbolClick }: { mode: 'demo' | 'live'; onS
                   isHoldTarget ? 'text-blue-400' :
                   isBuy ? 'text-rldc-green-primary' :
                   isSell ? 'text-rldc-red-primary' :
+                  isWatchlistSell ? 'text-slate-400' :  // P2-03: szary, nie czerwony
                   isBlocked ? 'text-slate-500' : 'text-slate-400'
 
                 const bgAccent =
@@ -2220,12 +2292,14 @@ function CommandCenterView({ mode, onSymbolClick }: { mode: 'demo' | 'live'; onS
                 const isHoldTarget = action === 'HOLD_TARGET'
                 const isBuy = action === 'BUY'
                 const isSell = action === 'SELL'
+                const isWatchlistSell = action === 'RYNEK_SPRZEDAŻY'  // P2-03: info
                 const isBlocked = action === 'DO_NOT_ADD' || action === 'WAIT'
 
                 const accentColor = isExit ? 'text-amber-400' :
                   isHoldTarget ? 'text-blue-400' :
                   isBuy ? 'text-rldc-green-primary' :
                   isSell ? 'text-rldc-red-primary' :
+                  isWatchlistSell ? 'text-slate-400' :  // P2-03: szary, nie czerwony
                   isBlocked ? 'text-slate-500' : 'text-slate-400'
 
                 const bgAccent = isExit ? 'bg-amber-400/5 border-l-2 border-amber-400/40' :
@@ -3995,6 +4069,13 @@ function OtherView({ activeView, tradingMode, onSymbolClick }: MainContentProps 
   if (activeView === 'settings' || activeView === 'logs') {
     return <SettingsView activeView={activeView} mode={mode} />
   }
+  if (activeView === 'control-center') {
+    return (
+      <div className="flex-1 h-full min-h-0 flex flex-col">
+        <ControlCenter />
+      </div>
+    )
+  }
   if (activeView === 'macro-reports') {
     return <MacroReportsView mode={mode} />
   }
@@ -4304,8 +4385,8 @@ function TradeDeskView({ mode }: { mode: 'demo' | 'live' }) {
   const isLive = mode === 'live'
   const posData: any[] = positions?.data || []
   const positionHeaders = isLive
-    ? ['Symbol', 'Kierunek', 'Ilość', 'Cena EUR', 'Wartość EUR', 'Źródło']
-    : ['Symbol', 'Kierunek', 'Ilość', 'Cena zakupu', 'Cena teraz', 'Wynik (EUR)']
+    ? ['Symbol', 'Kierunek', 'Ilość', 'Cena EUR', 'Wartość EUR', 'Plan', 'Źródło']
+    : ['Symbol', 'Kierunek', 'Ilość', 'Cena zakupu', 'Cena teraz', 'Wynik (EUR)', 'Plan']
   const positionRows = posData.map((p: any) =>
     isLive
       ? [
@@ -4314,6 +4395,7 @@ function TradeDeskView({ mode }: { mode: 'demo' | 'live' }) {
           typeof p.quantity === 'number' ? p.quantity.toFixed(8) : p.quantity,
           p.current_price != null ? p.current_price.toFixed(p.current_price < 1 ? 6 : 2) : '--',
           p.value_eur != null ? `${p.value_eur.toFixed(2)} EUR` : '--',
+          `${p.action || p.plan_status || 'brak'}${p.requires_revision ? ' • rewizja' : ''}`,
           p.source === 'binance_spot' ? 'LIVE Spot' : 'Lokalna',
         ]
       : [
@@ -4323,6 +4405,7 @@ function TradeDeskView({ mode }: { mode: 'demo' | 'live' }) {
           p.entry_price?.toFixed(2),
           p.current_price?.toFixed(2),
           p.unrealized_pnl?.toFixed(2),
+          `${p.action || p.plan_status || 'brak'}${p.break_even_price != null ? ` • BE ${p.break_even_price.toFixed(p.break_even_price < 1 ? 6 : 2)}` : ''}`,
         ]
   )
   return (
@@ -4556,6 +4639,7 @@ function StrategiesView({ onSymbolClick }: { onSymbolClick?: (s: string) => void
     signalLabel(s.signal_type),
     `${Math.round(s.confidence * 100)}%`,
     s.price?.toFixed(2),
+    `${s.action || '—'} | TP ${s.take_profit_price != null ? s.take_profit_price.toFixed(s.take_profit_price < 1 ? 6 : 2) : '—'} | SL ${s.stop_loss_price != null ? s.stop_loss_price.toFixed(s.stop_loss_price < 1 ? 6 : 2) : '—'}`,
     s.timestamp,
   ])
   return (
@@ -4569,7 +4653,7 @@ function StrategiesView({ onSymbolClick }: { onSymbolClick?: (s: string) => void
       {rows.length > 0 && (
         <SimpleTable
           title="Top 10 sygnałów"
-          headers={['Symbol', 'Sygnał', 'Pewność sygnału', 'Cena (EUR)', 'Czas']}
+          headers={['Symbol', 'Sygnał', 'Pewność sygnału', 'Cena (EUR)', 'Plan', 'Czas']}
           rows={rows}
         />
       )}
@@ -4584,6 +4668,7 @@ function SignalsView({ onSymbolClick }: { onSymbolClick?: (s: string) => void })
     signalLabel(s.signal_type),
     `${Math.round(s.confidence * 100)}%`,
     s.price?.toFixed(2),
+    `${s.action || '—'} | BE ${s.break_even_price != null ? s.break_even_price.toFixed(s.break_even_price < 1 ? 6 : 2) : '—'} | Net ${s.expected_net_profit != null ? s.expected_net_profit.toFixed(2) : '—'} EUR${s.requires_revision ? ' | rewizja' : ''}`,
     s.timestamp,
   ])
   return (
@@ -4597,7 +4682,7 @@ function SignalsView({ onSymbolClick }: { onSymbolClick?: (s: string) => void })
       {rows.length > 0 && (
         <SimpleTable
           title="Najnowsze sygnały"
-          headers={['Symbol', 'Sygnał', 'Pewność sygnału', 'Cena (EUR)', 'Czas']}
+          headers={['Symbol', 'Sygnał', 'Pewność sygnału', 'Cena (EUR)', 'Plan', 'Czas']}
           rows={rows}
         />
       )}

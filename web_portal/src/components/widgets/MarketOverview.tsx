@@ -39,7 +39,7 @@ export default function MarketOverview() {
 
   return (
     <div className="bg-rldc-dark-card rounded-lg p-6 border border-rldc-dark-border neon-card">
-      <h2 className="text-lg font-semibold mb-4 text-slate-200">Przegląd Rynku</h2>
+      <h2 className="text-lg font-semibold mb-4 text-slate-200">Przegląd rynku</h2>
 
       {loading && (
         <div className="text-sm text-slate-400">Ładowanie danych...</div>
@@ -64,14 +64,19 @@ export default function MarketOverview() {
             </div>
             
             <div className="text-2xl font-bold text-slate-100 mb-1">
-              ${item.price?.toFixed(2)}
+              {item.price?.toFixed(2)} EUR
             </div>
             
             <div className="flex items-center justify-between text-sm">
               <span className={item.price_change >= 0 ? 'text-rldc-green-primary' : 'text-rldc-red-primary'}>
                 {item.price_change >= 0 ? '+' : ''}{item.price_change.toFixed(2)} ({item.price_change_percent.toFixed(2)}%)
               </span>
-              <span className="text-slate-500">{item.volume?.toFixed(2)}</span>
+              <span className="text-slate-500">
+                Wolumen: {item.volume?.toFixed(2) ?? '—'}
+              </span>
+            </div>
+            <div className="mt-2 text-[11px] text-slate-500">
+              Źródło: backend/Binance • Aktualizacja: {item.last_update ? item.last_update.slice(11, 19) : '—'}
             </div>
           </div>
         ))}

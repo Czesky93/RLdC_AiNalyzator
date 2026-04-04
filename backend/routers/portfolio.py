@@ -4,8 +4,10 @@ Portfolio API Router - endpoints dla portfolio
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 from sqlalchemy import desc, func
-from typing import Optional, Dict, List
+from typing import Optional, Dict, List, Any
 from datetime import datetime, timedelta, timezone
+import time as _time
+import json
 
 from backend.accounting import summarize_positions, compute_demo_account_state
 from backend.database import get_db, Position, AccountSnapshot, ForecastRecord, MarketData, utc_now_naive
@@ -13,13 +15,32 @@ from backend.binance_client import get_binance_client
 
 router = APIRouter()
 
+# Cache dla _build_live_spot_portfolio — binance.get_balances() kosztuje ~2-3s per call
+_live_spot_portfolio_cache: dict = {}
+_LIVE_SPOT_TTL = 15  # sekund
+
+
+def _load_plan_json(raw: Optional[str]) -> Optional[Dict[str, Any]]:
+    if not raw:
+        return None
+    try:
+        data = json.loads(raw)
+        return data if isinstance(data, dict) else None
+    except Exception:
+        return None
+
 
 def _build_live_spot_portfolio(db: Session) -> Dict:
     """
     Czyta pełne saldo Binance spot i przelicza każde aktywo na EUR.
     Używa cen z MarketData (ostatni tick z DB) i fallback na Binance API.
     Zwraca słownik z: spot_positions, unpriced_assets, total_equity_eur, free_cash_eur, error
+    Cache TTL 30s — get_balances() kosztuje ~2-3s per call.
     """
+    cached = _live_spot_portfolio_cache.get("result")
+    if cached and (_time.time() - cached["ts"]) < _LIVE_SPOT_TTL:
+        return cached["data"]
+
     binance = get_binance_client()
     if not binance.api_key or not binance.api_secret:
         return {"error": "Brak kluczy Binance API — uzupełnij .env (BINANCE_API_KEY, BINANCE_API_SECRET)",
@@ -140,7 +161,7 @@ def _build_live_spot_portfolio(db: Session) -> Dict:
     for p in spot_positions:
         p["weight_pct"] = round((p["value_eur"] / total_equity_eur * 100) if total_equity_eur > 0 else 0, 1)
 
-    return {
+    result = {
         "error": None,
         "spot_positions": spot_positions,
         "unpriced_assets": unpriced_assets,
@@ -151,6 +172,9 @@ def _build_live_spot_portfolio(db: Session) -> Dict:
         "eur_per_usdt": eur_per_usdt,
         "data_age_seconds": None,  # można dodać póżniej
     }
+    # Zapisz do cache (tylko sukces — nie cache'uj błędów)
+    _live_spot_portfolio_cache["result"] = {"data": result, "ts": _time.time()}
+    return result
 
 
 @router.get("")
@@ -188,7 +212,12 @@ def get_portfolio(
                 "unrealized_pnl": unrealized_pnl,
                 "pnl_percent": round((unrealized_pnl / (pos.entry_price * pos.quantity) * 100) if pos.entry_price > 0 else 0, 2),
                 "opened_at": pos.opened_at.isoformat(),
-                "updated_at": pos.updated_at.isoformat() if pos.updated_at else pos.opened_at.isoformat()
+                "updated_at": pos.updated_at.isoformat() if pos.updated_at else pos.opened_at.isoformat(),
+                "plan_status": pos.plan_status,
+                "requires_revision": bool(pos.requires_revision),
+                "invalidation_reason": pos.invalidation_reason,
+                "last_consulted_at": pos.last_consulted_at.isoformat() if pos.last_consulted_at else None,
+                "plan": _load_plan_json(getattr(pos, "decision_plan_json", None)),
             })
         
         response = {
@@ -327,25 +356,43 @@ def get_portfolio_wealth(
             if live_data.get("error"):
                 _info = live_data["error"]
             else:
-                # Zastąp items[] pełnymi danymi Binance spot
+                # Zbierz mapping asset → Position z DB (dla unrealized PnL i entry price)
+                live_db_pos = db.query(Position).filter(
+                    Position.mode == "live", Position.quantity > 0
+                ).all()
+                _pos_by_asset: Dict[str, Position] = {}
+                for _p in live_db_pos:
+                    _sym = str(_p.symbol or "")
+                    _asset = _sym.replace("EUR", "").replace("USDC", "").replace("USDT", "").strip()
+                    if _asset:
+                        _pos_by_asset[_asset] = _p
+
+                # Zastąp items[] pełnymi danymi Binance spot, uzupełnionymi o DB PnL
                 items = []
                 for p in live_data["spot_positions"]:
+                    _asset = p["asset"]
+                    _dbp = _pos_by_asset.get(_asset)
+                    _pnl_eur = round(float(_dbp.unrealized_pnl or 0.0), 4) if _dbp else 0.0
+                    _entry = float(_dbp.entry_price or p["price_eur"]) if _dbp else p["price_eur"]
+                    _cost = _entry * p["total"]
+                    _pnl_pct = round((_pnl_eur / _cost * 100) if _cost > 0 else 0.0, 2)
+                    _opened_at = _dbp.opened_at.isoformat() if (_dbp and _dbp.opened_at) else None
                     items.append({
-                        "symbol": f"{p['asset']}EUR" if p["asset"] not in ("EUR", "USDT", "USDC", "BUSD") else p["asset"],
-                        "asset": p["asset"],
+                        "symbol": f"{_asset}EUR" if _asset not in ("EUR", "USDT", "USDC", "BUSD") else _asset,
+                        "asset": _asset,
                         "side": "HOLD",
                         "quantity": p["total"],
                         "free": p["free"],
                         "locked": p["locked"],
-                        "entry_price": p["price_eur"],
+                        "entry_price": _entry,
                         "current_price": p["price_eur"],
                         "value_eur": p["value_eur"],
-                        "cost_eur": p["value_eur"],
-                        "pnl_eur": 0.0,
-                        "pnl_pct": 0.0,
+                        "cost_eur": round(_cost, 4),
+                        "pnl_eur": _pnl_eur,
+                        "pnl_pct": _pnl_pct,
                         "weight_pct": p["weight_pct"],
                         "price_source": p["price_source"],
-                        "opened_at": None,
+                        "opened_at": _opened_at,
                     })
                 total_equity = live_data["total_equity_eur"]
                 free_cash = live_data["free_cash_eur"]

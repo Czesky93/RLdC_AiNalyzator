@@ -84,13 +84,18 @@ class BinanceClient:
         self.api_secret = api_secret or os.getenv("BINANCE_API_SECRET", "")
         self.time_offset_ms = 0
         
-        # Inicjalizacja klienta - działa bez kluczy dla publicznych danych
-        if self.api_key and self.api_secret:
-            self.client = Client(self.api_key, self.api_secret)
-            logger.info("✅ Binance client initialized with API keys")
-        else:
-            self.client = Client()
-            logger.info("⚠️  Binance client initialized without API keys (public data only)")
+        # Inicjalizacja klienta - działa bez kluczy dla publicznych danych.
+        # ping=False zapobiega błędowi ConnectionError przy braku dostępu do sieci (np. testy, offline).
+        try:
+            if self.api_key and self.api_secret:
+                self.client = Client(self.api_key, self.api_secret, ping=False)
+                logger.info("✅ Binance client initialized with API keys")
+            else:
+                self.client = Client(ping=False)
+                logger.info("⚠️  Binance client initialized without API keys (public data only)")
+        except Exception as exc:
+            logger.warning(f"⚠️  Binance client init failed (offline?): {exc}")
+            self.client = None
 
         self._sync_time()
 
@@ -505,6 +510,72 @@ class BinanceClient:
             logger.error(f"❌ get_order_fills {symbol} #{order_id}: {str(e)}")
             return None
 
+    @_binance_retry
+    def get_order(self, symbol: str, order_id: int) -> Optional[Dict]:
+        """Pobierz status pojedynczego zlecenia."""
+        if not self.api_key or not self.api_secret:
+            return None
+        try:
+            try:
+                return self.client.get_order(symbol=symbol, orderId=order_id, recvWindow=5000)
+            except BinanceAPIException as e:
+                if getattr(e, "code", None) == -1021:
+                    self._sync_time()
+                    return self.client.get_order(symbol=symbol, orderId=order_id, recvWindow=5000)
+                raise
+        except BinanceAPIException as e:
+            logger.error(f"❌ Binance API error get_order {symbol} #{order_id}: {e.message}")
+            return {"_error": True, "error_code": e.status_code, "error_message": e.message}
+        except Exception as e:
+            logger.error(f"❌ get_order {symbol} #{order_id}: {str(e)}")
+            return None
+
+    @_binance_retry
+    def get_open_orders(self, symbol: Optional[str] = None) -> Optional[List[Dict]]:
+        """Pobierz otwarte zlecenia z Binance."""
+        if not self.api_key or not self.api_secret:
+            return None
+        try:
+            kwargs: Dict[str, Any] = {"recvWindow": 5000}
+            if symbol:
+                kwargs["symbol"] = symbol
+            try:
+                return self.client.get_open_orders(**kwargs)
+            except BinanceAPIException as e:
+                if getattr(e, "code", None) == -1021:
+                    self._sync_time()
+                    return self.client.get_open_orders(**kwargs)
+                raise
+        except BinanceAPIException as e:
+            logger.error(f"❌ Binance API error get_open_orders {symbol or '*'}: {e.message}")
+            return {"_error": True, "error_code": e.status_code, "error_message": e.message}
+        except Exception as e:
+            logger.error(f"❌ get_open_orders {symbol or '*'}: {str(e)}")
+            return None
+
+    @_binance_retry
+    def cancel_order(self, symbol: str, order_id: int) -> Optional[Dict]:
+        """Anuluj zlecenie na Binance."""
+        if not self.api_key or not self.api_secret:
+            return None
+        try:
+            try:
+                result = self.client.cancel_order(symbol=symbol, orderId=order_id, recvWindow=5000)
+            except BinanceAPIException as e:
+                if getattr(e, "code", None) == -1021:
+                    self._sync_time()
+                    result = self.client.cancel_order(symbol=symbol, orderId=order_id, recvWindow=5000)
+                else:
+                    raise
+            logger.info("✅ Binance cancel_order: %s #%s", symbol, order_id)
+            return result
+        except BinanceAPIException as e:
+            logger.error(f"❌ Binance API error cancel_order {symbol} #{order_id}: {e.message}")
+            return {"_error": True, "error_code": e.status_code, "error_message": e.message}
+        except Exception as e:
+            logger.error(f"❌ cancel_order {symbol} #{order_id}: {str(e)}")
+            return None
+
     # ── Cache dla exchange info (TTL 5 minut) ────────────────────────────────
     _allowed_cache_data: Optional[Dict[str, Dict]] = None
     _allowed_cache_ts: float = 0.0
@@ -534,6 +605,25 @@ class BinanceClient:
             return data
         quotes_set = {q.upper() for q in quotes}
         return {s: v for s, v in data.items() if v["quote_asset"] in quotes_set}
+
+    def normalize_quantity(self, symbol: str, qty: float) -> float:
+        """
+        Zaokrąglij qty w dół do step_size symbolu (wymóg LOT_SIZE filtra Binance).
+        Np. SHIBEUR step_size=1.0 → 297837.99 → 297837.0
+        Zwraca oryginalne qty jeśli symbol nieznany lub step_size=0.
+        """
+        import math
+        symbols_info = self.get_allowed_symbols()
+        info = symbols_info.get(symbol.upper())
+        if not info:
+            return qty
+        step = info.get("step_size") or 0.0
+        if step <= 0:
+            return qty
+        # Floor do kroku, zachowaj precyzję
+        precision = max(0, -int(round(math.log10(step)))) if step < 1.0 else 0
+        normalized = math.floor(qty / step) * step
+        return round(normalized, precision)
 
     def _fetch_exchange_info(self) -> Dict[str, Dict]:
         """Pobierz i zparsuj exchangeInfo z Binance."""
@@ -584,6 +674,54 @@ class BinanceClient:
         except Exception as exc:
             logger.error(f"❌ Błąd pobierania exchangeInfo: {str(exc)}")
             return {}
+
+    def get_top_symbols_by_volume(
+        self,
+        quotes: Optional[List[str]] = None,
+        top_n: int = 30,
+        min_quote_volume: float = 0.0,
+    ) -> List[str]:
+        """
+        Zwróć listę top-N symboli SPOT sortowanych malejąco po wolumenie 24h.
+        Filtruj do podanych kwot (domyślnie EUR i USDC).
+
+        Args:
+            quotes: Lista walut kwotowych (np. ["EUR", "USDC"]).
+            top_n: Ile symboli zwrócić.
+            min_quote_volume: Minimalny wolumen 24h w walucie kwotowej.
+
+        Returns:
+            Lista symboli Binance posortowanych wg wolumenu (największy pierwszy).
+        """
+        if quotes is None:
+            quotes = ["EUR", "USDC"]
+        quotes_upper = {q.upper() for q in quotes}
+        try:
+            # Pobierz allowed SPOT symbols (cache 5 min)
+            allowed = self.get_allowed_symbols(quotes=list(quotes_upper))
+            if not allowed:
+                return []
+            # Pobierz wszystkie tickery 24h (jeden endpoint)
+            all_tickers = self.client.get_ticker()
+            # Filtruj do dozwolonych par SPOT z żądanymi kwotami
+            candidates = []
+            for t in all_tickers:
+                sym = t.get("symbol", "")
+                if sym not in allowed:
+                    continue
+                try:
+                    qvol = float(t.get("quoteVolume", 0))
+                except Exception:
+                    qvol = 0.0
+                if qvol < min_quote_volume:
+                    continue
+                candidates.append((sym, qvol))
+            # Sortuj malejąco po wolumenie
+            candidates.sort(key=lambda x: x[1], reverse=True)
+            return [sym for sym, _ in candidates[:top_n]]
+        except Exception as exc:
+            logger.error(f"❌ Błąd pobierania top symboli po wolumenie: {exc}")
+            return []
 
     @_binance_retry
     def get_balances(self) -> List[Dict]:

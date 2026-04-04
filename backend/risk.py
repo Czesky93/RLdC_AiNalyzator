@@ -68,6 +68,14 @@ def build_risk_context(
     signal_summary: Optional[Dict[str, Any]] = None,
 ) -> RiskContext:
     runtime_config = runtime_config or get_runtime_config(db)
+    # Dla LIVE: uzupełnij live_balance_eur z RuntimeSetting gdy nie ma w config
+    # (używane przez drawdown_gate jako baza kapitału zamiast total_exposure=0)
+    if mode == "live" and not runtime_config.get("live_balance_eur"):
+        from backend.database import RuntimeSetting
+        _lb_rs = db.query(RuntimeSetting).filter(RuntimeSetting.key == "live_balance_eur").first()
+        if _lb_rs and _lb_rs.value:
+            runtime_config = dict(runtime_config)
+            runtime_config["live_balance_eur"] = float(_lb_rs.value)
     risk_snapshot = compute_risk_snapshot(db, mode=mode)
     activity_snapshot = compute_activity_snapshot(db, mode=mode)
     symbol_performance = _find_summary(compute_symbol_performance(db, mode=mode), "symbol", symbol)
@@ -115,10 +123,12 @@ def evaluate_risk(context: RiskContext) -> RiskDecision:
         _initial_balance = max(1.0, float(os.getenv("DEMO_INITIAL_BALANCE", "10000") or 10000))
         daily_drawdown_ratio = abs(float(rs.get("daily_net_drawdown") or 0.0)) / _initial_balance
     else:
-        # LIVE: używamy całkowitego zaangażowania (exposure) lub fallback na live_balance_eur
+        # LIVE: baza = wolne EUR (live_balance_eur) + wartość otwartych pozycji = pełny portfel.
+        # Stosowanie samego _exposure (33 EUR) zamiast (~331+33=364 EUR) powoduje fałszywe
+        # triggery kill switch przy stratach 3.9 EUR > 3% z 33 EUR = 0.99 EUR.
         _exposure = float(rs.get("total_exposure") or 0.0)
         _live_balance = float(cfg.get("live_balance_eur") or os.getenv("LIVE_INITIAL_BALANCE", "0") or 0.0)
-        _base = max(1.0, _exposure if _exposure > 0 else _live_balance)
+        _base = max(1.0, _live_balance + _exposure)
         daily_drawdown_ratio = abs(float(rs.get("daily_net_drawdown") or 0.0)) / _base
     if allowed and daily_drawdown_ratio >= max_daily_drawdown:
         allowed = False

@@ -2,6 +2,7 @@
 
 import { useState } from 'react'
 import MainContent from './MainContent'
+import MobileNav from './MobileNav'
 import Sidebar from './Sidebar'
 import Topbar from './Topbar'
 
@@ -18,17 +19,27 @@ export default function Dashboard() {
         setTradingMode={setTradingMode}
       />
       <div className="flex">
-        <Sidebar 
-          activeView={activeView} 
-          setActiveView={setActiveView}
-          tradingMode={tradingMode}
-          setTradingMode={setTradingMode}
-        />
+        {/* Sidebar schowany na mobile (< md = 768px) */}
+        <div className="hidden md:block flex-shrink-0">
+          <Sidebar 
+            activeView={activeView} 
+            setActiveView={setActiveView}
+            tradingMode={tradingMode}
+            setTradingMode={setTradingMode}
+          />
+        </div>
         <MainContent 
           activeView={activeView} 
           tradingMode={tradingMode}
         />
       </div>
+      {/* Dolna nawigacja tylko na mobile */}
+      <MobileNav
+        activeView={activeView}
+        setActiveView={setActiveView}
+        tradingMode={tradingMode}
+        setTradingMode={setTradingMode}
+      />
     </div>
   )
 }

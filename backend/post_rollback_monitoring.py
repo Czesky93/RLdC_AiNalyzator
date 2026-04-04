@@ -70,16 +70,16 @@ def _post_apply_snapshot_id(row: ConfigRollback) -> str:
 
 def _min_trade_count() -> int:
     try:
-        return max(1, int(os.getenv("POST_ROLLBACK_MIN_TRADE_COUNT", "2") or 2))
+        return max(1, int(os.getenv("POST_ROLLBACK_MIN_TRADE_COUNT", "20") or 20))
     except Exception:
-        return 2
+        return 20
 
 
 def _min_window_seconds() -> int:
     try:
-        return max(0, int(os.getenv("POST_ROLLBACK_MIN_WINDOW_SECONDS", "0") or 0))
+        return max(0, int(os.getenv("POST_ROLLBACK_MIN_WINDOW_SECONDS", "7200") or 7200))
     except Exception:
-        return 0
+        return 7200
 
 
 def initialize_post_rollback_monitoring(db: Session, rollback_id: int, notes: str | None = None) -> Dict[str, Any]:

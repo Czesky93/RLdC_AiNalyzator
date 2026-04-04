@@ -90,6 +90,131 @@ class _Holding:
     total_cost: float = 0.0
 
 
+def estimate_trade_costs(
+    *,
+    price: float,
+    quantity: float,
+    maker_fee_rate: float = 0.0,
+    taker_fee_rate: float = 0.001,
+    slippage_bps: float = 5.0,
+    spread_bps: float = 3.0,
+    side: str = "BUY",
+    include_round_trip: bool = True,
+    target_price: float | None = None,
+    min_profit_margin_bps: float = 10.0,
+) -> Dict[str, float]:
+    """
+    Ujednolicony model kosztów i opłacalności dla wejścia/wyjścia.
+
+    Zwraca wartości w walucie kwotowanej symbolu.
+    """
+    px = max(0.0, _float(price))
+    qty = max(0.0, _float(quantity))
+    notional = px * qty
+    if px <= 0 or qty <= 0:
+        return {
+            "notional": 0.0,
+            "entry_fee": 0.0,
+            "exit_fee": 0.0,
+            "fee_cost": 0.0,
+            "slippage_cost": 0.0,
+            "spread_cost": 0.0,
+            "total_cost": 0.0,
+            "round_trip_cost": 0.0,
+            "break_even_price": 0.0,
+            "break_even_move_pct": 0.0,
+            "minimum_profit_price": 0.0,
+            "minimum_profit_move_pct": 0.0,
+            "expected_gross_profit": 0.0,
+            "expected_net_profit": 0.0,
+            "expected_net_profit_pct": 0.0,
+            "cost_efficiency_score": 0.0,
+        }
+
+    entry_fee = notional * max(0.0, taker_fee_rate)
+    exit_notional = max(0.0, _float(target_price, px)) * qty
+    exit_fee = exit_notional * max(0.0, taker_fee_rate)
+    fee_cost = entry_fee + (exit_fee if include_round_trip else 0.0)
+    slippage_cost = notional * (max(0.0, slippage_bps) / 10000.0)
+    spread_cost = notional * (max(0.0, spread_bps) / 10000.0)
+    round_trip_slippage = slippage_cost * (2.0 if include_round_trip else 1.0)
+    round_trip_spread = spread_cost * (2.0 if include_round_trip else 1.0)
+    total_cost = fee_cost + round_trip_slippage + round_trip_spread
+    break_even_price = px + (total_cost / qty if qty > 0 else 0.0)
+    break_even_move_pct = ((break_even_price - px) / px * 100.0) if px > 0 else 0.0
+    min_profit_margin = notional * (max(0.0, min_profit_margin_bps) / 10000.0)
+    minimum_profit_price = px + ((total_cost + min_profit_margin) / qty if qty > 0 else 0.0)
+    minimum_profit_move_pct = ((minimum_profit_price - px) / px * 100.0) if px > 0 else 0.0
+
+    expected_gross_profit = 0.0
+    expected_net_profit = 0.0
+    if target_price is not None and qty > 0:
+        expected_gross_profit = (max(0.0, _float(target_price)) - px) * qty
+        expected_net_profit = expected_gross_profit - total_cost
+    expected_net_profit_pct = (expected_net_profit / notional * 100.0) if notional > 0 else 0.0
+    cost_efficiency_score = 0.0
+    if total_cost > 0 and expected_gross_profit > 0:
+        cost_efficiency_score = max(0.0, min(1.0, expected_gross_profit / total_cost / 5.0))
+
+    return {
+        "notional": _round_metric(notional),
+        "entry_fee": _round_metric(entry_fee),
+        "exit_fee": _round_metric(exit_fee if include_round_trip else 0.0),
+        "fee_cost": _round_metric(fee_cost),
+        "slippage_cost": _round_metric(round_trip_slippage),
+        "spread_cost": _round_metric(round_trip_spread),
+        "total_cost": _round_metric(total_cost),
+        "round_trip_cost": _round_metric(total_cost),
+        "total_round_trip_cost": _round_metric(total_cost),
+        "break_even_price": _round_metric(break_even_price),
+        "break_even_move_pct": _round_metric(break_even_move_pct),
+        "minimum_profit_price": _round_metric(minimum_profit_price),
+        "minimum_profit_move_pct": _round_metric(minimum_profit_move_pct),
+        "expected_gross_profit": _round_metric(expected_gross_profit),
+        "expected_net_profit": _round_metric(expected_net_profit),
+        "expected_net_profit_pct": _round_metric(expected_net_profit_pct),
+        "cost_efficiency_score": _round_metric(cost_efficiency_score),
+    }
+
+
+def build_profitability_guard(
+    *,
+    entry_price: float,
+    target_price: float | None,
+    quantity: float,
+    maker_fee_rate: float = 0.0,
+    taker_fee_rate: float = 0.001,
+    slippage_bps: float = 5.0,
+    spread_bps: float = 3.0,
+    min_profit_margin_bps: float = 10.0,
+    min_expected_rr: float = 1.2,
+    stop_price: float | None = None,
+) -> Dict[str, float | bool]:
+    economics = estimate_trade_costs(
+        price=entry_price,
+        quantity=quantity,
+        maker_fee_rate=maker_fee_rate,
+        taker_fee_rate=taker_fee_rate,
+        slippage_bps=slippage_bps,
+        spread_bps=spread_bps,
+        target_price=target_price,
+        min_profit_margin_bps=min_profit_margin_bps,
+    )
+    expected_gross = float(economics["expected_gross_profit"])
+    total_cost = float(economics["total_cost"])
+    expected_net = float(economics["expected_net_profit"])
+    rr_ratio = 0.0
+    if stop_price is not None:
+        risk = max(0.0, (float(entry_price) - _float(stop_price)) * max(0.0, _float(quantity)))
+        if risk > 0:
+            rr_ratio = expected_gross / risk
+    return {
+        **economics,
+        "rr_ratio": _round_metric(rr_ratio),
+        "eligible": bool(expected_net > 0 and expected_gross > total_cost and (rr_ratio >= min_expected_rr or rr_ratio == 0.0)),
+    }
+
+
 def compute_order_cost_summary(order: Order, db: Session | None = None) -> Dict[str, float]:
     fee_cost = _float(order.fee_cost)
     slippage_cost = _float(order.slippage_cost)
@@ -285,6 +410,10 @@ def compute_activity_snapshot(db: Session, mode: str = "demo", now: Optional[dat
     )
     by_symbol_24h: Dict[str, int] = {}
     by_symbol_1h: Dict[str, int] = {}
+    # trades_24h liczy tylko BUY (wejścia), nie SELL (wyjścia częściowe).
+    # Partial take-profit generuje 3 SELL na 1 pozycję — zliczanie ich jako osobne
+    # "tradesie" fałszywie wyzwalało activity_gate_day po ~5 cyklach.
+    entries_24h = 0
     for order in orders:
         symbol = (order.symbol or "").upper()
         if not symbol:
@@ -292,9 +421,11 @@ def compute_activity_snapshot(db: Session, mode: str = "demo", now: Optional[dat
         by_symbol_24h[symbol] = by_symbol_24h.get(symbol, 0) + 1
         if order.timestamp and order.timestamp >= hour_ago:
             by_symbol_1h[symbol] = by_symbol_1h.get(symbol, 0) + 1
+        if (order.side or "").upper() == "BUY":
+            entries_24h += 1
     return {
         "timestamp": now.isoformat(),
-        "trades_24h": len(orders),
+        "trades_24h": entries_24h,
         "trades_1h": sum(by_symbol_1h.values()),
         "by_symbol_24h": by_symbol_24h,
         "by_symbol_1h": by_symbol_1h,
@@ -413,8 +544,15 @@ def compute_risk_snapshot(db: Session, mode: str = "demo", now: Optional[datetim
     if mode == "demo":
         initial_balance = float(os.getenv("DEMO_INITIAL_BALANCE", "10000") or 10000)
     else:
-        # Dla LIVE używamy total_exposure jako proxy bazowego kapitału
-        initial_balance = max(1.0, total_exposure)
+        # Dla LIVE baza kapitału = wolne EUR (live_balance_eur z RuntimeSetting) + bieżące pozycje.
+        # Nie używamy samego total_exposure — to tylko część portfela zaangażowana w pozycje.
+        # Bez live_balance_eur kill switch odpala z bazą 33 EUR zamiast ~331+33 = ~364 EUR.
+        from backend.database import RuntimeSetting
+        lb_rs = db.query(RuntimeSetting).filter(RuntimeSetting.key == "live_balance_eur").first()
+        persisted = float(lb_rs.value) if lb_rs and lb_rs.value else 0.0
+        env_balance = float(os.getenv("LIVE_INITIAL_BALANCE", "0") or 0.0)
+        free_eur = persisted or env_balance
+        initial_balance = max(1.0, free_eur + total_exposure)
     daily_net_drawdown = min(0.0, daily_total_pnl)
     kill_switch_triggered = daily_net_drawdown <= -(initial_balance * 0.03) if initial_balance > 0 else False
 

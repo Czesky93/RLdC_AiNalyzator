@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 from typing import Any, Dict, List
 
 import requests
@@ -21,6 +22,44 @@ import requests
 from backend.system_logger import log_to_db
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Rate limiter — deduplication alertów Telegram
+# ---------------------------------------------------------------------------
+
+# Klucz: event_type (str) → timestamp ostatniego wysłania (float)
+_ALERT_LAST_SENT: Dict[str, float] = {}
+
+
+def _rate_limit_check_and_update(event_type: str) -> bool:
+    """
+    Sprawdź rate limit dla danego event_type.
+    Zwraca True jeśli wolno wysłać (nie za wcześnie), False jeśli zablokowane.
+    Przy zwrocie True aktualizuje timestamp (rezerwuje slot).
+
+    ALERT_RATE_LIMIT_SECONDS=0 → wyłącza rate limit (testy, dev).
+    """
+    try:
+        limit = max(0, int(os.getenv("ALERT_RATE_LIMIT_SECONDS", "3600") or 3600))
+    except Exception:
+        limit = 3600
+
+    if limit == 0:
+        return True  # rate limit wyłączony
+
+    now = time.monotonic()
+    last = _ALERT_LAST_SENT.get(event_type, 0.0)
+    if now - last < limit:
+        logger.debug(
+            "Alert rate-limited: event_type=%s, pozostało=%.0fs",
+            event_type, limit - (now - last),
+        )
+        return False
+
+    _ALERT_LAST_SENT[event_type] = now
+    return True
+
 
 
 # ---------------------------------------------------------------------------
@@ -326,17 +365,24 @@ def dispatch_notification(
     """
     Wyślij powiadomienie do wszystkich skonfigurowanych kanałów.
     Zwraca status wysyłki per kanał.
+
+    Rate limiting: to samo event_type nie zostanie wysłane przez Telegram
+    częściej niż co ALERT_RATE_LIMIT_SECONDS sekund (domyślnie 3600 = 1h).
+    Ustawienie ALERT_RATE_LIMIT_SECONDS=0 wyłącza rate limit (tryb testowy).
     """
     result = {"event_type": event_type, "priority": priority, "channels": {}}
 
-    # Zawsze loguj
+    # Zawsze loguj do DB (bez rate limit)
     _log_notification(event_type, message)
     result["channels"]["log"] = True
 
-    # Telegram — tylko jeśli priorytet spełnia próg
+    # Telegram — tylko jeśli priorytet spełnia próg ORAZ nie jest rate-limited
     if _should_send_telegram(priority):
-        telegram_ok = send_telegram_message(message)
-        result["channels"]["telegram"] = telegram_ok
+        if _rate_limit_check_and_update(event_type):
+            telegram_ok = send_telegram_message(message)
+            result["channels"]["telegram"] = telegram_ok
+        else:
+            result["channels"]["telegram"] = "rate_limited"
     else:
         result["channels"]["telegram"] = None  # pominięto (priorytet poniżej progu)
 

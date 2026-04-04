@@ -1,24 +1,25 @@
 'use client'
 
 import {
-  Activity,
-  BarChart2,
-  BarChart3,
-  Bell,
-  BrainCircuit,
-  FileText,
-  Layers,
-  LayoutDashboard,
-  MessageSquare,
-  Newspaper,
-  ScrollText,
-  SearchX,
-  Settings,
-  Shield,
-  Target,
-  TestTube,
-  TrendingDown,
-  Wallet
+    Activity,
+    BarChart2,
+    BarChart3,
+    Bell,
+    BrainCircuit,
+    FileText,
+    Layers,
+    LayoutDashboard,
+    MessageSquare,
+    Newspaper,
+    ScrollText,
+    SearchX,
+    Settings,
+    Shield,
+    Target,
+    Terminal,
+    TestTube,
+    TrendingDown,
+    Wallet
 } from 'lucide-react'
 
 interface SidebarProps {
@@ -47,6 +48,7 @@ const menuItems = [
   { id: 'reports', label: 'Statystyki', icon: BarChart3 },
   { id: 'logs', label: 'Logi', icon: ScrollText },
   { id: 'settings', label: 'Ustawienia', icon: Settings },
+  { id: 'control-center', label: 'Control Center', icon: Terminal },
 ]
 
 export default function Sidebar({ activeView, setActiveView, tradingMode, setTradingMode }: SidebarProps) {

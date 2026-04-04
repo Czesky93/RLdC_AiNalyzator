@@ -11,6 +11,7 @@ import sys
 import subprocess
 import signal
 import time
+from datetime import datetime, timezone
 from dotenv import load_dotenv
 
 # Import database
@@ -20,6 +21,9 @@ from backend.database import init_db
 from backend.routers import market, portfolio, orders, signals, account, positions, blog, control
 from backend.routers import telegram_intel
 from backend.routers import debug as debug_router
+from backend.routers import system as system_router
+from backend.routers import actions as actions_router
+from backend.routers import terminal as terminal_router
 from backend.collector import DataCollector
 from backend.reevaluation_worker import start_worker, stop_worker
 
@@ -71,11 +75,32 @@ app = FastAPI(
 )
 
 # CORS middleware - pozwala na łączenie z frontendem
+# Dozwolone origins z env (prod) lub localhost dev fallback
+_raw_origins = os.getenv("CORS_ALLOWED_ORIGINS", "")
+if _raw_origins.strip():
+    _allowed_origins = [o.strip() for o in _raw_origins.split(",") if o.strip()]
+else:
+    # Tryb developerski — localhost + LAN + opcjonalny tunel
+    _allowed_origins = [
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+        "http://192.168.0.109:3000",
+    ]
+
+# Automatycznie dodaj tunel Cloudflare/ngrok jeśli skonfigurowany
+_tunnel_url = (
+    os.getenv("CLOUDFLARE_TUNNEL_URL", "").strip().rstrip("/")
+    or os.getenv("NGROK_URL", "").strip().rstrip("/")
+    or os.getenv("PUBLIC_BASE_URL", "").strip().rstrip("/")
+)
+if _tunnel_url and _tunnel_url not in _allowed_origins:
+    _allowed_origins.append(_tunnel_url)
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=_allowed_origins,
     allow_credentials=True,
-    allow_methods=["*"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allow_headers=["*"],
 )
 
@@ -98,7 +123,7 @@ async def health_check():
     return {
         "status": "healthy",
         "database": "connected",
-        "timestamp": "2026-01-31T17:30:00Z"
+        "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
     }
 
 
@@ -113,6 +138,12 @@ app.include_router(blog.router, prefix="/api/blog", tags=["Blog"])
 app.include_router(control.router, prefix="/api/control", tags=["Control"])
 app.include_router(telegram_intel.router, prefix="/api/telegram-intel", tags=["Telegram Intelligence"])
 app.include_router(debug_router.router, prefix="/api/debug", tags=["Debug / Diagnostics"])
+app.include_router(system_router.router, prefix="/api/system", tags=["System"])
+app.include_router(actions_router.router, prefix="/api/actions", tags=["Actions"])
+# AI chat jest montowany też przez actions router (prefix /api/actions/ai/chat)
+
+# WebSocket — bez prefiksu /api (WS poza REST)
+app.include_router(terminal_router.router, tags=["Terminal"])
 
 
 if __name__ == "__main__":

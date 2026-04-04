@@ -11,12 +11,95 @@ from pydantic import BaseModel
 
 from backend.database import get_db, Position, PendingOrder, MarketData, RuntimeSetting, DecisionTrace, Order, utc_now_naive
 from backend.auth import require_admin
-from backend.analysis import get_live_context, _compute_indicators, _insight_from_indicators, _klines_to_df
+from backend.analysis import (
+    get_live_context,
+    _compute_indicators,
+    _insight_from_indicators,
+    _klines_to_df,
+    build_market_snapshot,
+    consult_trade_plan,
+    evaluate_plan_revision,
+)
 from backend.runtime_settings import get_runtime_config, build_symbol_tier_map
 from backend.database import Kline
 from backend.binance_client import get_binance_client
+from backend.accounting import build_profitability_guard
 
 router = APIRouter()
+
+
+def _load_plan_json(raw: Optional[str]) -> Optional[Dict[str, Any]]:
+    if not raw:
+        return None
+    try:
+        data = json.loads(raw)
+        return data if isinstance(data, dict) else None
+    except Exception:
+        return None
+
+
+def _plan_payload(
+    plan: Optional[Dict[str, Any]],
+    status: Optional[str] = None,
+    requires_revision: Optional[bool] = None,
+    invalidation_reason: Optional[str] = None,
+    last_consulted_at: Optional[datetime] = None,
+) -> Dict[str, Any]:
+    plan = plan or {}
+    return {
+        "plan_status": status or plan.get("plan_status"),
+        "action": plan.get("action"),
+        "entry_price": plan.get("entry_price"),
+        "acceptable_entry_range": plan.get("acceptable_entry_range"),
+        "take_profit_price": plan.get("take_profit_price"),
+        "stop_loss_price": plan.get("stop_loss_price"),
+        "break_even_price": plan.get("break_even_price"),
+        "trailing_activation_price": plan.get("trailing_activation_price"),
+        "trailing_distance": plan.get("trailing_distance"),
+        "expected_total_cost": plan.get("expected_total_cost"),
+        "expected_net_profit": plan.get("expected_net_profit"),
+        "expected_net_profit_pct": plan.get("expected_net_profit_pct"),
+        "confidence_score": plan.get("confidence_score"),
+        "risk_score": plan.get("risk_score"),
+        "trade_quality_score": plan.get("trade_quality_score"),
+        "cost_efficiency_score": plan.get("cost_efficiency_score"),
+        "requires_revision": bool(plan.get("requires_revision")) if requires_revision is None else bool(requires_revision),
+        "invalidation_reason": invalidation_reason or plan.get("invalidation_reason"),
+        "last_consulted_at": (
+            last_consulted_at.isoformat()
+            if isinstance(last_consulted_at, datetime)
+            else plan.get("last_consulted_at")
+        ),
+        "source_state": plan.get("source_state"),
+        "plan": plan,
+    }
+
+
+def _build_symbol_plan(
+    db: Session,
+    symbol: str,
+    mode: str,
+    position: Optional[Position] = None,
+    force_reconsult: bool = False,
+) -> tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
+    snapshot = build_market_snapshot(db, symbol, mode=mode, position=position)
+    if not snapshot:
+        return None, None, None
+    plan = consult_trade_plan(snapshot, force=force_reconsult)
+    revision = evaluate_plan_revision(snapshot, plan or {})
+    if revision and revision.get("requires_revision"):
+        snapshot["plan_requires_revision"] = True
+        snapshot["plan_revision_reason"] = revision.get("reason")
+        if force_reconsult:
+            plan = consult_trade_plan(snapshot, force=True)
+            revision = evaluate_plan_revision(snapshot, plan or {})
+    if plan is not None:
+        plan["requires_revision"] = bool(revision and revision.get("requires_revision"))
+        if revision and revision.get("reason"):
+            plan["invalidation_reason"] = revision.get("reason")
+        plan["last_consulted_at"] = snapshot.get("timestamp")
+        plan["source_state"] = snapshot.get("source_freshness")
+    return snapshot, plan, revision
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -28,35 +111,79 @@ def _get_live_spot_positions(db: Session) -> List[Dict[str, Any]]:
     Pobiera aktywa z Binance spot i zwraca listę pozycji w formacie
     kompatybilnym z lokalnym Position (symbol, qty, price_eur, value_eur).
     Reużywa _build_live_spot_portfolio z portfolio router.
+    Łączy z rekordami DB (entry_price, opened_at, PnL, TP/SL).
     """
     from backend.routers.portfolio import _build_live_spot_portfolio
     live_data = _build_live_spot_portfolio(db)
     if live_data.get("error"):
         return []
+
+    # Pobierz wszystkie rekordy Position(live) z DB — źródło entry_price, PnL, TP/SL
+    db_positions: Dict[str, Any] = {}
+    try:
+        db_pos_rows = db.query(Position).filter(Position.mode == "live").all()
+        for dp in db_pos_rows:
+            db_positions[dp.symbol] = dp
+    except Exception:
+        pass
+
     result = []
     for p in live_data["spot_positions"]:
         asset = p["asset"]
         # Pomijaj stablecoiny jako "pozycje" — one to gotówka
         if asset in ("EUR", "USDT", "USDC", "BUSD"):
             continue
-        symbol = f"{asset}EUR"
+
+        # Próbuj dopasować symbol (ETHEUR, BTCEUR lub ETHUSDC itp.)
+        db_pos = db_positions.get(f"{asset}EUR") or db_positions.get(f"{asset}USDC") or db_positions.get(f"{asset}USDT")
+        symbol = db_pos.symbol if db_pos else f"{asset}EUR"
+
+        current_price = p["price_eur"]
+        quantity = p["total"]
+
+        # Filtruj dust (wartość < 1 EUR) bez rekordu DB
+        value_eur = quantity * current_price if current_price else 0.0
+        if not db_pos and value_eur < 1.0:
+            continue  # dust bez śledzonej pozycji — pomijamy
+
+        # entry_price — z DB lub brak
+        entry_price = float(db_pos.entry_price) if db_pos and db_pos.entry_price else None
+
+        # PnL — oblicz na bieżąco jeśli mamy entry_price
+        unrealized_pnl = None
+        pnl_percent = None
+        if entry_price and entry_price > 0 and quantity and current_price:
+            unrealized_pnl = round((current_price - entry_price) * quantity, 4)
+            pnl_percent = round((current_price - entry_price) / entry_price * 100, 2)
+
+        persisted_plan = _load_plan_json(getattr(db_pos, "decision_plan_json", None)) if db_pos else None
         result.append({
-            "id": None,
+            "id": db_pos.id if db_pos else None,
             "symbol": symbol,
             "asset": asset,
             "side": "LONG",
-            "entry_price": None,  # brak kosztu wejścia z Binance
-            "current_price": p["price_eur"],
-            "quantity": p["total"],
+            "entry_price": entry_price,
+            "current_price": current_price,
+            "quantity": quantity,
             "free": p["free"],
             "locked": p["locked"],
             "value_eur": p["value_eur"],
             "price_source": p["price_source"],
             "source": "binance_spot",
-            "unrealized_pnl": None,
-            "pnl_percent": None,
-            "opened_at": None,
-            "updated_at": None,
+            "unrealized_pnl": unrealized_pnl,
+            "pnl_percent": pnl_percent,
+            "opened_at": db_pos.opened_at.isoformat() if db_pos and db_pos.opened_at else None,
+            "updated_at": db_pos.updated_at.isoformat() if db_pos and db_pos.updated_at else None,
+            "planned_tp": float(db_pos.planned_tp) if db_pos and db_pos.planned_tp else None,
+            "planned_sl": float(db_pos.planned_sl) if db_pos and db_pos.planned_sl else None,
+            "exit_reason_code": db_pos.exit_reason_code if db_pos else None,
+            **_plan_payload(
+                persisted_plan,
+                status=getattr(db_pos, "plan_status", None) if db_pos else None,
+                requires_revision=getattr(db_pos, "requires_revision", None) if db_pos else None,
+                invalidation_reason=getattr(db_pos, "invalidation_reason", None) if db_pos else None,
+                last_consulted_at=getattr(db_pos, "last_consulted_at", None) if db_pos else None,
+            ),
         })
     return result
 
@@ -96,6 +223,7 @@ def get_positions(
             denom = (pos.entry_price * pos.quantity) if pos.entry_price and pos.quantity else 0
             pnl_percent = round((unrealized_pnl / denom * 100) if denom > 0 else 0, 2)
 
+            plan = _load_plan_json(getattr(pos, "decision_plan_json", None))
             result.append(
                 {
                     "id": pos.id,
@@ -108,6 +236,13 @@ def get_positions(
                     "pnl_percent": pnl_percent,
                     "opened_at": pos.opened_at.isoformat() if pos.opened_at else None,
                     "updated_at": pos.updated_at.isoformat() if pos.updated_at else None,
+                    **_plan_payload(
+                        plan,
+                        status=getattr(pos, "plan_status", None),
+                        requires_revision=getattr(pos, "requires_revision", None),
+                        invalidation_reason=getattr(pos, "invalidation_reason", None),
+                        last_consulted_at=getattr(pos, "last_consulted_at", None),
+                    ),
                 }
             )
 
@@ -178,6 +313,58 @@ def close_position(
         if qty > pos_qty:
             raise HTTPException(status_code=409, detail="Quantity przekracza rozmiar pozycji")
 
+    snapshot, plan, revision = _build_symbol_plan(db, sym, mode, position=pos, force_reconsult=True)
+    if not snapshot or not plan:
+        fallback_price = float(pos.current_price or pos.entry_price or 0.0)
+        fallback_net = (fallback_price - float(pos.entry_price or 0.0)) * qty
+        snapshot = {
+            "symbol": sym,
+            "timestamp": utc_now_naive().isoformat(),
+            "price": fallback_price,
+            "costs": {"fee_rate": 0.001, "slippage_rate": 0.0005},
+            "spread": 0.0,
+        }
+        plan = {
+            "action": "SELL" if fallback_net > 0 else "HOLD",
+            "plan_status": "fallback_manual_close",
+            "break_even_price": float(pos.entry_price or 0.0),
+            "expected_net_profit": fallback_net,
+            "expected_total_cost": 0.0,
+            "decision_reason": "manual_close_fallback",
+            "last_consulted_at": snapshot["timestamp"],
+        }
+        revision = {"requires_revision": False, "reason": None}
+
+    position_notional = qty * float(snapshot.get("price") or pos.current_price or pos.entry_price or 0.0)
+    profit_guard = build_profitability_guard(
+        entry_price=float(pos.entry_price or 0.0),
+        quantity=qty,
+        target_price=float(plan.get("take_profit_price") or snapshot.get("price") or pos.current_price or pos.entry_price or 0.0),
+        stop_price=float(plan.get("stop_loss_price") or pos.entry_price or 0.0),
+        taker_fee_rate=float(snapshot.get("costs", {}).get("fee_rate") or 0.001),
+        spread_bps=float((snapshot.get("market") or {}).get("spread_pct") or 0.03) * 100.0,
+        slippage_bps=float(snapshot.get("costs", {}).get("slippage_rate") or 0.0005) * 10000.0,
+    )
+    allowed_exit_actions = {"SELL", "REDUCE"}
+    allowed_loss_reasons = {"hard_stop_loss", "risk_exit", "plan_invalidated"}
+    plan_reason = str(plan.get("decision_reason") or plan.get("invalidation_reason") or "").lower()
+    exit_allowed = (
+        str(plan.get("action") or "").upper() in allowed_exit_actions
+        and (
+            bool(profit_guard.get("eligible"))
+            or any(token in plan_reason for token in allowed_loss_reasons)
+            or (revision or {}).get("requires_revision")
+        )
+    )
+    if not exit_allowed:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Zamknięcie zablokowane: plan nie potwierdza logicznego wyjścia netto "
+                "lub rynek nie unieważnił jeszcze planu trzymania."
+            ),
+        )
+
     # ─── DEMO ────────────────────────────────────────────────────────────────
     if mode.lower() == "demo":
         existing = (
@@ -185,7 +372,7 @@ def close_position(
             .filter(
                 PendingOrder.mode == "demo",
                 PendingOrder.symbol == sym,
-                PendingOrder.status.in_(["PENDING", "CONFIRMED"]),
+                PendingOrder.status.in_(["PENDING", "CONFIRMED", "OPEN"]),
             )
             .first()
         )
@@ -211,6 +398,11 @@ def close_position(
             status="PENDING",
             reason=f"Zamknięcie pozycji #{pos.id}" if qty == pos_qty else f"Częściowe zamknięcie pozycji #{pos.id} qty={qty}",
             created_at=utc_now_naive(),
+            decision_plan_json=json.dumps(plan, ensure_ascii=False),
+            plan_status=plan.get("plan_status"),
+            requires_revision=bool(revision and revision.get("requires_revision")),
+            invalidation_reason=(revision or {}).get("reason") or plan.get("invalidation_reason"),
+            last_consulted_at=utc_now_naive(),
         )
         db.add(p)
         db.commit()
@@ -226,6 +418,9 @@ def close_position(
                 "price": p.price,
                 "status": p.status,
                 "created_at": p.created_at.isoformat() if p.created_at else None,
+                "plan_status": p.plan_status,
+                "expected_net_profit": plan.get("expected_net_profit"),
+                "break_even_price": plan.get("break_even_price"),
             },
         }
 
@@ -233,6 +428,22 @@ def close_position(
     binance = get_binance_client()
     if not binance or not binance.api_key or not binance.api_secret:
         raise HTTPException(status_code=503, detail="Brak kluczy Binance API — uzupełnij .env (BINANCE_API_KEY, BINANCE_API_SECRET)")
+
+    qty = binance.normalize_quantity(sym, qty)
+    if qty <= 0:
+        raise HTTPException(status_code=409, detail="Ilość po normalizacji Binance jest zerowa")
+
+    allowed = binance.get_allowed_symbols().get(sym) or {}
+    min_qty = float(allowed.get("min_qty") or 0.0)
+    min_notional = float(allowed.get("min_notional") or 0.0)
+    market_price = float(snapshot.get("price") or pos.current_price or pos.entry_price or 0.0)
+    if min_qty > 0 and qty < min_qty:
+        raise HTTPException(status_code=409, detail=f"Ilość {qty} jest poniżej minQty {min_qty} dla {sym}")
+    if min_notional > 0 and market_price > 0 and qty * market_price < min_notional:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Wartość zlecenia {qty * market_price:.4f} jest poniżej minNotional {min_notional} dla {sym}",
+        )
 
     binance_response = binance.place_order(
         symbol=sym,
@@ -265,9 +476,14 @@ def close_position(
         quantity=executed_qty,
         status=binance_status,
         mode="live",
+        timestamp=utc_now_naive(),
+        executed_price=executed_price,
+        executed_quantity=executed_qty,
+        exchange_order_id=binance_order_id,
         created_at=utc_now_naive(),
         filled_at=utc_now_naive() if binance_status == "FILLED" else None,
         notes=f"Close position #{pos.id} | binance_order_id={binance_order_id} | fee={fee} {fee_asset}",
+        decision_plan_json=json.dumps(plan, ensure_ascii=False),
     )
     db.add(order)
 
@@ -278,6 +494,11 @@ def close_position(
     else:
         pos.quantity = remaining_qty
         pos.updated_at = utc_now_naive()
+        pos.decision_plan_json = json.dumps(plan, ensure_ascii=False)
+        pos.plan_status = plan.get("plan_status")
+        pos.requires_revision = bool(revision and revision.get("requires_revision"))
+        pos.invalidation_reason = (revision or {}).get("reason") or plan.get("invalidation_reason")
+        pos.last_consulted_at = utc_now_naive()
 
     db.commit()
 
@@ -296,6 +517,9 @@ def close_position(
             "fee": fee,
             "fee_asset": fee_asset,
             "mode": "live",
+            "expected_net_profit": plan.get("expected_net_profit"),
+            "break_even_price": plan.get("break_even_price"),
+            "plan_status": plan.get("plan_status"),
         },
     }
 
@@ -341,7 +565,7 @@ def close_all_positions(
             .filter(
                 PendingOrder.mode == "demo",
                 PendingOrder.symbol == sym,
-                PendingOrder.status.in_(["PENDING", "CONFIRMED"]),
+                PendingOrder.status.in_(["PENDING", "CONFIRMED", "OPEN"]),
             )
             .first()
         )
@@ -569,7 +793,7 @@ def _analyze_position(pos: Position, db: Session, tier_map: Dict[str, Any]) -> D
 def _analyze_spot_position(spot: Dict[str, Any], db: Session, tier_map: Dict[str, Any]) -> Dict[str, Any]:
     """
     Buduje kartę analizy dla pozycji LIVE spot (z Binance).
-    Nie ma entry_price — PnL = null, decyzja oparta na wskaźnikach technicznych.
+    Łączy z DB: entry_price, PnL, TP/SL, opened_at (już wzbogacone przez _get_live_spot_positions).
     """
     sym = spot["symbol"]
     asset = spot.get("asset", sym.replace("EUR", ""))
@@ -578,6 +802,25 @@ def _analyze_spot_position(spot: Dict[str, Any], db: Session, tier_map: Dict[str
     value = float(spot.get("value_eur", current * qty))
     tier_info = tier_map.get(sym, {})
     is_hold = tier_info.get("hold_mode", False)
+
+    # entry_price i PnL — z wzbogaconego spot dict (dodane przez _get_live_spot_positions)
+    entry_price = spot.get("entry_price")
+    unrealized_pnl = spot.get("unrealized_pnl")
+    pnl_pct = spot.get("pnl_percent")
+    planned_tp = spot.get("planned_tp")
+    planned_sl = spot.get("planned_sl")
+    opened_at = spot.get("opened_at")
+    updated_at = spot.get("updated_at")
+
+    # Przelicz PnL jeśli mamy entry_price ale brak PnL
+    if entry_price and entry_price > 0 and current > 0 and qty > 0:
+        if unrealized_pnl is None:
+            unrealized_pnl = round((current - entry_price) * qty, 4)
+        if pnl_pct is None:
+            pnl_pct = round((current - entry_price) / entry_price * 100, 2)
+        cost_eur = round(entry_price * qty, 4)
+    else:
+        cost_eur = None
 
     # Wskaźniki techniczne
     ctx = get_live_context(db, sym, timeframe="1h", limit=200)
@@ -610,27 +853,45 @@ def _analyze_spot_position(spot: Dict[str, Any], db: Session, tier_map: Dict[str
             elif trend == "SPADKOWY":
                 reasons.append("Trend spadkowy, ale tryb HOLD — trzymaj i czekaj na odbicie")
     else:
-        # Brak entry price → ocena wyłącznie z trendów
+        # Ocena z PnL (jeśli mamy entry_price) + wskaźniki techniczne
+        if entry_price and pnl_pct is not None:
+            if pnl_pct <= -3.0:
+                decision = "REDUKUJ"
+                strength = "SILNY"
+                reasons.append(f"Strata {pnl_pct:.1f}% — rozważ wyjście (SL={round(planned_sl, 4) if planned_sl else 'brak'})")
+            elif pnl_pct >= 5.0 and trend == "SPADKOWY":
+                decision = "REDUKUJ"
+                strength = "UMIARKOWANY"
+                reasons.append(f"Zysk {pnl_pct:.1f}% + trend spadkowy — rozważ częściową realizację")
+            elif pnl_pct >= 2.0 and trend == "WZROSTOWY":
+                decision = "TRZYMAJ"
+                strength = "SILNY"
+                reasons.append(f"Zysk {pnl_pct:.1f}% + trend wzrostowy — trzymaj pozycję")
+            else:
+                decision = "TRZYMAJ"
+                strength = "UMIARKOWANY"
+        # Ocena z trendów (brak entry_price)
         if trend == "SPADKOWY":
             if rsi is not None and rsi < 30:
                 decision = "TRZYMAJ"
                 strength = "SŁABY"
-                reasons.append(f"Trend spadkowy, ale RSI {round(rsi, 1)} — skrajne wyprzedanie, szansa na odbicie")
+                reasons.append(f"Trend spadkowy, RSI {round(rsi, 1)} — skrajne wyprzedanie, szansa na odbicie")
             elif rsi is not None and rsi > 65:
                 decision = "REDUKUJ"
                 strength = "UMIARKOWANY"
                 reasons.append(f"Trend spadkowy + RSI {round(rsi, 1)} — rozważ częściowe wyjście")
             else:
-                decision = "TRZYMAJ"
-                reasons.append("Trend spadkowy — obserwuj, brak pilnej potrzeby wyjścia")
+                if decision == "TRZYMAJ":
+                    reasons.append("Trend spadkowy — obserwuj")
         elif trend == "WZROSTOWY":
             if rsi is not None and rsi > 75:
-                decision = "REDUKUJ"
-                strength = "UMIARKOWANY"
+                if decision != "REDUKUJ":
+                    decision = "REDUKUJ"
+                    strength = "UMIARKOWANY"
                 reasons.append(f"Trend wzrostowy, RSI {round(rsi, 1)} — wykupienie, rozważ częściowy zysk")
             else:
-                decision = "TRZYMAJ"
-                strength = "UMIARKOWANY"
+                if decision == "TRZYMAJ" and strength == "NEUTRALNY":
+                    strength = "UMIARKOWANY"
                 reasons.append("Trend wzrostowy — trzymaj")
         else:
             reasons.append("Brak danych trendowych — obserwuj")
@@ -641,27 +902,27 @@ def _analyze_spot_position(spot: Dict[str, Any], db: Session, tier_map: Dict[str
         "asset": asset,
         "side": "LONG",
         "quantity": qty,
-        "entry_price": None,
+        "entry_price": round(entry_price, 6) if entry_price else None,
         "current_price": current,
         "position_value_eur": round(value, decimals),
-        "cost_eur": None,
-        "pnl_eur": None,
-        "pnl_pct": None,
+        "cost_eur": cost_eur,
+        "pnl_eur": unrealized_pnl,
+        "pnl_pct": pnl_pct,
         "trend": trend,
         "rsi": round(rsi, 1) if rsi is not None else None,
         "ema_20": round(ema_20, 6) if ema_20 is not None else None,
         "ema_50": round(ema_50, 6) if ema_50 is not None else None,
         "atr": round(atr, 6) if atr is not None else None,
-        "planned_tp": None,
-        "planned_sl": None,
-        "mfe_pnl": None,
-        "mae_pnl": None,
+        "planned_tp": planned_tp,
+        "planned_sl": planned_sl,
+        "mfe_pnl": float(spot.get("mfe_pnl")) if spot.get("mfe_pnl") is not None else None,
+        "mae_pnl": float(spot.get("mae_pnl")) if spot.get("mae_pnl") is not None else None,
         "is_hold": is_hold,
         "decision": decision,
         "strength": strength,
         "reasons": reasons,
-        "opened_at": None,
-        "updated_at": None,
+        "opened_at": opened_at,
+        "updated_at": updated_at,
         "source": "binance_spot",
         "price_source": spot.get("price_source"),
     }
@@ -1795,9 +2056,12 @@ def sync_positions_from_binance(
     """
     try:
         binance = get_binance_client()
-        balances = binance.get_balances() or {}
+        # get_balances() zwraca listę [{"asset":..., "free":..., "locked":..., "total":...}]
+        # konwertujemy na dict {asset: info} dla czytelnego iterowania
+        balances_list = binance.get_balances() or []
+        balances = {item["asset"]: item for item in balances_list if "asset" in item}
 
-        from backend.database import get_demo_quote_ccy
+        from backend.accounting import get_demo_quote_ccy
         quote_ccy = get_demo_quote_ccy()
 
         synced = []

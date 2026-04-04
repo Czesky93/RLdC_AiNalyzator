@@ -37,8 +37,14 @@ from backend.database import (
 )
 from backend.binance_client import get_binance_client
 from backend.system_logger import log_to_db, log_exception
-from backend.analysis import maybe_generate_insights_and_blog, get_live_context
-from backend.accounting import compute_demo_account_state, get_demo_quote_ccy
+from backend.analysis import (
+    maybe_generate_insights_and_blog,
+    get_live_context,
+    build_market_snapshot,
+    consult_trade_plan,
+    evaluate_plan_revision,
+)
+from backend.accounting import compute_demo_account_state, get_demo_quote_ccy, build_profitability_guard
 from backend.risk import build_risk_context, evaluate_risk
 from backend.runtime_settings import build_runtime_state, build_symbol_tier_map, effective_bool, get_runtime_config, watchlist_override
 import requests
@@ -79,6 +85,7 @@ class DataCollector:
         self.ws_backoff_seconds = 2
         self.last_risk_alert_ts: Optional[datetime] = None
         self.demo_state = {}
+        self._load_persisted_demo_state()
         self.last_crash_alert_ts: Optional[datetime] = None
         self.last_report_ts: Optional[datetime] = None
         self.last_openai_missing_log_ts: Optional[datetime] = None
@@ -90,6 +97,7 @@ class DataCollector:
         self._load_persisted_symbol_params()
         self.last_snapshot_ts: Optional[datetime] = None
         self._last_binance_sync_ts: Optional[datetime] = None
+        self._last_sync_warn_ts: Optional[datetime] = None
         
         logger.info(f"📊 DataCollector initialized")
         logger.info(f"   Watchlist: {', '.join(self.watchlist)}")
@@ -113,6 +121,35 @@ class DataCollector:
                 _db.close()
         except Exception as exc:
             logger.warning(f"⚠️ Nie można wczytać symbol_params z DB: {exc}")
+
+    def _load_persisted_demo_state(self):
+        """Wczytaj demo_state (loss_streak, win_streak, cooldown per symbol) z poprzedniej sesji."""
+        try:
+            import json as _json
+            from backend.database import SessionLocal as _SL, RuntimeSetting
+            _db = _SL()
+            try:
+                row = _db.query(RuntimeSetting).filter(RuntimeSetting.key == "demo_state_persistence").first()
+                if row and row.value:
+                    loaded = _json.loads(row.value)
+                    if isinstance(loaded, dict):
+                        self.demo_state = loaded
+                        logger.info(f"📚 Wczytano demo_state z DB ({len(loaded)} symboli)")
+            finally:
+                _db.close()
+        except Exception as exc:
+            logger.warning(f"⚠️ Nie można wczytać demo_state z DB: {exc}")
+
+    def _save_demo_state(self, db: Session) -> None:
+        """Zapisz demo_state (loss_streak, win_streak, cooldown per symbol) do RuntimeSetting."""
+        if not self.demo_state:
+            return
+        try:
+            import json as _json
+            from backend.runtime_settings import upsert_overrides
+            upsert_overrides(db, {"demo_state_persistence": _json.dumps(self.demo_state)})
+        except Exception as exc:
+            log_exception("demo_state", "Błąd persistowania demo_state", exc, db=db)
 
     def _runtime_context(self, db: Session) -> dict[str, Any]:
         active_position_count = int(db.query(Position).count())
@@ -138,6 +175,9 @@ class DataCollector:
         risk_check: Optional[dict[str, Any]] = None,
         cost_check: Optional[dict[str, Any]] = None,
         execution_check: Optional[dict[str, Any]] = None,
+        snapshot: Optional[dict[str, Any]] = None,
+        plan: Optional[dict[str, Any]] = None,
+        revision_of_trace_id: Optional[int] = None,
         details: Optional[dict[str, Any]] = None,
         order_id: Optional[int] = None,
         position_id: Optional[int] = None,
@@ -146,23 +186,34 @@ class DataCollector:
     ) -> None:
         mode = getattr(self, '_active_mode', None) or mode or 'demo'
         payload = details or {}
-        save_decision_trace(
-            db,
-            symbol=symbol,
-            mode=mode,
-            action_type=action.lower(),
-            reason_code=reason_code,
-            strategy_name=strategy_name,
-            signal_summary=signal_summary or {},
-            risk_gate_result=risk_check or {},
-            cost_gate_result=cost_check or {},
-            execution_gate_result=execution_check or {},
-            config_snapshot_id=runtime_ctx.get("snapshot_id"),
-            order_id=order_id,
-            position_id=position_id,
-            payload=payload,
-        )
-        db.flush()
+        try:
+            save_decision_trace(
+                db,
+                symbol=symbol,
+                mode=mode,
+                action_type=action.lower(),
+                reason_code=reason_code,
+                strategy_name=strategy_name,
+                signal_summary=signal_summary or {},
+                risk_gate_result=risk_check or {},
+                cost_gate_result=cost_check or {},
+                execution_gate_result=execution_check or {},
+                config_snapshot_id=runtime_ctx.get("snapshot_id"),
+                order_id=order_id,
+                position_id=position_id,
+                snapshot_json=snapshot or {},
+                plan_json=plan or {},
+                revision_of_trace_id=revision_of_trace_id,
+                payload=payload,
+            )
+            db.flush()
+        except Exception as _flush_exc:
+            logger.error("_trace_decision flush error sym=%s reason=%s: %s", symbol, reason_code, _flush_exc)
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            return
         log_to_db(
             level,
             "collector_decision",
@@ -181,8 +232,20 @@ class DataCollector:
         )
     
     def _load_watchlist(self) -> List[str]:
-        """Wczytaj listę symboli do śledzenia"""
-        quotes = [q.strip().upper() for q in os.getenv("PORTFOLIO_QUOTES", "EUR,USDC").split(",") if q.strip()]
+        """Wczytaj listę symboli do śledzenia.
+
+        Źródła (łączone w jedną listę):
+        1. Aktywa z portfela Binance (co trzymasz → pary EUR/USDC)
+        2. ENV WATCHLIST — ręcznie skonfigurowane symbole
+        3. Top-N symboli po wolumenie 24h ze SPOT Binance (WATCHLIST_SCAN_TOP_N)
+        """
+        # Domyślnie: tylko aktywna waluta tradera (spójne z WATCHLIST_SCAN_QUOTES).
+        # Można nadpisać przez PORTFOLIO_QUOTES=EUR,USDC w .env jeśli celowo chcesz obie waluty.
+        _pq_env = os.getenv("PORTFOLIO_QUOTES", "").strip()
+        if _pq_env:
+            quotes = [q.strip().upper() for q in _pq_env.split(",") if q.strip()]
+        else:
+            quotes = [get_demo_quote_ccy()]  # np. ["EUR"] — nie mieszaj EUR z USDC
         balances = self.binance.get_balances()
         assets = [b.get("asset") for b in balances if (b.get("total") or 0) > 0]
 
@@ -211,13 +274,26 @@ class DataCollector:
                     if symbol and symbol not in resolved:
                         resolved.append(symbol)
 
-        # ── Filtruj gegen dozwolone pary SPOT z Binance exchangeInfo ─────────
+        # ── Uzupełnij o symbole z ENV WATCHLIST (konfiguracja ważniejsza niż samo saldo) ──
+        raw_watchlist = os.getenv("WATCHLIST", "")
+        if raw_watchlist.strip():
+            items = [s.strip() for s in raw_watchlist.split(",") if s.strip()]
+            for item in items:
+                env_symbol = self.binance.resolve_symbol(item)
+                if not env_symbol:
+                    env_symbol = item.replace("/", "").strip().upper()
+                if env_symbol and env_symbol not in resolved:
+                    resolved.append(env_symbol)
+        # ─────────────────────────────────────────────────────────────────────
+
+        # ── Filtruj do dozwolonych par SPOT z Binance exchangeInfo ───────────
+        allowed_spot: dict = {}
         if resolved:
             try:
-                allowed = self.binance.get_allowed_symbols(quotes=list(quotes))
-                if allowed:
-                    filtered = [s for s in resolved if s in allowed]
-                    blocked = [s for s in resolved if s not in allowed]
+                allowed_spot = self.binance.get_allowed_symbols(quotes=list(quotes))
+                if allowed_spot:
+                    filtered = [s for s in resolved if s in allowed_spot]
+                    blocked = [s for s in resolved if s not in allowed_spot]
                     if blocked:
                         logger.warning(
                             f"⚠️ Symbole spoza whitelist SPOT (pomijam): {blocked}"
@@ -229,23 +305,47 @@ class DataCollector:
                 logger.warning(f"⚠️ Nie można sprawdzić dozwolonych symboli SPOT: {exc}")
         # ─────────────────────────────────────────────────────────────────────
 
+        # ── Dodaj top-N symboli wg wolumenu 24h (skaner okazji poza portfelem) ──
+        # Filtruj quotes do tych, na których bot faktycznie handluje (z ENV lub domyślnie EUR)
+        _trade_quote = get_demo_quote_ccy()  # EUR lub USDC — aktywna waluta portfela (import na górze modułu)
+        _scan_quotes_env = os.getenv("WATCHLIST_SCAN_QUOTES", "")
+        if _scan_quotes_env.strip():
+            _scan_quotes = [q.strip().upper() for q in _scan_quotes_env.split(",") if q.strip()]
+        else:
+            # Domyślnie: tylko aktywna waluta tradera (nie mieszaj EUR z USDC)
+            _scan_quotes = [_trade_quote]
+        scan_top_n = int(os.getenv("WATCHLIST_SCAN_TOP_N", "30"))
+        if scan_top_n > 0:
+            try:
+                top_symbols = self.binance.get_top_symbols_by_volume(
+                    quotes=_scan_quotes,
+                    top_n=scan_top_n,
+                )
+                added = 0
+                for sym in top_symbols:
+                    if sym not in resolved:
+                        resolved.append(sym)
+                        added += 1
+                if added > 0:
+                    logger.info(f"📈 Dodano {added} symboli z top-{scan_top_n} wolumen skanera do watchlisty")
+            except Exception as exc:
+                logger.warning(f"⚠️ Błąd skanowania top symboli: {exc}")
+        # ─────────────────────────────────────────────────────────────────────
+
         if resolved:
             return sorted(resolved)
 
-        # Fallback: stała watchlista z `.env` (działa nawet bez kluczy Binance).
-        raw_watchlist = os.getenv("WATCHLIST", "")
-        if not raw_watchlist.strip():
-            return []
-
-        items = [s.strip() for s in raw_watchlist.split(",") if s.strip()]
-        fallback: List[str] = []
-        for item in items:
-            resolved_symbol = self.binance.resolve_symbol(item)
-            if not resolved_symbol:
+        # Ostatni fallback: tylko ENV WATCHLIST parsowany statycznie.
+        if raw_watchlist.strip():
+            items = [s.strip() for s in raw_watchlist.split(",") if s.strip()]
+            fallback: List[str] = []
+            for item in items:
                 resolved_symbol = item.replace("/", "").strip().upper()
-            if resolved_symbol and resolved_symbol not in fallback:
-                fallback.append(resolved_symbol)
-        return sorted(fallback)
+                if resolved_symbol and resolved_symbol not in fallback:
+                    fallback.append(resolved_symbol)
+            return sorted(fallback)
+
+        return []
 
     def _has_openai_key(self) -> bool:
         return os.getenv("OPENAI_API_KEY", "").strip() != ""
@@ -327,6 +427,19 @@ class DataCollector:
         self.last_crash_alert_ts = None
         self._last_idle_alert_ts = None
         self.last_snapshot_ts = None
+        # Wyczyść persystencję demo_state w DB
+        try:
+            from backend.database import SessionLocal as _SL, RuntimeSetting
+            _db = _SL()
+            try:
+                row = _db.query(RuntimeSetting).filter(RuntimeSetting.key == "demo_state_persistence").first()
+                if row:
+                    _db.delete(row)
+                    _db.commit()
+            finally:
+                _db.close()
+        except Exception:
+            pass
 
     def _create_pending_order(
         self,
@@ -339,6 +452,9 @@ class DataCollector:
         reason: str = "",
         config_snapshot_id: Optional[str] = None,
         strategy_name: Optional[str] = None,
+        exit_reason_code: Optional[str] = None,
+        order_type: str = "MARKET",
+        decision_plan: Optional[dict[str, Any]] = None,
     ) -> int:
         mode = getattr(self, '_active_mode', None) or mode or 'demo'
         # Auto-potwierdź w obu trybach (live_auto_confirm=true domyślnie)
@@ -346,7 +462,7 @@ class DataCollector:
         pending = PendingOrder(
             symbol=symbol,
             side=side,
-            order_type="MARKET",
+            order_type=order_type,
             price=price,
             quantity=qty,
             mode=mode,
@@ -354,6 +470,12 @@ class DataCollector:
             reason=reason,
             config_snapshot_id=config_snapshot_id,
             strategy_name=strategy_name,
+            exit_reason_code=exit_reason_code,
+            decision_plan_json=json.dumps(decision_plan, ensure_ascii=True, sort_keys=True) if decision_plan else None,
+            plan_status=(decision_plan or {}).get("plan_status", "pending") if decision_plan else "pending",
+            requires_revision=bool((decision_plan or {}).get("requires_revision", False)) if decision_plan else False,
+            invalidation_reason=(decision_plan or {}).get("invalidation_reason") if decision_plan else None,
+            last_consulted_at=utc_now_naive() if decision_plan else None,
             created_at=utc_now_naive(),
             confirmed_at=utc_now_naive() if auto_confirm else None,
         )
@@ -379,6 +501,284 @@ class DataCollector:
         except Exception as exc:
             log_exception("collector", "Błąd wysyłki alertu Telegram", exc)
 
+    def _load_plan_json(self, raw: Any) -> Optional[dict[str, Any]]:
+        if raw is None:
+            return None
+        if isinstance(raw, dict):
+            return raw
+        try:
+            parsed = json.loads(raw)
+            return parsed if isinstance(parsed, dict) else None
+        except Exception:
+            return None
+
+    def _build_symbol_plan(
+        self,
+        db: Session,
+        symbol: str,
+        *,
+        mode: str,
+        position: Optional[Position] = None,
+        force_reconsult: bool = False,
+    ) -> tuple[Optional[dict[str, Any]], Optional[dict[str, Any]], Optional[dict[str, Any]]]:
+        snapshot = build_market_snapshot(db, symbol, mode=mode, position=position)
+        if not snapshot:
+            return None, None, None
+        plan = consult_trade_plan(snapshot, force=force_reconsult)
+        revision = evaluate_plan_revision(snapshot, plan)
+        if revision.get("requires_revision"):
+            plan = dict(plan)
+            plan["requires_revision"] = True
+            plan["invalidation_reason"] = revision.get("invalidation_reason")
+            if force_reconsult:
+                reconsulted = consult_trade_plan(snapshot, force=True)
+                reconsulted["requires_revision"] = False
+                reconsulted["invalidation_reason"] = None
+                plan = reconsulted
+                revision = evaluate_plan_revision(snapshot, plan)
+        return snapshot, plan, revision
+
+    def _exit_allowed_by_plan(
+        self,
+        *,
+        snapshot: Optional[dict[str, Any]],
+        plan: Optional[dict[str, Any]],
+        reason_code: str,
+        current_price: float,
+        position: Position,
+    ) -> dict[str, Any]:
+        if not snapshot or not plan:
+            return {"allowed": True, "why": "Brak planu — fallback legacy"}
+
+        hard_exit_reason_codes = {"stop_loss_hit"}
+        if reason_code in hard_exit_reason_codes:
+            return {"allowed": True, "why": "Hard exit"}
+
+        action = str(plan.get("action") or "HOLD").upper()
+        expected_net = float(plan.get("expected_net_profit") or 0.0)
+        min_profit_price = float(plan.get("minimal_profit_to_allow_exit") or 0.0)
+        break_even_price = float(plan.get("break_even_price") or 0.0)
+        revision = evaluate_plan_revision(snapshot, plan)
+        if revision.get("requires_revision"):
+            return {
+                "allowed": True,
+                "why": "Plan wymaga rewizji — dozwolone wyjście po re-konsultacji",
+                "revision": revision,
+            }
+        if action in {"SELL", "REDUCE"}:
+            return {"allowed": True, "why": f"Plan action={action}"}
+        if expected_net <= 0:
+            return {"allowed": False, "why": "Expected net profit <= 0 bez rewizji planu"}
+        if min_profit_price > 0 and current_price < min_profit_price and reason_code not in {"trailing_lock_profit", "tp_full_reversal"}:
+            return {"allowed": False, "why": "Cena poniżej minimalnego sensownego zysku netto"}
+        if break_even_price > 0 and current_price < break_even_price and reason_code not in {"trailing_lock_profit"}:
+            return {"allowed": False, "why": "Cena poniżej break-even planu"}
+        if float(position.unrealized_pnl or 0.0) < 0 and reason_code not in {"stop_loss_hit"}:
+            return {"allowed": False, "why": "Sprzedaż stratna bez twardego powodu"}
+        return {"allowed": True, "why": "Plan pozwala na ochronę zysku"}
+
+    def _get_limit_order_timeout_seconds(self, config: dict[str, Any]) -> int:
+        """Timeout dla LIVE LIMIT BUY zanim system uruchomi fallback do MARKET."""
+        raw = config.get("limit_order_timeout", os.getenv("LIMIT_ORDER_TIMEOUT", "300"))
+        try:
+            return max(60, int(float(raw or 300)))
+        except Exception:
+            return 300
+
+    def _monitor_limit_orders(self, db: Session, runtime_ctx: Optional[dict[str, Any]] = None) -> int:
+        """Monitoruj otwarte LIMIT BUY na Binance i wykonuj fallback po timeout."""
+        runtime_ctx = runtime_ctx or self._runtime_context(db)
+        config = runtime_ctx["config"]
+        timeout_seconds = self._get_limit_order_timeout_seconds(config)
+        now = utc_now_naive()
+        handled = 0
+
+        pending_orders = (
+            db.query(PendingOrder)
+            .filter(
+                PendingOrder.mode == "live",
+                PendingOrder.side == "BUY",
+                PendingOrder.order_type == "LIMIT",
+                PendingOrder.status == "OPEN",
+                PendingOrder.exchange_order_id.isnot(None),
+            )
+            .order_by(PendingOrder.created_at.asc())
+            .all()
+        )
+        if not pending_orders:
+            return 0
+
+        open_orders_resp = self.binance.get_open_orders()
+        if isinstance(open_orders_resp, dict) and open_orders_resp.get("_error"):
+            err_msg = open_orders_resp.get("error_message", "openOrders error")
+            log_to_db("ERROR", "live_limit_monitor", f"Binance get_open_orders błąd: {err_msg}", db=db)
+            return 0
+        open_orders = open_orders_resp or []
+        open_ids = {str(o.get("orderId")) for o in open_orders if o.get("orderId") is not None}
+
+        def _persist_live_limit_fill(pending: PendingOrder, fill_qty: float, fill_price: float, note: str) -> Optional[Order]:
+            if fill_qty <= 0:
+                return None
+            order = Order(
+                symbol=pending.symbol,
+                side="BUY",
+                order_type="LIMIT",
+                price=pending.price,
+                quantity=float(pending.quantity or fill_qty),
+                status="FILLED",
+                mode="live",
+                executed_price=fill_price if fill_price > 0 else float(pending.price or 0),
+                executed_quantity=fill_qty,
+                config_snapshot_id=pending.config_snapshot_id or runtime_ctx.get("snapshot_id"),
+                entry_reason_code="limit_order_filled",
+                exchange_order_id=str(pending.exchange_order_id or ""),
+                notes=note,
+                created_at=pending.created_at or now,
+                filled_at=now,
+                decision_plan_json=pending.decision_plan_json,
+                timestamp=now,
+            )
+            db.add(order)
+
+            position = db.query(Position).filter(
+                Position.symbol == pending.symbol,
+                Position.mode == "live",
+            ).first()
+            if position:
+                old_qty = float(position.quantity or 0.0)
+                total_qty = old_qty + fill_qty
+                if total_qty > 0:
+                    position.entry_price = (
+                        (float(position.entry_price or 0.0) * old_qty) +
+                        (float(order.executed_price or 0.0) * fill_qty)
+                    ) / total_qty
+                position.quantity = total_qty
+                position.current_price = float(order.executed_price or position.current_price or 0.0)
+                position.config_snapshot_id = order.config_snapshot_id or position.config_snapshot_id
+            else:
+                db.add(Position(
+                    symbol=pending.symbol,
+                    side="LONG",
+                    entry_price=float(order.executed_price or pending.price or 0.0),
+                    quantity=fill_qty,
+                    current_price=float(order.executed_price or pending.price or 0.0),
+                    unrealized_pnl=0.0,
+                    gross_pnl=0.0,
+                    net_pnl=0.0,
+                    total_cost=0.0,
+                    fee_cost=0.0,
+                    slippage_cost=0.0,
+                    spread_cost=0.0,
+                    config_snapshot_id=order.config_snapshot_id,
+                    entry_reason_code="limit_order_filled",
+                    mode="live",
+                    opened_at=now,
+                    decision_plan_json=pending.decision_plan_json,
+                    plan_status=pending.plan_status or "active",
+                    requires_revision=bool(pending.requires_revision),
+                    invalidation_reason=pending.invalidation_reason,
+                    last_consulted_at=pending.last_consulted_at,
+                ))
+            return order
+
+        for pending in pending_orders:
+            pending.last_checked_at = now
+            exchange_order_id = str(pending.exchange_order_id or "").strip()
+            if not exchange_order_id:
+                pending.status = "REJECTED"
+                log_to_db("ERROR", "live_limit_monitor",
+                          f"Pending LIMIT bez exchange_order_id dla {pending.symbol} id={pending.id}",
+                          db=db)
+                handled += 1
+                continue
+
+            order_resp = self.binance.get_order(pending.symbol, int(exchange_order_id))
+            if isinstance(order_resp, dict) and order_resp.get("_error"):
+                err_msg = order_resp.get("error_message", "get_order error")
+                log_to_db("ERROR", "live_limit_monitor",
+                          f"Binance get_order błąd dla {pending.symbol} #{exchange_order_id}: {err_msg}",
+                          db=db)
+                continue
+            if not order_resp:
+                continue
+
+            status = str(order_resp.get("status") or "").upper()
+            executed_qty = float(order_resp.get("executedQty", 0) or 0)
+            orig_qty = float(order_resp.get("origQty", pending.quantity) or pending.quantity or 0)
+            quote_qty = float(order_resp.get("cummulativeQuoteQty", 0) or 0)
+            avg_price = (quote_qty / executed_qty) if executed_qty > 0 and quote_qty > 0 else float(order_resp.get("price", pending.price) or pending.price or 0)
+
+            if status == "FILLED":
+                _persist_live_limit_fill(
+                    pending,
+                    executed_qty if executed_qty > 0 else float(pending.quantity or 0),
+                    avg_price if avg_price > 0 else float(pending.price or 0),
+                    f"Filled by monitor from pending #{pending.id}",
+                )
+                pending.status = "EXECUTED"
+                if not pending.confirmed_at:
+                    pending.confirmed_at = now
+                log_to_db("INFO", "live_limit_monitor",
+                          f"LIMIT BUY filled: {pending.symbol} qty={executed_qty:.8g} avg={avg_price:.8g} pending_id={pending.id}",
+                          db=db)
+                handled += 1
+                continue
+
+            if status in {"CANCELED", "CANCELLED", "EXPIRED", "REJECTED"}:
+                pending.status = "REJECTED"
+                log_to_db("WARNING", "live_limit_monitor",
+                          f"LIMIT BUY zakończony bez fill: {pending.symbol} status={status} pending_id={pending.id}",
+                          db=db)
+                handled += 1
+                continue
+
+            expires_at = pending.expires_at or (pending.created_at + timedelta(seconds=timeout_seconds) if pending.created_at else now)
+            pending.expires_at = expires_at
+            is_still_open = exchange_order_id in open_ids or status in {"NEW", "PARTIALLY_FILLED"}
+            if is_still_open and now < expires_at:
+                continue
+
+            cancel_resp = self.binance.cancel_order(pending.symbol, int(exchange_order_id))
+            if isinstance(cancel_resp, dict) and cancel_resp.get("_error"):
+                err_msg = cancel_resp.get("error_message", "cancel_order error")
+                log_to_db("ERROR", "live_limit_monitor",
+                          f"Cancel LIMIT BUY failed {pending.symbol} #{exchange_order_id}: {err_msg}",
+                          db=db)
+                continue
+
+            remaining_qty = max(0.0, orig_qty - executed_qty)
+            if executed_qty > 0:
+                _persist_live_limit_fill(
+                    pending,
+                    executed_qty,
+                    avg_price if avg_price > 0 else float(pending.price or 0),
+                    f"Partial fill before MARKET fallback from pending #{pending.id}",
+                )
+            if remaining_qty <= 0:
+                pending.status = "EXECUTED"
+                pending.expires_at = None
+                log_to_db("INFO", "live_limit_monitor",
+                          f"LIMIT BUY {pending.symbol} domknięty częściowym fillem bez reszty do fallbacku (pending_id={pending.id})",
+                          db=db)
+                handled += 1
+                continue
+
+            pending.status = "CONFIRMED"
+            pending.order_type = "MARKET"
+            pending.exchange_order_id = None
+            pending.expires_at = None
+            pending.price = None
+            pending.quantity = remaining_qty
+            pending.reason = (
+                f"{pending.reason or 'LIMIT BUY timeout'}. LIMIT timeout {timeout_seconds}s -> MARKET fallback."
+            )[:2000]
+            log_to_db("WARNING", "live_limit_monitor",
+                      f"LIMIT BUY timeout {pending.symbol} #{exchange_order_id} -> MARKET fallback (pending_id={pending.id})",
+                      db=db)
+            handled += 1
+
+        return handled
+
     def _execute_confirmed_pending_orders(self, db: Session):
         """
         Wykonaj potwierdzone transakcje (DEMO + LIVE) zapisane jako PendingOrder.
@@ -398,26 +798,127 @@ class DataCollector:
         if not confirmed:
             return
 
+        # Pobierz aktualne salda Binance raz przed pętlą — potrzebne do cap SELL qty
+        # (DB qty może nieznacznie przekraczać Binance free po zaokrągleniach)
+        live_balances_free: dict = {}
+        if any(p.mode == "live" and p.side == "SELL" for p in confirmed):
+            try:
+                _bal = self.binance.get_balances() or []
+                for b in _bal:
+                    live_balances_free[(b.get("asset") or "").upper()] = float(b.get("free", 0))
+            except Exception as _be:
+                logger.error("Błąd pobierania sald Binance dla SELL qty cap: %s", _be)
+
         executed_count = 0
         for pending in confirmed:
             p_mode = pending.mode or "demo"
             try:
                 qty = float(pending.quantity)
+                pending_plan = self._load_plan_json(getattr(pending, "decision_plan_json", None))
 
                 if p_mode == "live":
                     # ——— LIVE: wykonaj przez Binance API ———
-                    result = self.binance.place_order(
-                        symbol=pending.symbol,
-                        side=pending.side,
-                        order_type="MARKET",
-                        quantity=qty,
-                    )
-                    if not result:
+                    # Normalizuj qty do step_size symbolu (wymóg LOT_SIZE Binance)
+                    normalized_qty = self.binance.normalize_quantity(pending.symbol, qty)
+
+                    # BUG-17: Dla SELL obetnij qty do faktycznego salda Binance
+                    # (DB qty może być wyższe przez zaokrąglenia przy BUY lub imporcie)
+                    if pending.side == "SELL" and live_balances_free:
+                        sym_upper = (pending.symbol or "").upper()
+                        if sym_upper.endswith("USDC"):
+                            _asset = sym_upper[:-4]
+                        elif sym_upper.endswith("EUR"):
+                            _asset = sym_upper[:-3]
+                        else:
+                            _asset = sym_upper
+                        _free = live_balances_free.get(_asset, 0.0)
+                        if _free > 0 and normalized_qty > _free:
+                            _capped = self.binance.normalize_quantity(pending.symbol, _free)
+                            logger.warning(
+                                "SELL %s: qty=%s → %s (cap do Binance free=%s)",
+                                pending.symbol, normalized_qty, _capped, _free
+                            )
+                            normalized_qty = _capped
+
+                    if normalized_qty <= 0:
                         log_to_db("ERROR", "live_trading",
-                                  f"Binance place_order zwrócił None dla {pending.symbol} {pending.side} qty={qty}",
+                                  f"Qty po normalizacji LOT_SIZE = 0 dla {pending.symbol} {pending.side} qty_orig={qty}",
                                   db=db)
                         pending.status = "REJECTED"
                         pending.confirmed_at = utc_now_naive()
+                        # Zamknij dust pozycję LIVE — ustaw qty=0 aby uniknąć pętli exit
+                        if pending.side == "SELL":
+                            dust_pos = db.query(Position).filter(
+                                Position.symbol == pending.symbol,
+                                Position.mode == "live",
+                                Position.quantity > 0,
+                            ).first()
+                            if dust_pos:
+                                dust_pos.quantity = 0.0
+                                dust_pos.exit_reason_code = "dust_quantity"
+                                log_to_db("INFO", "live_trading",
+                                          f"Dust pozycja {pending.symbol} zamknięta (qty={qty:.2e} < min LOT_SIZE)",
+                                          db=db)
+                        continue
+                    qty = normalized_qty
+                    # Użyj order_type z PendingOrder (MARKET lub LIMIT wg config)
+                    exec_order_type = pending.order_type or "MARKET"
+                    exec_price = pending.price if exec_order_type == "LIMIT" else None
+                    result = self.binance.place_order(
+                        symbol=pending.symbol,
+                        side=pending.side,
+                        order_type=exec_order_type,
+                        quantity=qty,
+                        price=exec_price,
+                    )
+                    if not result or result.get("_error"):
+                        err_msg = (result or {}).get("error_message", "brak odpowiedzi") if result else "brak odpowiedzi"
+                        log_to_db("ERROR", "live_trading",
+                                  f"Binance place_order błąd dla {pending.symbol} {pending.side} qty={qty}: {err_msg}",
+                                  db=db)
+                        logger.error(f"❌ LIVE ORDER FAILED: {pending.side} {pending.symbol} qty={qty}: {err_msg}")
+                        pending.status = "REJECTED"
+                        pending.confirmed_at = utc_now_naive()
+                        # Zapisz Order z ERROR + error_reason dla diagnostyki
+                        error_order = Order(
+                            symbol=pending.symbol,
+                            side=pending.side,
+                            order_type=pending.order_type or "MARKET",
+                            price=pending.price,
+                            quantity=qty,
+                            status="ERROR",
+                            mode="live",
+                            config_snapshot_id=pending.config_snapshot_id,
+                            exit_reason_code=pending.exit_reason_code,
+                            error_reason=err_msg[:500],
+                            timestamp=utc_now_naive(),
+                        )
+                        db.add(error_order)
+                        continue
+                    binance_status = str(result.get("status", "FILLED")).upper()
+                    if pending.side == "BUY" and exec_order_type == "LIMIT" and binance_status in {"NEW", "PARTIALLY_FILLED"}:
+                        pending.status = "OPEN"
+                        pending.exchange_order_id = str(result.get("orderId") or "")
+                        pending.expires_at = utc_now_naive() + timedelta(
+                            seconds=self._get_limit_order_timeout_seconds(config)
+                        )
+                        pending.last_checked_at = utc_now_naive()
+                        log_to_db(
+                            "INFO",
+                            "live_trading",
+                            f"LIVE LIMIT BUY open: {pending.symbol} qty={qty:.8g} @ {pending.price or exec_price} "
+                            f"status={binance_status} order_id={pending.exchange_order_id}",
+                            db=db,
+                        )
+                        logger.info(
+                            "⏳ LIVE LIMIT BUY OPEN: %s qty=%s price=%s status=%s orderId=%s",
+                            pending.symbol,
+                            qty,
+                            pending.price,
+                            binance_status,
+                            pending.exchange_order_id,
+                        )
+                        executed_count += 1
                         continue
                     # Parsuj odpowiedź Binance
                     fills = result.get("fills", [])
@@ -431,7 +932,6 @@ class DataCollector:
                     # Prowizja rzeczywista z fills Binance
                     _live_actual_fee = sum(float(f.get("commission", 0)) for f in fills)
                     _live_fee_asset = fills[0].get("commissionAsset", "") if fills else ""
-                    binance_status = result.get("status", "FILLED")
                     logger.info(f"✅ LIVE ORDER EXECUTED: {pending.side} {pending.symbol} qty={qty} @ {exec_price} fee={_live_actual_fee} {_live_fee_asset} status={binance_status}")
                     log_to_db("INFO", "live_trading",
                               f"LIVE {pending.side} {pending.symbol} qty={qty:.8g} @ {exec_price:.6f} fee={_live_actual_fee:.8g} {_live_fee_asset}",
@@ -443,7 +943,19 @@ class DataCollector:
                     exec_price = pending.price
                     ticker = self.binance.get_ticker_price(pending.symbol)
                     if ticker and ticker.get("price"):
-                        exec_price = float(ticker["price"])
+                        _ticker_price = float(ticker["price"])
+                        # BUG-19: sanity check — ticker nie może różnić się od pending.price
+                        # o więcej niż 50× (ochrona przed złym ticker dla tokenów mikro-cena).
+                        # Błędny ticker (np. 0.95 EUR dla PEPE zamiast 2.88e-6) → notional×330k
+                        # → fee i kill_switch fałszywie triggered.
+                        _pending_p = float(pending.price)
+                        if _pending_p > 0 and (_ticker_price / _pending_p > 50 or _pending_p / _ticker_price > 50):
+                            logger.warning(
+                                "BUG-19: ticker price sanity FAIL sym=%s ticker=%.8g pending=%.8g ratio=%.1f — using pending.price",
+                                pending.symbol, _ticker_price, _pending_p, _ticker_price / _pending_p,
+                            )
+                        else:
+                            exec_price = _ticker_price
 
                 order = Order(
                     symbol=pending.symbol,
@@ -457,7 +969,12 @@ class DataCollector:
                     executed_quantity=qty,
                     config_snapshot_id=pending.config_snapshot_id or runtime_ctx.get("snapshot_id"),
                     entry_reason_code="pending_confirmed_execution" if pending.side == "BUY" else None,
-                    exit_reason_code="pending_confirmed_execution" if pending.side == "SELL" else None,
+                    exit_reason_code=(pending.exit_reason_code or "pending_confirmed_execution") if pending.side == "SELL" else None,
+                    exchange_order_id=str(result.get("orderId")) if p_mode == "live" and result else None,
+                    notes=pending.reason,
+                    created_at=utc_now_naive(),
+                    filled_at=utc_now_naive(),
+                    decision_plan_json=json.dumps(pending_plan, ensure_ascii=True, sort_keys=True) if pending_plan else None,
                     timestamp=utc_now_naive(),
                 )
                 db.add(order)
@@ -472,9 +989,20 @@ class DataCollector:
                 spread_cost = notional * (spread_buffer_bps / 10000.0)
 
                 # LIVE: rzeczywista prowizja z Binance fills; DEMO: szacunek
+                # BUG FIX: _live_actual_fee może być w walucie bazowej (PEPE, RENDER itp.)
+                # a nie w EUR/USDC — nie używamy jej bezpośrednio jako wartości EUR.
+                # Konwertujemy: jeśli commissionAsset == quote (EUR/USDC/USDT) → wprost.
+                # Jeśli token bazowy → fee_in_base * exec_price. Sanity cap = 1% notional.
+                _quote_upper = get_demo_quote_ccy().upper()
+                _fee_asset_upper = (_live_fee_asset or "").upper()
                 if p_mode == "live" and _live_actual_fee > 0:
-                    fee_cost = _live_actual_fee
-                    fee_notes = f"LIVE actual Binance commission ({_live_fee_asset})"
+                    if _fee_asset_upper in (_quote_upper, "USDT", "USDC", "EUR"):
+                        # Prowizja bezpośrednio w walucie kwotowania — OK
+                        fee_cost = min(_live_actual_fee, notional * 0.05)
+                    else:
+                        # Prowizja w tokenie bazowym (lub BNB) — przelicz przez cenę egzekucji
+                        fee_cost = min(_live_actual_fee * float(exec_price), notional * 0.05)
+                    fee_notes = f"LIVE Binance commission ({_live_fee_asset}, converted to {_quote_upper})"
                 else:
                     fee_cost = fee_cost_estimated
                     fee_notes = f"{p_mode} execution fee estimate"
@@ -561,6 +1089,11 @@ class DataCollector:
                             mae_price=exec_price,
                             mfe_pnl=0.0,
                             mae_pnl=0.0,
+                            decision_plan_json=json.dumps(pending_plan, ensure_ascii=True, sort_keys=True) if pending_plan else None,
+                            plan_status=(pending_plan or {}).get("plan_status", "active") if pending_plan else "active",
+                            requires_revision=bool((pending_plan or {}).get("requires_revision", False)) if pending_plan else False,
+                            invalidation_reason=(pending_plan or {}).get("invalidation_reason") if pending_plan else None,
+                            last_consulted_at=utc_now_naive() if pending_plan else None,
                         )
                         db.add(position)
                     else:
@@ -577,6 +1110,12 @@ class DataCollector:
                         position.spread_cost = float(position.spread_cost or 0.0) + spread_cost
                         position.net_pnl = float(position.net_pnl or 0.0) - (fee_cost + slippage_cost + spread_cost)
                         position.config_snapshot_id = order.config_snapshot_id or position.config_snapshot_id
+                        if pending_plan:
+                            position.decision_plan_json = json.dumps(pending_plan, ensure_ascii=True, sort_keys=True)
+                            position.plan_status = pending_plan.get("plan_status", "active")
+                            position.requires_revision = bool(pending_plan.get("requires_revision", False))
+                            position.invalidation_reason = pending_plan.get("invalidation_reason")
+                            position.last_consulted_at = utc_now_naive()
                 elif pending.side == "SELL":
                     gross_pnl = 0.0
                     if position and float(position.quantity) > 0:
@@ -591,25 +1130,38 @@ class DataCollector:
                         position.slippage_cost = float(position.slippage_cost or 0.0) + slippage_cost
                         position.spread_cost = float(position.spread_cost or 0.0) + spread_cost
                         position.net_pnl = float(position.gross_pnl or 0.0) - float(position.total_cost or 0.0)
-                        position.exit_reason_code = "pending_confirmed_execution"
-                        if float(position.quantity) <= 0:
+                        # Zamknij pozycję jeśli: qty=0 LUB pozostała wartość < 1 EUR (dust)
+                        remaining_value = float(position.quantity) * exec_price
+                        if float(position.quantity) <= 0 or remaining_value < 1.0:
+                            # Pełne zamknięcie — ustaw exit_reason_code TYLKO tutaj
+                            position.exit_reason_code = pending.exit_reason_code or "pending_confirmed_execution"
                             # --- Exit Quality snapshot ---
                             self._save_exit_quality(db, position, exec_price, config)
                             db.delete(position)
+                            position = None
+                            logger.info(f"✅ Pozycja {pending.symbol} zamknięta (dust < 1 EUR lub qty=0)")
                         else:
                             # Częściowe zamknięcie — inkrementuj licznik i aktywuj trailing
+                            # exit_reason_code NIE jest ustawiany — pozycja nadal otwarta
                             position.partial_take_count = int(position.partial_take_count or 0) + 1
+                            if pending_plan:
+                                position.decision_plan_json = json.dumps(pending_plan, ensure_ascii=True, sort_keys=True)
+                                position.plan_status = pending_plan.get("plan_status", "active")
+                                position.requires_revision = bool(pending_plan.get("requires_revision", False))
+                                position.invalidation_reason = pending_plan.get("invalidation_reason")
+                                position.last_consulted_at = utc_now_naive()
                     else:
                         # Brak pozycji — zapisujemy zlecenie, ale bez zmian pozycji.
                         pass
                     expected_edge = float(pending.price or exec_price) * float(config.get("min_edge_multiplier", 2.5))
+                    _exit_rc = pending.exit_reason_code or "pending_confirmed_execution"
                     attach_costs_to_order(
                         db,
                         order=order,
                         gross_pnl=gross_pnl,
                         expected_edge=expected_edge,
                         config_snapshot_id=order.config_snapshot_id,
-                        exit_reason_code="pending_confirmed_execution",
+                        exit_reason_code=_exit_rc,
                     )
                 if pending.side == "BUY":
                     attach_costs_to_order(
@@ -644,6 +1196,7 @@ class DataCollector:
                     runtime_ctx=runtime_ctx,
                     mode=p_mode,
                     execution_check={"eligible": True, "pending_id": pending.id, "quantity": qty, "exec_price": exec_price},
+                    plan=pending_plan,
                     details={"side": pending.side, "reason": pending.reason, "order_id": order.id},
                     order_id=order.id,
                     position_id=position.id if position else None,
@@ -789,11 +1342,23 @@ class DataCollector:
 
         # Zbuduj mapę asset→quantity z Binance
         binance_map: dict[str, float] = {}
+        eur_balance_total = 0.0
         for b in balances:
             asset = b.get("asset", "")
             total = float(b.get("total", 0))
+            if asset == "EUR":
+                eur_balance_total = total
             if total > 0 and asset not in ("EUR", "USDC", "USDT", "BNB"):
                 binance_map[asset] = total
+
+        # Persistuj saldo EUR do RuntimeSetting — używane przez kill switch jako baza kapitału
+        if eur_balance_total > 0:
+            from backend.database import RuntimeSetting
+            lb_setting = db.query(RuntimeSetting).filter(RuntimeSetting.key == "live_balance_eur").first()
+            if lb_setting:
+                lb_setting.value = str(round(eur_balance_total, 4))
+            else:
+                db.add(RuntimeSetting(key="live_balance_eur", value=str(round(eur_balance_total, 4))))
 
         # Pobierz LIVE pozycje z DB
         db_positions = db.query(Position).filter(Position.mode == "live").all()
@@ -805,20 +1370,148 @@ class DataCollector:
             if base:
                 db_map[base] = db_map.get(base, 0.0) + float(pos.quantity or 0)
 
+        # Zbuduj szybki cache cen z MarketData (jeden query na asset)
+        all_assets = set(list(binance_map.keys()) + list(db_map.keys()))
+        _price_cache: dict[str, float] = {}
+        for _asset in all_assets:
+            for _quote in ("EUR", "USDC", "USDT"):
+                _sym = f"{_asset}{_quote}"
+                _md = db.query(MarketData).filter(MarketData.symbol == _sym).order_by(MarketData.timestamp.desc()).first()
+                if _md and _md.price:
+                    try:
+                        _price_cache[_asset] = float(_md.price)
+                        break
+                    except Exception:
+                        pass
+
+        # Minimalna wartość niezgodności w EUR poniżej której ignorujemy (pył)
+        _DUST_THRESHOLD_EUR = 2.0
+
         # Porównaj
         mismatches = []
-        all_assets = set(list(binance_map.keys()) + list(db_map.keys()))
         for asset in sorted(all_assets):
             binance_qty = binance_map.get(asset, 0.0)
             db_qty = db_map.get(asset, 0.0)
             if abs(binance_qty - db_qty) > max(1e-6, db_qty * 0.01):
+                # Sprawdź wartość niezgodności — ignoruj pył poniżej progu
+                # Jeśli cena nieznana (0), traktuj jako pył i też pomiń
+                _price = _price_cache.get(asset, 0.0)
+                if _price <= 0 or abs(binance_qty - db_qty) * _price < _DUST_THRESHOLD_EUR:
+                    continue  # brak ceny lub wartość poniżej progu pyłu — pomiń
                 mismatches.append(f"{asset}: Binance={binance_qty:.8g} DB={db_qty:.8g}")
 
+        # Auto-import aktywów z Binance (które nie są w DB) jako pozycje LIVE
+        imported: list[str] = []
+        watchlist_upper = {s.strip().upper().replace("/", "").replace("-", "") for s in self.watchlist}
+        for asset in sorted(all_assets):
+            binance_qty = binance_map.get(asset, 0.0)
+            db_qty = db_map.get(asset, 0.0)
+            if binance_qty <= 0 or db_qty >= binance_qty * 0.99:
+                continue  # brak aktywa na Binance lub już śledzony w DB
+            # Znajdź symbol w watchliście (preferuj EUR, potem USDC)
+            sym = None
+            for quote in ["EUR", "USDC", "USDT"]:
+                candidate = f"{asset}{quote}"
+                if candidate in watchlist_upper:
+                    sym = candidate
+                    break
+            if not sym:
+                continue  # żaden symbol z watchlisty — pomijamy
+            # Sprawdź czy jest istniejąca pozycja dla tego symbolu LIVE
+            existing = db.query(Position).filter(
+                Position.symbol == sym, Position.mode == "live"
+            ).first()
+            if existing:
+                continue
+            # Pobierz aktualną cenę
+            try:
+                ticker = self.binance.get_ticker_price(sym)
+                if not ticker or not ticker.get("price"):
+                    continue
+                current_price = float(ticker["price"])
+            except Exception:
+                continue
+            notional = current_price * binance_qty
+            if notional < 1.0:
+                continue  # dust — pomijamy
+            # Utwórz Position LIVE z entry = current price
+            now_ts = utc_now_naive()
+            new_pos = Position(
+                symbol=sym,
+                side="LONG",
+                entry_price=current_price,
+                quantity=binance_qty,
+                current_price=current_price,
+                unrealized_pnl=0.0,
+                mode="live",
+                opened_at=now_ts,
+                entry_reason_code="binance_import",
+            )
+            db.add(new_pos)
+            imported.append(f"{sym} qty={binance_qty:.8g} @ {current_price:.6g}")
+        if imported:
+            try:
+                db.commit()
+            except Exception as exc_imp:
+                db.rollback()
+                log_exception("binance_sync", "Błąd importu pozycji Binance", exc_imp, db=db)
+                imported = []
+        if imported:
+            imp_msg = "Auto-import pozycji LIVE z Binance: " + ", ".join(imported)
+            log_to_db("INFO", "binance_sync", imp_msg, db=db)
+            logger.info(f"✅ {imp_msg}")
+            self._send_telegram_alert("SYNC: Import pozycji", imp_msg)
+
+        # Auto-korekcja ghost positions i dust: jeśli DB qty > 0 ale Binance qty = 0 lub wartość < 1 EUR → zamknij
+        now_sync = utc_now_naive()
+        for pos in db_positions:
+            sym = pos.symbol or ""
+            base = sym.replace("EUR", "").replace("USDC", "").replace("USDT", "")
+            binance_qty = binance_map.get(base, 0.0)
+            db_qty = float(pos.quantity or 0.0)
+            if db_qty <= 0:
+                # Pozycja z qty=0 — usuń bez sprawdzania Binance (ghost)
+                logger.info(f"🧹 Usuwam ghost position: {sym} qty={db_qty} (DB qty=0)")
+                db.delete(pos)
+                continue
+            # Pobierz cenę do oceny wartości
+            try:
+                ticker_d = self.binance.get_ticker_price(sym)
+                curr_price = float(ticker_d["price"]) if ticker_d and ticker_d.get("price") else 0.0
+            except Exception:
+                curr_price = 0.0
+            binance_value = binance_qty * (curr_price or float(pos.entry_price or 0))
+            db_value = db_qty * (curr_price or float(pos.entry_price or 0))
+            # Jeśli Binance value < 1 EUR I DB value < 2 EUR → dust, zamknij
+            if binance_value < 1.0 and db_value < 2.0:
+                logger.info(f"🧹 Dust position zamknięta przez sync: {sym} Binance={binance_qty:.8g} value={binance_value:.4f}EUR")
+                log_to_db("INFO", "binance_sync", f"Auto-zamknięcie dust: {sym} Binance={binance_qty:.8g} EUR<1", db=db)
+                db.delete(pos)
+                continue
+            # Jeśli rozbieżność qty > 10% I DB > Binance → dostosuj qty do Binance
+            if binance_qty > 0 and db_qty > binance_qty * 1.05:
+                old_qty = db_qty
+                pos.quantity = binance_qty
+                if curr_price > 0:
+                    pos.unrealized_pnl = (curr_price - float(pos.entry_price or curr_price)) * binance_qty
+                logger.info(f"🔧 Korekcja qty: {sym} DB {old_qty:.8g}→{binance_qty:.8g} (Binance)")
+                log_to_db("INFO", "binance_sync", f"Korekta qty {sym}: {old_qty:.8g}→{binance_qty:.8g}", db=db)
+        try:
+            db.commit()
+        except Exception as exc_sync:
+            db.rollback()
+            log_exception("binance_sync", "Błąd auto-korekty pozycji", exc_sync, db=db)
+
         if mismatches:
-            msg = "Niezgodność pozycji DB↔Binance: " + " | ".join(mismatches[:10])
-            log_to_db("WARNING", "binance_sync", msg, db=db)
-            logger.warning(f"⚠️ {msg}")
-            self._send_telegram_alert("SYNC: Niezgodność", msg)
+            # Ogranicz spam logu — alert tylko raz na 30 minut jeśli brak importu
+            now_warn = utc_now_naive()
+            if not hasattr(self, "_last_sync_warn_ts") or self._last_sync_warn_ts is None or \
+                    (now_warn - self._last_sync_warn_ts).total_seconds() > 1800:
+                self._last_sync_warn_ts = now_warn
+                msg = "Niezgodność pozycji DB↔Binance: " + " | ".join(mismatches[:10])
+                log_to_db("WARNING", "binance_sync", msg, db=db)
+                logger.warning(f"⚠️ {msg}")
+                self._send_telegram_alert("SYNC: Niezgodność", msg)
 
     def _mark_to_market_positions(self, db: Session, mode: str = "demo") -> None:
         """
@@ -1089,7 +1782,7 @@ class DataCollector:
                 .filter(
                     PendingOrder.mode == mode,
                     PendingOrder.side == "BUY",
-                    PendingOrder.status.in_(["PENDING", "CONFIRMED"]),
+                    PendingOrder.status.in_(["PENDING", "CONFIRMED", "OPEN"]),
                 )
                 .all()
             )
@@ -1118,14 +1811,14 @@ class DataCollector:
         base_risk_per_trade = float(config.get("risk_per_trade", aggr_profile["risk_per_trade"]))
         max_trades_per_day = int(config.get("max_trades_per_day", 20))
         max_open_positions = int(config.get("max_open_positions", aggr_profile["max_open_positions"]))
-        base_cooldown = int(float(config.get("cooldown_after_loss_streak_minutes", 60)) * 60)
+        base_cooldown = int(float(config.get("cooldown_after_loss_streak_minutes", 0)) * 60)
         maker_fee_rate = float(config.get("maker_fee_rate", 0.001))
         taker_fee_rate = float(config.get("taker_fee_rate", 0.001))
         slippage_bps = float(config.get("slippage_bps", 5.0))
         spread_buffer_bps = float(config.get("spread_buffer_bps", 3.0))
         min_edge_multiplier = float(config.get("min_edge_multiplier", 2.5))
         min_expected_rr = float(config.get("min_expected_rr", 1.5))
-        min_order_notional = float(config.get("min_order_notional", 25.0))
+        min_order_notional = float(config.get("min_order_notional", 60.0))
         loss_streak_limit = int(config.get("loss_streak_limit", 3))
 
         # Trading-core settings (migrated from env)
@@ -1201,24 +1894,28 @@ class DataCollector:
             ai_ranges_stale = True
 
         # Fallback: heurystyczne zakresy ATR dla symboli bez zakresów AI
-        if not range_map or ai_ranges_stale:
-            if use_heuristic_fallback:
-                try:
-                    from backend.analysis import generate_market_insights, _heuristic_ranges
-                    insights_fallback = generate_market_insights(db, self.watchlist, timeframe="1h")
-                    heuristic_list = _heuristic_ranges(insights_fallback)
-                    # _heuristic_ranges zwraca List[Dict] — konwertuj na dict symbol→range
-                    for item in heuristic_list:
-                        sym = item.get("symbol")
-                        if sym and sym not in range_map:
-                            range_map[sym] = item
-                    if range_map and not ai_ranges_stale:
-                        pass  # loguj tylko raz
-                    elif range_map:
-                        log_to_db("INFO", "demo_trading",
-                                  f"Heurystyczne zakresy ATR dla {len(range_map)} symboli (fallback AI).", db=db)
-                except Exception as exc2:
-                    log_exception("demo_trading", "Błąd generowania heurystycznych zakresów", exc2, db=db)
+        # Uruchamiamy gdy: brak danych z bloga LUB blog jest nieaktualny LUB watchlist ma nowe symbole
+        missing_syms = [s for s in self.watchlist if s not in range_map]
+        if (not range_map or ai_ranges_stale or missing_syms) and use_heuristic_fallback:
+            try:
+                from backend.analysis import generate_market_insights, _heuristic_ranges
+                # Generuj tylko dla brakujących symboli (optimalizacja) albo całej watchlisty gdy stale
+                syms_for_heuristic = self.watchlist if (not range_map or ai_ranges_stale) else missing_syms
+                insights_fallback = generate_market_insights(db, syms_for_heuristic, timeframe="1h")
+                heuristic_list = _heuristic_ranges(insights_fallback)
+                # _heuristic_ranges zwraca List[Dict] — konwertuj na dict symbol→range
+                for item in heuristic_list:
+                    sym = item.get("symbol")
+                    if sym and sym not in range_map:
+                        range_map[sym] = item
+                if missing_syms and range_map:
+                    log_to_db("INFO", "demo_trading",
+                              f"Heurystyczne zakresy ATR dla {len(missing_syms)} brakujących symboli.", db=db)
+                elif ai_ranges_stale and range_map:
+                    log_to_db("INFO", "demo_trading",
+                              f"Heurystyczne zakresy ATR dla {len(range_map)} symboli (fallback AI).", db=db)
+            except Exception as exc2:
+                log_exception("demo_trading", "Błąd generowania heurystycznych zakresów", exc2, db=db)
 
         if not range_map:
             log_to_db("ERROR", "demo_trading", "Brak jakichkolwiek zakresów (AI i heurystyka) — pomijam decyzje DEMO", db=db)
@@ -1244,7 +1941,7 @@ class DataCollector:
                 .filter(
                     PendingOrder.mode == mode,
                     PendingOrder.symbol == sym,
-                    PendingOrder.status.in_(["PENDING", "CONFIRMED"]),
+                    PendingOrder.status.in_(["PENDING", "CONFIRMED", "OPEN"]),
                 )
                 .count()
                 > 0
@@ -1349,6 +2046,7 @@ class DataCollector:
         }
 
         _mode_label = str(tc.get("mode") or "demo").upper()
+        _exit_mode = tc.get("mode", "demo")
 
         def _exit_message(reason_code: str, sym: str, price: float, tp: float, sl: float,
                           qty: float = 0, partial: bool = False,
@@ -1430,10 +2128,20 @@ class DataCollector:
             entry = float(pos.entry_price)
             qty = float(pos.quantity)
             partial_count = int(pos.partial_take_count or 0)
+            snapshot, plan, revision = self._build_symbol_plan(db, sym, mode=_exit_mode, position=pos, force_reconsult=False)
+            if plan:
+                pos.decision_plan_json = json.dumps(plan, ensure_ascii=True, sort_keys=True)
+                pos.plan_status = plan.get("plan_status", "active")
+                pos.requires_revision = bool(plan.get("requires_revision", False))
+                pos.invalidation_reason = plan.get("invalidation_reason")
+                pos.last_consulted_at = utc_now_naive()
 
             # TP/SL: używamy planned_tp/sl z momentu wejścia, fallback do ATR
             stop_loss = float(pos.planned_sl) if pos.planned_sl else (entry - atr * atr_stop_mult)
             take_profit = float(pos.planned_tp) if pos.planned_tp else (entry + atr * atr_take_mult)
+            if plan:
+                stop_loss = float(plan.get("stop_loss_price") or stop_loss)
+                take_profit = float(plan.get("take_profit_price") or take_profit)
 
             # Aktualizuj highest_price_seen (MFE tracking)
             prev_high = float(pos.highest_price_seen or entry)
@@ -1474,27 +2182,49 @@ class DataCollector:
                     trailing_stop = new_trail
                     pos.trailing_stop_price = trailing_stop
 
+            # ── Break-even upgrade: gdy zysk ≥ 1×ATR → przesuń SL do entry ──────────
+            # Zabezpiecza kapitał bez zamykania pozycji — trader "na zero" gdy rynek wraca
+            be_atr_trigger = float(config.get("break_even_atr_trigger", 1.0))
+            be_trigger_price = entry + atr * be_atr_trigger
+            if price >= be_trigger_price and float(pos.planned_sl or 0) < entry:
+                new_be_sl = entry + atr * 0.05  # mały bufor nad entry (unikaj fałszywego SL przy spread)
+                pos.planned_sl = new_be_sl
+                stop_loss = new_be_sl  # zaktualizuj zmienną lokalną dla bieżącej iteracji
+                db.add(pos)
+                _be_msg = (
+                    f"[BE] Break-even SL aktywowany: {sym} | "
+                    f"Zysk {price - entry:.6f} ≥ 1×ATR={atr:.6f} | "
+                    f"SL podniesiony do {new_be_sl:.6f} (entry={entry:.6f})"
+                )
+                log_to_db("INFO", "exit_engine", _be_msg, db=db)
+
             # ━━━ WARSTWA 1: HARD EXIT — Stop Loss ━━━━━━━━━━━━━━━━━━━━━━━━━
             if price <= stop_loss:
                 reason_code = "stop_loss_hit"
                 msg = _exit_message(reason_code, sym, price, take_profit, stop_loss, qty, entry_price=entry)
                 self._trace_decision(
                     db, symbol=sym, action="CREATE_PENDING_EXIT", reason_code=reason_code,
-                    runtime_ctx=runtime_ctx, mode="demo",
+                    runtime_ctx=runtime_ctx, mode=_exit_mode,
                     signal_summary={"source": "exit_engine", "layer": "hard_exit", "atr": atr, "entry": entry, "price": price},
                     risk_check={"daily_loss_triggered": daily_loss_triggered},
                     cost_check={"eligible": True}, execution_check={"eligible": True},
+                    snapshot=snapshot, plan=plan,
                     details={"stop_loss": stop_loss, "take_profit": take_profit, "quantity": qty},
                 )
                 pending_id = self._create_pending_order(
-                    db=db, symbol=sym, side="SELL", price=price, qty=qty, mode="demo",
+                    db=db, symbol=sym, side="SELL", price=price, qty=qty, mode=_exit_mode,
                     reason=f"[SL] Stop Loss @ {price:.6f} (SL={stop_loss:.6f})",
                     config_snapshot_id=runtime_ctx.get("snapshot_id"), strategy_name="demo_collector",
+                    exit_reason_code="stop_loss_hit",
+                    decision_plan=plan,
                 )
                 # Eskalacja cooldown po SL — zapobiega natychmiastowemu re-entry
                 sl_state = self.demo_state.get(sym, {"loss_streak": 0, "cooldown": base_cooldown})
                 sl_state["loss_streak"] = min(sl_state.get("loss_streak", 0) + 1, loss_streak_limit)
-                sl_state["cooldown"] = min(base_cooldown * (1 + sl_state["loss_streak"]), 7200)
+                # PROFIT-FIX: cooldown po SL skaluje z loss_streak; cap = base_cooldown (nie < base_cooldown)
+                # base_cooldown = cooldown_after_loss_streak_minutes*60 — teraz 7200s (120min)
+                sl_cooldown = base_cooldown * (1 + sl_state["loss_streak"])
+                sl_state["cooldown"] = max(base_cooldown, min(sl_cooldown, base_cooldown * 4))
                 sl_state["win_streak"] = 0
                 self.demo_state[sym] = sl_state
                 self._send_telegram_alert(f"{_mode_label}: Stop Loss", msg, force_send=True)
@@ -1504,19 +2234,32 @@ class DataCollector:
 
             # ━━━ WARSTWA 2: TRAILING STOP ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
             if trailing_active and trailing_stop and price <= trailing_stop:
+                exit_guard = self._exit_allowed_by_plan(snapshot=snapshot, plan=plan, reason_code="trailing_lock_profit", current_price=price, position=pos)
+                if not exit_guard.get("allowed"):
+                    self._trace_decision(
+                        db, symbol=sym, action="SKIP", reason_code="exit_blocked_below_breakeven",
+                        runtime_ctx=runtime_ctx, mode=_exit_mode,
+                        signal_summary={"source": "exit_engine", "layer": "trailing", "price": price},
+                        cost_check={"eligible": False, "why": exit_guard.get("why")},
+                        snapshot=snapshot, plan=plan,
+                    )
+                    continue
                 reason_code = "trailing_lock_profit"
                 msg = _exit_message(reason_code, sym, price, take_profit, trailing_stop, qty, entry_price=entry)
                 self._trace_decision(
                     db, symbol=sym, action="CREATE_PENDING_EXIT", reason_code=reason_code,
-                    runtime_ctx=runtime_ctx, mode="demo",
+                    runtime_ctx=runtime_ctx, mode=_exit_mode,
                     signal_summary={"source": "exit_engine", "layer": "trailing", "price": price, "trailing_stop": trailing_stop},
                     risk_check={}, cost_check={"eligible": True}, execution_check={"eligible": True},
+                    snapshot=snapshot, plan=plan,
                     details={"trailing_stop": trailing_stop, "quantity": qty},
                 )
                 pending_id = self._create_pending_order(
-                    db=db, symbol=sym, side="SELL", price=price, qty=qty, mode="demo",
+                    db=db, symbol=sym, side="SELL", price=price, qty=qty, mode=_exit_mode,
                     reason=f"[TRAIL] Trailing stop @ {price:.6f} (trail={trailing_stop:.6f})",
                     config_snapshot_id=runtime_ctx.get("snapshot_id"), strategy_name="demo_collector",
+                    exit_reason_code="trailing_lock_profit",
+                    decision_plan=plan,
                 )
                 self._send_telegram_alert(f"{_mode_label}: Trailing Stop", msg, force_send=True)
                 db.add(Alert(alert_type="SIGNAL", severity="INFO", title=f"TRAIL {sym}",
@@ -1525,15 +2268,32 @@ class DataCollector:
 
             # ━━━ WARSTWA 3: TAKE PROFIT (częściowy lub pełny) ━━━━━━━━━━━━━
             if price >= take_profit:
-                # Oceń siłę trendu — czy kontynuować czy zamknąć
-                # forecast_bullish działa jako dodatkowy sygnał utrzymania pozycji
-                trend_strong = (
-                    (
-                        ema_20 is not None and ema_50 is not None
-                        and float(ema_20) > float(ema_50)
-                        and 40.0 < rsi < 75.0
+                exit_guard = self._exit_allowed_by_plan(snapshot=snapshot, plan=plan, reason_code="tp_full_reversal", current_price=price, position=pos)
+                if not exit_guard.get("allowed"):
+                    self._trace_decision(
+                        db, symbol=sym, action="SKIP", reason_code="exit_blocked_below_breakeven",
+                        runtime_ctx=runtime_ctx, mode=_exit_mode,
+                        signal_summary={"source": "exit_engine", "layer": "tp", "price": price},
+                        cost_check={"eligible": False, "why": exit_guard.get("why")},
+                        snapshot=snapshot, plan=plan,
                     )
-                    or forecast_bullish  # AI prognoza wzrostu → trzymaj pozycję
+                    continue
+                # P1-FIX: Oceń siłę trendu — RSI górna granica podniesiona 75→82.
+                # W silnym bull runie RSI naturalnie jest 75-85, stary próg powodował
+                # przedwczesne zamykanie zyskownych pozycji (BTC rosło, bot zamykał).
+                # ADX z get_live_context() (teraz dostępny) potwierdza siłę trendu.
+                _adx_ctx = ctx.get("adx")  # dostępne po P1-FIX w get_live_context()
+                _st_ctx = ctx.get("supertrend_dir")  # dostępne po P1-FIX
+                _ema_bullish = (
+                    ema_20 is not None and ema_50 is not None
+                    and float(ema_20) > float(ema_50)
+                )
+                # Trend silny gdy: EMA bycze + RSI < 82 LUB ADX > 25 + EMA bycze LUB forecast AI LUB Supertrend bycze
+                trend_strong = (
+                    (_ema_bullish and rsi < 82.0)                                      # P1-FIX: 75→82
+                    or forecast_bullish                                                 # AI prognoza wzrostu
+                    or (_ema_bullish and _adx_ctx is not None and float(_adx_ctx) >= 25)  # silny trend ADX
+                    or (_st_ctx is not None and float(_st_ctx) > 0 and _ema_bullish)   # Supertrend bycze
                 )
                 partial_qty = round(qty * 0.25, 8)
                 can_partial = (partial_count < 2) and (partial_qty > 0) and (partial_qty < qty * 0.95)
@@ -1544,17 +2304,22 @@ class DataCollector:
                     msg = _exit_message(reason_code, sym, price, take_profit, stop_loss, partial_qty, partial=True, entry_price=entry)
                     self._trace_decision(
                         db, symbol=sym, action="CREATE_PENDING_EXIT", reason_code=reason_code,
-                        runtime_ctx=runtime_ctx, mode="demo",
+                        runtime_ctx=runtime_ctx, mode=_exit_mode,
                         signal_summary={"source": "exit_engine", "layer": "tp_soft", "price": price,
                                         "tp": take_profit, "rsi": rsi, "ema_trend": "up",
-                                        "forecast_bullish": forecast_bullish},
+                                        "forecast_bullish": forecast_bullish, "adx": _adx_ctx,
+                                        "trend_strong_reason": "ema+rsi<82" if (_ema_bullish and rsi < 82.0) else (
+                                            "forecast_bullish" if forecast_bullish else ("adx>=25" if _adx_ctx and float(_adx_ctx) >= 25 else "supertrend"))},
                         risk_check={}, cost_check={"eligible": True}, execution_check={"eligible": True},
+                        snapshot=snapshot, plan=plan,
                         details={"partial_qty": partial_qty, "full_qty": qty, "partial_count": partial_count},
                     )
                     pending_id = self._create_pending_order(
-                        db=db, symbol=sym, side="SELL", price=price, qty=partial_qty, mode="demo",
+                        db=db, symbol=sym, side="SELL", price=price, qty=partial_qty, mode=_exit_mode,
                         reason=f"[TP-PARTIAL] Trend trwa — zamykamy 25% @ {price:.6f} (TP={take_profit:.6f})",
                         config_snapshot_id=runtime_ctx.get("snapshot_id"), strategy_name="demo_collector",
+                        exit_reason_code="tp_partial_keep_trend",
+                        decision_plan=plan,
                     )
                     # Podnieś SL do break-even lub wyżej
                     pos.planned_sl = max(stop_loss, entry)
@@ -1572,17 +2337,20 @@ class DataCollector:
                     msg = _exit_message(reason_code, sym, price, take_profit, stop_loss, qty, entry_price=entry)
                     self._trace_decision(
                         db, symbol=sym, action="CREATE_PENDING_EXIT", reason_code=reason_code,
-                        runtime_ctx=runtime_ctx, mode="demo",
+                        runtime_ctx=runtime_ctx, mode=_exit_mode,
                         signal_summary={"source": "exit_engine", "layer": "tp_full", "price": price,
                                         "tp": take_profit, "rsi": rsi, "trend_strong": trend_strong,
                                         "forecast_bullish": forecast_bullish},
                         risk_check={}, cost_check={"eligible": True}, execution_check={"eligible": True},
+                        snapshot=snapshot, plan=plan,
                         details={"quantity": qty, "trend_strong": trend_strong, "partial_count": partial_count},
                     )
                     pending_id = self._create_pending_order(
-                        db=db, symbol=sym, side="SELL", price=price, qty=qty, mode="demo",
+                        db=db, symbol=sym, side="SELL", price=price, qty=qty, mode=_exit_mode,
                         reason=f"[TP-FULL] {_reason_pl.get(reason_code, reason_code)} @ {price:.6f}",
                         config_snapshot_id=runtime_ctx.get("snapshot_id"), strategy_name="demo_collector",
+                        exit_reason_code=reason_code,
+                        decision_plan=plan,
                     )
                     # Sukces — zeruj loss_streak, zwiększ win_streak
                     tp_state = self.demo_state.get(sym, {"loss_streak": 0, "win_streak": 0, "cooldown": base_cooldown})
@@ -1598,21 +2366,36 @@ class DataCollector:
             # ━━━ WARSTWA 4: REVERSAL CHECK (dla pozycji po TP lub z trailing) ━━━
             if (trailing_active or partial_count > 0) and ema_20 is not None and ema_50 is not None:
                 pnl_pct = (price - entry) / entry * 100 if entry > 0 else 0
-                if pnl_pct > 2.0 and float(ema_20) < float(ema_50) and rsi > 65.0:
+                # P1-FIX: RSI threshold 65→70 — w bull runie RSI 65 jest normalny,
+                # wymagaj wyraźniejszego sygnału wykupienia + bearish EMA jednocześnie
+                if pnl_pct > 2.0 and float(ema_20) < float(ema_50) and rsi > 70.0:
+                    exit_guard = self._exit_allowed_by_plan(snapshot=snapshot, plan=plan, reason_code="tp_full_reversal", current_price=price, position=pos)
+                    if not exit_guard.get("allowed"):
+                        self._trace_decision(
+                            db, symbol=sym, action="SKIP", reason_code="exit_blocked_below_breakeven",
+                            runtime_ctx=runtime_ctx, mode=_exit_mode,
+                            signal_summary={"source": "exit_engine", "layer": "reversal", "price": price},
+                            cost_check={"eligible": False, "why": exit_guard.get("why")},
+                            snapshot=snapshot, plan=plan,
+                        )
+                        continue
                     reason_code = "tp_full_reversal"
                     msg = _exit_message(reason_code, sym, price, take_profit, stop_loss, qty, entry_price=entry)
                     self._trace_decision(
                         db, symbol=sym, action="CREATE_PENDING_EXIT", reason_code=reason_code,
-                        runtime_ctx=runtime_ctx, mode="demo",
+                        runtime_ctx=runtime_ctx, mode=_exit_mode,
                         signal_summary={"source": "exit_engine", "layer": "reversal", "price": price,
                                         "rsi": rsi, "ema_20": float(ema_20), "ema_50": float(ema_50)},
                         risk_check={}, cost_check={"eligible": True}, execution_check={"eligible": True},
+                        snapshot=snapshot, plan=plan,
                         details={"pnl_pct": pnl_pct, "quantity": qty},
                     )
                     pending_id = self._create_pending_order(
-                        db=db, symbol=sym, side="SELL", price=price, qty=qty, mode="demo",
+                        db=db, symbol=sym, side="SELL", price=price, qty=qty, mode=_exit_mode,
                         reason=f"[REVERSAL] Odwrócenie trendu — zysk +{pnl_pct:.1f}% @ {price:.6f}",
                         config_snapshot_id=runtime_ctx.get("snapshot_id"), strategy_name="demo_collector",
+                        exit_reason_code=reason_code,
+                        decision_plan=plan,
                     )
                     self._send_telegram_alert(f"{_mode_label}: EXIT Reversal", msg, force_send=True)
                     db.add(Alert(alert_type="SIGNAL", severity="INFO", title=f"REVERSAL {sym}",
@@ -1754,7 +2537,7 @@ class DataCollector:
         - Zwraca True jeśli zlecenie sprzedaży zostało złożone.
         """
         available_cash = float(tc.get("available_cash", 0.0))
-        min_order_notional = float(tc.get("min_order_notional", 25.0))
+        min_order_notional = float(tc.get("min_order_notional", 60.0))
         positions = tc.get("positions", [])
         if available_cash >= min_order_notional:
             return False
@@ -1911,6 +2694,22 @@ class DataCollector:
             if entry <= 0:
                 continue
 
+            # Grace period dla importowanych pozycji — poczekaj 2 godziny zanim ustawisz TP/SL.
+            # Zapobiega natychmiastowemu wyjściu na pozycjach importowanych z Binance
+            # gdy ATR jest obliczony na bazie starych danych lub cena zdążyła przesunąć się
+            # względem poziomu importu.
+            if (
+                getattr(pos, "entry_reason_code", None) == "binance_import"
+                and needs_tp and needs_sl  # tylko gdy brak OBUŻ: TP i SL
+                and pos.updated_at is not None
+                and (utc_now_naive() - pos.updated_at).total_seconds() < 7200  # < 2h
+            ):
+                logger.debug(
+                    "[AUTO_GOALS] %s: grace period aktywny (imported %d min temu) — pomijam TP/SL",
+                    sym, int((utc_now_naive() - pos.updated_at).total_seconds() / 60),
+                )
+                continue
+
             ctx = get_live_context(db, sym, timeframe="1h", limit=max(min_klines, 120))
             if not ctx or not ctx.get("atr"):
                 continue
@@ -1939,6 +2738,15 @@ class DataCollector:
                 pos.planned_tp = entry + atr * tp_mult
             if needs_sl:
                 pos.planned_sl = entry - atr * atr_stop_mult
+
+            # Minimum distance guard — zapobiega degeneracji TP/SL gdy ATR jest zbyt mały
+            # (np. SHIB gdzie ATR ≈ 0 → tp=sl=price → natychmiastowy exit)
+            min_tp_dist = entry * 0.005   # min TP: +0.5% od ceny wejścia
+            min_sl_dist = entry * 0.003   # min SL: -0.3% od ceny wejścia
+            if pos.planned_tp is not None and pos.planned_tp < entry + min_tp_dist:
+                pos.planned_tp = entry + min_tp_dist
+            if pos.planned_sl is not None and pos.planned_sl > entry - min_sl_dist:
+                pos.planned_sl = entry - min_sl_dist
 
             set_count += 1
             log_to_db(
@@ -2023,17 +2831,18 @@ class DataCollector:
             if not sym_norm.endswith(demo_quote_ccy):
                 continue
 
-            # --- Tier gating: symbol musi należeć do zdefiniowanego tieru ---
+            # --- Tier gating: symbole spoza tiers wchodzą jako tier "SCANNER" ---
+            # Symbole dodane przez skaner wolumenowy nie są w konfiguracji tiers,
+            # ale mogą handlować z ostrożniejszymi parametrami (risk_scale=0.5, max 1/dzień)
             sym_tier = tier_map.get(sym_norm)
             if tier_map and not sym_tier:
-                self._trace_decision(
-                    db,
-                    symbol=symbol,
-                    action="SKIP",
-                    reason_code="symbol_not_in_any_tier",
-                    runtime_ctx=runtime_ctx,
-                )
-                continue
+                sym_tier = {
+                    "tier": "SCANNER",
+                    "min_confidence_add": 0.07,   # wyższy próg dla nowych symboli
+                    "min_edge_multiplier_add": 0.5,
+                    "risk_scale": 0.5,             # połowa pozycji
+                    "max_trades_per_day_per_symbol": 1,
+                }
 
             # --- HOLD MODE: nie generuj nowych wejść dla pozycji strategicznych ---
             if sym_tier and sym_tier.get("no_new_entries"):
@@ -2056,11 +2865,14 @@ class DataCollector:
             # Limit dziennych transakcji na symbol (z tieru)
             _current_mode = tc.get("mode", "demo")
             day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+            # Liczymy tylko BUY (wejścia) — partial take-profit generuje 3 SELL/pozycję,
+            # zliczanie ich jako osobne "tradesie" blokowałoby symbol po 1 pełnym cyklu.
             sym_trades_today = (
                 db.query(Order)
                 .filter(
                     Order.symbol == symbol,
                     Order.mode == _current_mode,
+                    Order.side == "BUY",
                     Order.timestamp >= day_start,
                 )
                 .count()
@@ -2082,7 +2894,7 @@ class DataCollector:
                     action="SKIP",
                     reason_code="active_pending_exists",
                     runtime_ctx=runtime_ctx,
-                    mode="demo",
+                    mode=_current_mode,
                     execution_check={"eligible": False, "has_active_pending": True},
                 )
                 continue
@@ -2093,7 +2905,7 @@ class DataCollector:
                     action="SKIP",
                     reason_code="pending_cooldown_active",
                     runtime_ctx=runtime_ctx,
-                    mode="demo",
+                    mode=_current_mode,
                     risk_check={"cooldown_active": True, "pending_cooldown_seconds": pending_cooldown_seconds},
                 )
                 continue
@@ -2114,27 +2926,27 @@ class DataCollector:
 
             position = (
                 db.query(Position)
-                .filter(Position.symbol == symbol, Position.mode == "demo")
+                .filter(Position.symbol == symbol, Position.mode == _current_mode)
                 .first()
             )
 
             # Cooldown po ostatniej wykonanej transakcji
             last_order = (
                 db.query(Order)
-                .filter(Order.symbol == symbol, Order.mode == "demo")
+                .filter(Order.symbol == symbol, Order.mode == _current_mode)
                 .order_by(Order.timestamp.desc())
                 .first()
             )
             state = self.demo_state.get(symbol, {"loss_streak": 0, "win_streak": 0, "cooldown": base_cooldown})
             cooldown = int(state.get("cooldown", base_cooldown))
-            if last_order and (now - last_order.timestamp).total_seconds() < float(cooldown):
+            if cooldown > 0 and last_order and (now - last_order.timestamp).total_seconds() < float(cooldown):
                 self._trace_decision(
                     db,
                     symbol=symbol,
                     action="SKIP",
                     reason_code="symbol_cooldown_active",
                     runtime_ctx=runtime_ctx,
-                    mode="demo",
+                    mode=_current_mode,
                     risk_check={"cooldown_active": True, "cooldown_seconds": cooldown},
                 )
                 continue
@@ -2159,28 +2971,82 @@ class DataCollector:
             min_confidence = min(base_min_confidence + 0.10, max(base_min_confidence, learned_conf))
             # Tier override: podniesienie min_confidence
             min_confidence = min(1.0, min_confidence + tier_conf_add)
+
+            # Reżim rynkowy — dostosuj min_confidence na podstawie F&G + CoinGecko
+            from backend.analysis import get_market_regime
+            market_regime = get_market_regime()
+            regime_adj = float(market_regime.get("buy_confidence_adj", 0.0))
+            if sig.signal_type == "BUY":
+                # Blokuj BUY gdy reżim CRASH lub BEAR.
+                # WYJĄTEK: ekstremalnie wyprzedany symbol (RSI < extreme_oversold_rsi_threshold)
+                # może wejść jako mean-reversion z niższym progiem confidence.
+                if market_regime.get("buy_blocked"):
+                    bear_min_conf = float(config.get("bear_regime_min_conf", 0.62))
+                    oversold_thresh = float(config.get("extreme_oversold_rsi_threshold", 28.0))
+                    oversold_bypass_conf = float(config.get("bear_oversold_bypass_conf", 0.55))
+                    # RSI z wskaźników sygnału (szybki odczyt bez ctx)
+                    _sig_ind = json.loads(sig.indicators) if sig.indicators else {}
+                    _sig_rsi = float(_sig_ind.get("rsi") or 50.0)
+                    _is_extreme_oversold_regime = _sig_rsi < oversold_thresh
+                    # W ekstremalnym wyprzedaniu: obniż wymagany próg confidence
+                    effective_bear_min = oversold_bypass_conf if _is_extreme_oversold_regime else bear_min_conf
+                    if float(sig.confidence) < effective_bear_min:
+                        self._trace_decision(
+                            db, symbol=symbol, action="SKIP", reason_code="market_regime_buy_blocked",
+                            runtime_ctx=runtime_ctx, mode=_current_mode, signal_summary=signal_summary,
+                            risk_check={
+                                "regime": market_regime.get("regime"),
+                                "reason": market_regime.get("reason", "")[:200],
+                                "bear_min_conf": effective_bear_min,
+                                "signal_conf": float(sig.confidence),
+                                "sig_rsi": _sig_rsi,
+                                "oversold_bypass": _is_extreme_oversold_regime,
+                            },
+                        )
+                        continue
+                    # P1-FIX: Sygnał przeszedł specyficzny test BEAR/CRASH — NIE dodawaj buy_confidence_adj
+                    # na wierzch min_confidence (to powodowało double-blocking: sygnał 0.62 był
+                    # blokowany przez min_confidence 0.55+0.10=0.65 mimo przejścia przez bear_min_conf 0.62).
+                    # Ustaw min_confidence = effective_bear_min to uniknąć podwójnego blokowania.
+                    signal_summary = dict(signal_summary) if signal_summary else {}
+                    signal_summary["bear_regime_override"] = True
+                    signal_summary["mean_reversion_entry"] = _is_extreme_oversold_regime
+                    min_confidence = min(min_confidence, effective_bear_min)  # nie podnoś powyżej użytego progu
+                # Podnieś próg confidence w słabych reżimach (BEAR_SOFT)
+                elif regime_adj > 0:
+                    min_confidence = min(1.0, min_confidence + regime_adj)
+
             if float(sig.confidence) < float(min_confidence):
                 self._trace_decision(
                     db, symbol=symbol, action="SKIP", reason_code="signal_confidence_too_low",
-                    runtime_ctx=runtime_ctx, mode="demo", signal_summary=signal_summary,
-                    risk_check={"min_confidence": min_confidence, "tier": tier_name},
+                    runtime_ctx=runtime_ctx, mode=_current_mode, signal_summary=signal_summary,
+                    risk_check={"min_confidence": min_confidence, "tier": tier_name, "regime": market_regime.get("regime")},
                 )
                 continue
             if (now - sig.timestamp).total_seconds() > float(max_signal_age):
                 self._trace_decision(
                     db, symbol=symbol, action="SKIP", reason_code="signal_too_old",
-                    runtime_ctx=runtime_ctx, mode="demo", signal_summary=signal_summary,
+                    runtime_ctx=runtime_ctx, mode=_current_mode, signal_summary=signal_summary,
                     risk_check={"max_signal_age_seconds": max_signal_age},
                 )
                 continue
 
             r = range_map.get(symbol)
-            if not r:
-                continue
+            # Brak zakresu AI: fallback na czyste wskaźniki (Supertrend + EMA + RSI)
+            # Trader bez poziomu AI wchodzi gdy trend + RSI są zgodne — nie stoi z boku
+            _synthetic_range = not bool(r)
+            if _synthetic_range:
+                r = {}  # pusty dict — filtry price-in-zone zostaną pominięte
 
             crash = self._detect_crash(db, symbol, crash_window_minutes, crash_drop_pct)
             if crash:
-                if float(sig.confidence) < extreme_min_conf:
+                # Symbol-level crash: wyższy próg, ale z bypasem dla ekstremalnego wyprzedania
+                _sig_ind_c = json.loads(sig.indicators) if sig.indicators else {}
+                _sig_rsi_c = float(_sig_ind_c.get("rsi") or 50.0)
+                _oversold_thresh_c = float(config.get("extreme_oversold_rsi_threshold", 28.0))
+                _is_oversold_crash = _sig_rsi_c < _oversold_thresh_c
+                _crash_conf_thresh = float(config.get("bear_oversold_bypass_conf", 0.55)) if _is_oversold_crash else extreme_min_conf
+                if float(sig.confidence) < _crash_conf_thresh:
                     continue
                 state["cooldown"] = max(int(state.get("cooldown", base_cooldown)), crash_cooldown_seconds)
                 self.demo_state[symbol] = state
@@ -2204,46 +3070,100 @@ class DataCollector:
             rsi_buy = ctx.get("rsi_buy")
             rsi_sell = ctx.get("rsi_sell")
             atr = ctx.get("atr")
+            supertrend_dir = ctx.get("supertrend_dir")   # +1 bycze, -1 niedźwiedzie
+            adx_val = ctx.get("adx")                      # 0-100, >25 = silny trend
+            volume_ratio = ctx.get("volume_ratio")        # wolumen / SMA20
             if not atr or float(atr) <= 0:
+                continue
+
+            snapshot, plan, revision = self._build_symbol_plan(db, symbol, mode=_current_mode, position=position, force_reconsult=False)
+            if not snapshot or not plan:
+                self._trace_decision(
+                    db, symbol=symbol, action="SKIP", reason_code="missing_trade_plan",
+                    runtime_ctx=runtime_ctx, mode=_current_mode, signal_summary=signal_summary,
+                )
+                continue
+
+            # PROFIT-FIX: ATR zbyt małe = ruch cenowy nie pokryje kosztów round-trip
+            # Przy ATR/price < 0.5% nawet TP×3.5 = 1.75% vs koszty ≈0.36% — margines za wąski
+            # w praktyce na wol. microalt (WIFEUR 0.3% ATR → spread i fee zjadają cały edge)
+            _min_atr_pct = float(config.get("min_atr_pct", 0.005))  # 0.5% domyślnie
+            if price and float(price) > 0 and float(atr) / float(price) < _min_atr_pct:
+                self._trace_decision(
+                    db, symbol=symbol, action="SKIP", reason_code="atr_below_min_pct",
+                    runtime_ctx=runtime_ctx, mode=_current_mode, signal_summary=signal_summary,
+                    risk_check={"atr": float(atr), "price": float(price),
+                                "atr_pct": round(float(atr)/float(price)*100, 4),
+                                "min_atr_pct": _min_atr_pct*100},
+                )
                 continue
 
             # Filtry wejścia/wyjścia — z 3% tolerancją cenową (rynek może wyjść poza zakres AI)
             side = None
             reasons: list[str] = []
             price_tolerance = float(config.get("range_price_tolerance_pct", 0.03))
-            # RSI: permisywny próg — RSI ≤ 65 dla BUY, ≥ 35 dla SELL
-            rsi_buy_gate = float(rsi_buy) if rsi_buy is not None else 65.0
-            rsi_buy_gate = max(rsi_buy_gate, 65.0)   # Nie wymagaj głębokiego wyprzedania
-            rsi_sell_gate = float(rsi_sell) if rsi_sell is not None else 35.0
-            rsi_sell_gate = min(rsi_sell_gate, 35.0)  # Nie wymagaj głębokiego wykupienia
+            # RSI: zaostrzony próg — BUY tylko przy niższym RSI, SELL tylko przy wyższym RSI
+            rsi_buy_gate = float(rsi_buy) if rsi_buy is not None else 52.0
+            rsi_buy_gate = min(rsi_buy_gate, 55.0)
+            rsi_sell_gate = float(rsi_sell) if rsi_sell is not None else 48.0
+            rsi_sell_gate = max(rsi_sell_gate, 45.0)
 
-            if sig.signal_type == "BUY" and r.get("buy_low") is not None and r.get("buy_high") is not None:
-                buy_low_tol = float(r.get("buy_low")) * (1 - price_tolerance)
-                buy_high_tol = float(r.get("buy_high")) * (1 + price_tolerance)
-                in_range = buy_low_tol <= price <= buy_high_tol
-                trend_up = ema20 is not None and ema50 is not None and float(ema20) > float(ema50)
+            # Trend gate: wymagaj zgodności EMA i Supertrend, a nie jednego z nich
+            _ema_trend_up = ema20 is not None and ema50 is not None and float(ema20) > float(ema50)
+            _ema_trend_down = ema20 is not None and ema50 is not None and float(ema20) < float(ema50)
+            _st_up = supertrend_dir is not None and float(supertrend_dir) > 0
+            _st_down = supertrend_dir is not None and float(supertrend_dir) < 0
+            trend_up = _ema_trend_up and (_st_up or supertrend_dir is None)
+            trend_down = _ema_trend_down and (_st_down or supertrend_dir is None)
+            _trend_reason_up = "EMA20>EMA50 + Supertrend bycze" if (_ema_trend_up and _st_up) else ("EMA20>EMA50" if _ema_trend_up else "brak trendu")
+            _trend_reason_down = "EMA20<EMA50 + Supertrend niedźwiedzie" if (_ema_trend_down and _st_down) else ("EMA20<EMA50" if _ema_trend_down else "brak trendu")
+            _momentum_buy_ok = adx_val is not None and float(adx_val) >= 18 and volume_ratio is not None and float(volume_ratio) >= 0.9
+            _momentum_sell_ok = adx_val is not None and float(adx_val) >= 18
+
+            if sig.signal_type == "BUY":
                 rsi_ok = rsi is not None and float(rsi) <= rsi_buy_gate
-                if in_range and trend_up and rsi_ok:
-                    side = "BUY"
-                    reasons = ["Trend wzrostowy (EMA20>EMA50)", "RSI potwierdza", "Cena w zakresie BUY (AI)"]
-                elif demo_allow_soft_buy and trend_up and rsi_ok and not in_range:
-                    # Soft entry: trend + RSI spełnione, cena poza zakresem AI
-                    # Dodatkowy filtr: RSI < 55 — nie kupuj na overextension
-                    rsi_val = float(rsi) if rsi is not None else 50.0
-                    if rsi_val < 55.0:
+                _rsi_val_buy = float(rsi) if rsi is not None else 50.0
+                _trend_ok_buy = trend_up and _momentum_buy_ok
+                if _synthetic_range:
+                    # Brak zakresu AI — wejście tylko przy pełnym potwierdzeniu trend-following
+                    if _trend_ok_buy and rsi_ok:
                         side = "BUY"
-                        reasons = ["Trend wzrostowy (EMA20>EMA50)", "RSI potwierdza (bez overextension)", "Wejście miękkie — cena poza zakresem AI, ale trend OK"]
-                    # else: RSI za wysoki dla soft entry — filtr zapobiega kupowaniu na szczycie
-            elif sig.signal_type == "SELL" and r.get("sell_low") is not None and r.get("sell_high") is not None:
-                sell_low_tol = float(r.get("sell_low")) * (1 - price_tolerance)
-                sell_high_tol = float(r.get("sell_high")) * (1 + price_tolerance)
-                if (
-                    sell_low_tol <= price <= sell_high_tol
-                    and ema20 is not None and ema50 is not None and float(ema20) < float(ema50)
-                    and rsi is not None and float(rsi) >= rsi_sell_gate
-                ):
-                    side = "SELL"
-                    reasons = ["Trend spadkowy (EMA20<EMA50)", "RSI (wysoki) potwierdza", "Cena w zakresie SELL (AI)"]
+                        reasons = [f"Trend wzrostowy ({_trend_reason_up})", "RSI potwierdza", "ADX i wolumen potwierdzają", "Wejście fallback (brak strefy AI)"]
+                elif r.get("buy_low") is not None and r.get("buy_high") is not None:
+                    buy_low_tol = float(r.get("buy_low")) * (1 - price_tolerance)
+                    buy_high_tol = float(r.get("buy_high")) * (1 + price_tolerance)
+                    in_range = buy_low_tol <= price <= buy_high_tol
+                    if in_range and _trend_ok_buy and rsi_ok:
+                        side = "BUY"
+                        reasons = [f"Trend wzrostowy ({_trend_reason_up})", "RSI potwierdza", "ADX i wolumen potwierdzają", "Cena w zakresie BUY (AI)"]
+                    elif demo_allow_soft_buy and _trend_ok_buy and rsi_ok and not in_range:
+                        # Soft entry: tylko przy pełnym potwierdzeniu trend-following
+                        rsi_val = float(rsi) if rsi is not None else 50.0
+                        if rsi_val < 55.0:
+                            side = "BUY"
+                            reasons = [f"Trend wzrostowy ({_trend_reason_up})", "RSI potwierdza", "ADX i wolumen potwierdzają", "Wejście miękkie — cena poza zakresem AI, ale setup silny"]
+            elif sig.signal_type == "SELL":
+                # W reżimie CRASH/BEAR: obniż RSI gate dla SELL
+                # RSI=28-35 jest "wyprzedany" ale rynek nadal spada — SELL jest prawidłowy
+                _rsi_sell_min = rsi_sell_gate  # domyślnie 35
+                if market_regime.get("buy_blocked"):
+                    _rsi_sell_min = float(config.get("bear_rsi_sell_gate", 20.0))
+                rsi_ok_sell = rsi is not None and float(rsi) >= _rsi_sell_min
+                if _synthetic_range:
+                    if trend_down and rsi_ok_sell and _momentum_sell_ok:
+                        side = "SELL"
+                        reasons = [f"Trend spadkowy ({_trend_reason_down})", "RSI potwierdza", "ADX potwierdza", "Wyjście fallback (brak strefy AI)"]
+                elif r.get("sell_low") is not None and r.get("sell_high") is not None:
+                    sell_low_tol = float(r.get("sell_low")) * (1 - price_tolerance)
+                    sell_high_tol = float(r.get("sell_high")) * (1 + price_tolerance)
+                    if (
+                        sell_low_tol <= price <= sell_high_tol
+                        and trend_down
+                        and rsi_ok_sell
+                        and _momentum_sell_ok
+                    ):
+                        side = "SELL"
+                        reasons = [f"Trend spadkowy ({_trend_reason_down})", "RSI potwierdza", "ADX potwierdza", "Cena w zakresie SELL (AI)"]
 
             if side is None:
                 # Diagnostyka: które konkretnie filtry zawiodły
@@ -2255,8 +3175,13 @@ class DataCollector:
                         buy_high_tol = float(bh) * (1 + price_tolerance)
                         if not (buy_low_tol <= price <= buy_high_tol):
                             _filter_fails.append(f"cena {round(price,4)} poza strefą BUY [{round(buy_low_tol,4)}–{round(buy_high_tol,4)}]")
-                    if ema20 is not None and ema50 is not None and float(ema20) <= float(ema50):
-                        _filter_fails.append(f"trend: EMA20({round(float(ema20),2)}) ≤ EMA50({round(float(ema50),2)}) — trend spadkowy")
+                    elif _synthetic_range:
+                        _filter_fails.append("brak strefy AI (zakres syntetyczny)")
+                    # Trend gate: EMA i/lub Supertrend
+                    if not trend_up:
+                        _ema_fail = f"EMA20({round(float(ema20),2)})≤EMA50({round(float(ema50),2)})" if (ema20 is not None and ema50 is not None) else "brak EMA"
+                        _st_fail = f"Supertrend={supertrend_dir}" if supertrend_dir is not None else "brak Supertrend"
+                        _filter_fails.append(f"trend spadkowy: {_ema_fail}, {_st_fail}")
                     if rsi is not None and float(rsi) > rsi_buy_gate:
                         _filter_fails.append(f"RSI({round(float(rsi),1)}) > próg kupna {round(rsi_buy_gate,1)}")
                 elif sig.signal_type == "SELL":
@@ -2266,13 +3191,17 @@ class DataCollector:
                         sell_high_tol = float(sh) * (1 + price_tolerance)
                         if not (sell_low_tol <= price <= sell_high_tol):
                             _filter_fails.append(f"cena {round(price,4)} poza strefą SELL [{round(sell_low_tol,4)}–{round(sell_high_tol,4)}]")
-                    if ema20 is not None and ema50 is not None and float(ema20) >= float(ema50):
-                        _filter_fails.append(f"trend: EMA20({round(float(ema20),2)}) ≥ EMA50({round(float(ema50),2)}) — trend wzrostowy")
-                    if rsi is not None and float(rsi) < rsi_sell_gate:
-                        _filter_fails.append(f"RSI({round(float(rsi),1)}) < próg sprzedaży {round(rsi_sell_gate,1)}")
+                    elif _synthetic_range:
+                        _filter_fails.append("brak strefy AI (zakres syntetyczny)")
+                    if not trend_down:
+                        _ema_fail = f"EMA20({round(float(ema20),2)})≥EMA50({round(float(ema50),2)})" if (ema20 is not None and ema50 is not None) else "brak EMA"
+                        _st_fail = f"Supertrend={supertrend_dir}" if supertrend_dir is not None else "brak Supertrend"
+                        _filter_fails.append(f"trend wzrostowy: {_ema_fail}, {_st_fail}")
+                    if rsi is not None and float(rsi) < _rsi_sell_min:
+                        _filter_fails.append(f"RSI({round(float(rsi),1)}) < próg sprzedaży {round(_rsi_sell_min,1)}{' (CRASH: obniżony)' if _rsi_sell_min < rsi_sell_gate else ''}")
                 self._trace_decision(
                     db, symbol=symbol, action="SKIP", reason_code="signal_filters_not_met",
-                    runtime_ctx=runtime_ctx, mode="demo", signal_summary=signal_summary,
+                    runtime_ctx=runtime_ctx, mode=_current_mode, signal_summary=signal_summary,
                     risk_check={"ema20": ema20, "ema50": ema50, "rsi": rsi,
                                 "rsi_buy_gate": rsi_buy_gate, "rsi_sell_gate": rsi_sell_gate,
                                 "current_price": price, "signal_type": sig.signal_type},
@@ -2280,17 +3209,35 @@ class DataCollector:
                 )
                 continue
 
+            plan_action = str(plan.get("action") or "WAIT").upper()
+            if side == "BUY" and plan_action not in {"BUY"}:
+                self._trace_decision(
+                    db, symbol=symbol, action="SKIP", reason_code="plan_action_blocks_entry",
+                    runtime_ctx=runtime_ctx, mode=_current_mode, signal_summary=signal_summary,
+                    snapshot=snapshot, plan=plan,
+                    cost_check={"eligible": False, "plan_action": plan_action, "expected_net_profit": plan.get("expected_net_profit")},
+                )
+                continue
+            if side == "SELL" and plan_action not in {"SELL", "REDUCE"}:
+                self._trace_decision(
+                    db, symbol=symbol, action="SKIP", reason_code="plan_action_blocks_exit",
+                    runtime_ctx=runtime_ctx, mode=_current_mode, signal_summary=signal_summary,
+                    snapshot=snapshot, plan=plan,
+                    cost_check={"eligible": False, "plan_action": plan_action, "expected_net_profit": plan.get("expected_net_profit")},
+                )
+                continue
+
             if side == "BUY" and position is not None:
                 self._trace_decision(
                     db, symbol=symbol, action="SKIP", reason_code="buy_blocked_existing_position",
-                    runtime_ctx=runtime_ctx, mode="demo", signal_summary=signal_summary,
+                    runtime_ctx=runtime_ctx, mode=_current_mode, signal_summary=signal_summary,
                 )
                 continue
             if side == "SELL" and position is None:
-                self._trace_decision(
-                    db, symbol=symbol, action="SKIP", reason_code="sell_blocked_no_position",
-                    runtime_ctx=runtime_ctx, mode="demo", signal_summary=signal_summary,
-                )
+                # P2-03: SELL signal bez otwartej pozycji — pomijamy cicho.
+                # reason_code: sell_blocked_no_position (zachowane dla wstecznej kompatybilności narzędzi diagnostycznych)
+                # Sygnał jest już persisted w tabeli Signal przez generate_market_insights.
+                # Nie tworzymy SKIP trace — eliminujemy 90%+ szumu w decision_traces.
                 continue
 
             # Pozycjonowanie wg ATR (risk per trade)
@@ -2315,6 +3262,11 @@ class DataCollector:
                     max_open = tc.get("max_open_positions", 3)
                     max_cash_pct = float(config.get("max_cash_pct_per_trade", 1.0 / max(max_open, 1)))
                     max_cash_for_trade = available_cash * max_cash_pct
+                    # Gdy pct-cap daje mniej niż min_order_notional, ale jest dość gotówki —
+                    # pozwól na min_order_notional (minimum viable trade nadrzędne nad pct cap).
+                    # Zapobiega blokadom przy niskim saldzie + wielu maksymalnych pozycjach.
+                    if max_cash_for_trade < min_order_notional and available_cash >= min_order_notional:
+                        max_cash_for_trade = min_order_notional
                     # Odlicz prowizję od dostępnych środków (entry + exit fee)
                     _taker = float(config.get("taker_fee_rate", 0.001))
                     max_cash_after_fees = max_cash_for_trade / (1 + _taker)
@@ -2322,28 +3274,40 @@ class DataCollector:
                     qty = min(qty, max_affordable)
                     # Podnieś do min_order_notional gdy ATR-sizing daje za małą kwotę
                     # (np. BTC: ryzyko 10 EUR / ATR 1000 EUR = 0.01 BTC = poniżej min)
-                    if qty * price < min_order_notional and max_affordable * price >= min_order_notional:
+                    # UWAGA: max_cash_after_fees = max_cash_for_trade / (1+fee) < min_order_notional
+                    # nawet gdy max_cash_for_trade = min_order_notional — sprawdzamy max_cash_for_trade.
+                    if qty * price < min_order_notional and max_cash_for_trade >= min_order_notional:
                         qty = min_order_notional / float(price)
                 if qty < min_qty:
                     self._trace_decision(
                         db, symbol=symbol, action="SKIP", reason_code="insufficient_cash_or_qty_below_min",
-                        runtime_ctx=runtime_ctx, mode="demo", signal_summary=signal_summary,
+                        runtime_ctx=runtime_ctx, mode=_current_mode, signal_summary=signal_summary,
                         execution_check={"eligible": False, "available_cash": available_cash, "min_qty": min_qty},
                     )
                     continue
 
-            # Rating decyzji 1-5
+            # Rating decyzji 1-5 (EMA + Supertrend + ADX + Wolumen + RSI + Confidence)
             rating = 1
             if float(sig.confidence) >= 0.75:
                 rating += 1
             if float(sig.confidence) >= 0.85:
                 rating += 1
-            if ema20 is not None and ema50 is not None:
-                if (side == "BUY" and float(ema20) > float(ema50)) or (side == "SELL" and float(ema20) < float(ema50)):
-                    rating += 1
+            # EMA trend bonus
+            if (side == "BUY" and _ema_trend_up) or (side == "SELL" and _ema_trend_down):
+                rating += 1
+            # Supertrend bonus — niezależny od EMA (podwójne potwierdzenie np. EMA+ST = 5/5)
+            if (side == "BUY" and _st_up) or (side == "SELL" and _st_down):
+                rating += 1
+            # RSI bonus
             if rsi is not None:
                 if (side == "BUY" and float(rsi) <= float(rsi_buy or 50)) or (side == "SELL" and float(rsi) >= float(rsi_sell or 50)):
                     rating += 1
+            # ADX bonus: silny ruch kierunkowy ≥ 25
+            if adx_val is not None and float(adx_val) >= 25:
+                rating += 1
+            # Wolumen bonus: ponadprzeciętny wolumen potwierdza breakout
+            if volume_ratio is not None and float(volume_ratio) >= 1.3:
+                rating += 1
             rating = min(rating, 5)
 
             # Extreme entry — bonus jakości, NIE blokada obowiązkowa
@@ -2365,12 +3329,25 @@ class DataCollector:
                 # Premia: idealne wejście → +1 do ratingu
                 rating = min(5, rating + 1)
 
-            # Bramka jakości wejścia — odrzuć słabe sygnały (rating < demo_min_entry_score)
-            if rating < demo_min_entry_score:
+            # Bramka jakości wejścia — odrzuć słabe sygnały
+            # demo_min_entry_score jest w skali wait-status (0-12+), rating w skali 1-5.
+            # Przeliczenie: ≤5 → min_rating 1; 5-6 → 2; 6-8 → 3; 8-10 → 4; ≥10 → 5
+            _score_thresh = float(demo_min_entry_score)
+            if _score_thresh < 5.0:
+                _min_rating = 1
+            elif _score_thresh < 6.0:
+                _min_rating = 2
+            elif _score_thresh < 8.0:
+                _min_rating = 3
+            elif _score_thresh < 10.0:
+                _min_rating = 4
+            else:
+                _min_rating = 5
+            if rating < _min_rating:
                 self._trace_decision(
                     db, symbol=symbol, action="SKIP", reason_code="entry_score_below_min",
-                    runtime_ctx=runtime_ctx, mode="demo", signal_summary=signal_summary,
-                    risk_check={"rating": rating, "min_entry_score": demo_min_entry_score},
+                    runtime_ctx=runtime_ctx, mode=_current_mode, signal_summary=signal_summary,
+                    risk_check={"rating": rating, "min_rating": _min_rating, "min_entry_score": demo_min_entry_score},
                 )
                 continue
 
@@ -2379,7 +3356,14 @@ class DataCollector:
             # Tier override: wyższy min_edge_multiplier
             effective_edge_mult = min_edge_multiplier + tier_edge_add
             required_move_ratio = total_cost_ratio * effective_edge_mult
-            cost_gate_pass = expected_move_ratio >= required_move_ratio and atr_take_mult / max(atr_stop_mult, 1e-9) >= min_expected_rr
+            # PROFIT-FIX: wymagamy też oczekiwanego RR >= min_expected_rr (domyślnie 1.5)
+            # i ATR% >= min_atr_pct (filtr powtórzony tu dla cost_check diagnostyki)
+            _atr_pct = float(atr) / float(price) if price and float(price) > 0 else 0.0
+            cost_gate_pass = (
+                expected_move_ratio >= required_move_ratio
+                and atr_take_mult / max(atr_stop_mult, 1e-9) >= min_expected_rr
+                and _atr_pct >= _min_atr_pct
+            )
             notional = float(price) * float(qty)
 
             cost_check = {
@@ -2387,6 +3371,8 @@ class DataCollector:
                 "expected_move_ratio": expected_move_ratio,
                 "required_move_ratio": required_move_ratio,
                 "total_cost_ratio": total_cost_ratio,
+                "plan_expected_net_profit": plan.get("expected_net_profit"),
+                "plan_break_even_price": plan.get("break_even_price"),
                 "maker_fee_rate": maker_fee_rate,
                 "taker_fee_rate": taker_fee_rate,
                 "slippage_bps": slippage_bps,
@@ -2395,13 +3381,13 @@ class DataCollector:
                 "tier": tier_name,
             }
             execution_check = {
-                "eligible": notional >= min_order_notional,
+                "eligible": notional >= min_order_notional - 0.01,
                 "notional": notional,
                 "min_order_notional": min_order_notional,
             }
             risk_context = build_risk_context(
                 db, symbol=symbol, side=side, notional=notional,
-                strategy_name="demo_collector", mode="demo",
+                strategy_name="demo_collector", mode=_current_mode,
                 runtime_config=config,
                 config_snapshot_id=runtime_ctx.get("snapshot_id"),
                 signal_summary=signal_summary,
@@ -2413,37 +3399,75 @@ class DataCollector:
                 self._trace_decision(
                     db, symbol=symbol, action="SKIP",
                     reason_code=risk_decision.reason_codes[0],
-                    runtime_ctx=runtime_ctx, mode="demo",
+                    runtime_ctx=runtime_ctx, mode=_current_mode,
                     signal_summary=signal_summary, risk_check=risk_check,
+                    snapshot=snapshot, plan=plan,
                 )
                 continue
 
             qty = qty * float(risk_decision.position_size_multiplier or 1.0)
             notional = float(price) * float(qty)
             execution_check["notional"] = notional
-            execution_check["eligible"] = notional >= min_order_notional
+            execution_check["eligible"] = notional >= min_order_notional - 0.01
 
             if not cost_gate_pass:
                 self._trace_decision(
                     db, symbol=symbol, action="SKIP", reason_code="cost_gate_failed",
-                    runtime_ctx=runtime_ctx, mode="demo", signal_summary=signal_summary,
+                    runtime_ctx=runtime_ctx, mode=_current_mode, signal_summary=signal_summary,
                     risk_check=risk_check, cost_check=cost_check, execution_check=execution_check,
+                    snapshot=snapshot, plan=plan,
                 )
                 continue
 
             if not execution_check["eligible"]:
                 self._trace_decision(
                     db, symbol=symbol, action="SKIP", reason_code="min_notional_guard",
-                    runtime_ctx=runtime_ctx, mode="demo", signal_summary=signal_summary,
+                    runtime_ctx=runtime_ctx, mode=_current_mode, signal_summary=signal_summary,
                     risk_check=risk_check, cost_check=cost_check, execution_check=execution_check,
+                    snapshot=snapshot, plan=plan,
                 )
                 continue
 
             # Zbierz kandydata — pending i Telegram po sortowaniu
-            tp = price + float(atr) * atr_take_mult
-            sl = price - float(atr) * atr_stop_mult
+            tp = float(plan.get("take_profit_price") or (price + float(atr) * atr_take_mult))
+            sl = float(plan.get("stop_loss_price") or (price - float(atr) * atr_stop_mult))
             why = ", ".join(reasons) if reasons else "Sygnał + zakresy OpenAI + filtry ryzyka"
             edge_net_score = expected_move_ratio - total_cost_ratio
+
+            # P2-01: HTF (4h) alignment — soft penalty/bonus na composite_score, NIE blokuje wejścia.
+            # BUY zgodny z 4h wzrostem: +10% ranking.  BUY contra 4h spadkowi: -20% ranking.
+            # Dane 4h pobiez z TTL cache (55s) — koszt = 0 przy ciepłym cache.
+            htf_align_factor = 1.0
+            htf_align_note = "4h:brak_danych"
+            try:
+                _ctx_4h = get_live_context(db, symbol, timeframe="4h", limit=100)
+                if _ctx_4h:
+                    _ema20_4h = _ctx_4h.get("ema_20")
+                    _ema50_4h = _ctx_4h.get("ema_50")
+                    if _ema20_4h is not None and _ema50_4h is not None:
+                        _4h_bull = float(_ema20_4h) > float(_ema50_4h)
+                        _4h_bear = float(_ema20_4h) < float(_ema50_4h)
+                        if side == "BUY":
+                            if _4h_bull:
+                                htf_align_factor = 1.10
+                                htf_align_note = "4h:bycze(+10%)"
+                            elif _4h_bear:
+                                htf_align_factor = 0.80
+                                htf_align_note = "4h:niedz(-20%)"
+                        elif side == "SELL":
+                            if _4h_bear:
+                                htf_align_factor = 1.10
+                                htf_align_note = "4h:niedz(+10%)"
+                            elif _4h_bull:
+                                htf_align_factor = 0.80
+                                htf_align_note = "4h:bycze(-20%)"
+            except Exception:
+                pass
+            signal_summary["htf_4h_align"] = htf_align_note
+
+            # composite_score = edge × pewność × jakość techniczna (rating/5) × HTF alignment (4h)
+            # Odzwierciedla: wysoki edge + wysoką pewność + silne potwierdzenia 1h + zgodność kierunku 4h
+            composite_score = edge_net_score * float(sig.confidence) * (rating / 5.0) * htf_align_factor
             candidates.append({
                 "symbol": symbol, "side": side, "price": price, "qty": qty,
                 "tp": tp, "sl": sl, "rating": rating, "why": why,
@@ -2452,11 +3476,16 @@ class DataCollector:
                 "range": r, "tier_name": tier_name,
                 "confidence": float(sig.confidence),
                 "edge_net_score": edge_net_score,
+                "composite_score": composite_score,
+                "htf_align_note": htf_align_note,
+                "htf_align_factor": htf_align_factor,
                 "atr": float(atr),
+                "snapshot": snapshot,
+                "plan": plan,
             })
 
-        # --- Ranking kandydatów: sortuj po edge_net_score, bierz najlepsze ---
-        candidates.sort(key=lambda c: c["edge_net_score"], reverse=True)
+        # --- Ranking kandydatów: sortuj po composite_score (edge × confidence × rating/5) ---
+        candidates.sort(key=lambda c: c["composite_score"], reverse=True)
         max_new = max(1, tc["max_open_positions"] - len(tc.get("positions", [])))
         entries_created = 0
 
@@ -2474,6 +3503,8 @@ class DataCollector:
             risk_check = cand["risk_check"]
             cost_check = cand["cost_check"]
             execution_check = cand["execution_check"]
+            snapshot = cand["snapshot"]
+            plan = cand["plan"]
             r = cand["range"]
             action_pl = "KUP" if side == "BUY" else "SPRZEDAJ"
 
@@ -2484,7 +3515,7 @@ class DataCollector:
                     self._trace_decision(
                         db, symbol=symbol, action="SKIP",
                         reason_code="insufficient_cash_or_qty_below_min",
-                        runtime_ctx=runtime_ctx, mode="demo",
+                        runtime_ctx=runtime_ctx, mode=_current_mode,
                         signal_summary=signal_summary,
                         execution_check={"eligible": False, "available_cash": available_cash, "min_qty": min_qty},
                     )
@@ -2495,13 +3526,18 @@ class DataCollector:
                 db, symbol=symbol,
                 action="CREATE_PENDING_ENTRY" if side == "BUY" else "CREATE_PENDING_EXIT",
                 reason_code="all_gates_passed",
-                runtime_ctx=runtime_ctx, mode="demo",
+                runtime_ctx=runtime_ctx, mode=_current_mode,
                 signal_summary=signal_summary, risk_check=risk_check,
                 cost_check=cost_check, execution_check=execution_check,
+                snapshot=snapshot, plan=plan,
                 details={
                     "side": side, "qty": qty, "price": price, "rating": rating,
                     "why": why, "tier": tier_name,
                     "edge_net_score": cand["edge_net_score"],
+                    "composite_score": cand["composite_score"],
+                    "range_origin": r.get("origin", "unknown") if r else "no_range",
+                    "htf_bias_4h": cand.get("htf_align_note", "4h:brak_danych"),
+                    "htf_4h_mult": cand.get("htf_align_factor", 1.0),
                     "rank": candidates.index(cand) + 1,
                     "total_candidates": len(candidates),
                     "auto_execute": not demo_require_manual_confirm,
@@ -2509,10 +3545,14 @@ class DataCollector:
             )
             pending_id = self._create_pending_order(
                 db=db, symbol=symbol, side=side, price=price, qty=qty,
-                mode="demo",
+                mode=_current_mode,
                 reason=f"{why}. Pewność {int(cand['confidence']*100)}%, rating {rating}/5.",
                 config_snapshot_id=runtime_ctx.get("snapshot_id"),
                 strategy_name="demo_collector",
+                # T-08: typ zlecenia z konfiguracji (MARKET/LIMIT) — tylko dla BUY entries LIVE
+                # SELL exits zawsze MARKET (czas > koszt przy wychodzeniu)
+                order_type=tc.get("live_entry_order_type", "MARKET") if _current_mode == "live" and side == "BUY" else "MARKET",
+                decision_plan=plan,
             )
 
             # Auto-confirm + auto-execute gdy demo_require_manual_confirm=False
@@ -2548,6 +3588,8 @@ class DataCollector:
             rank_info = f"Kandydat #{candidates.index(cand) + 1}/{len(candidates)}"
             conf_pct = int(cand['confidence'] * 100)
             edge_score = cand.get('edge_net_score', 0)
+            composite = cand.get('composite_score', 0)
+            htf_note = cand.get('htf_align_note', '')
             msg = (
                 f"{action_emoji} [{_mode_label}] {alert_title}\n"
                 f"━━━━━━━━━━━━━━━━━━━━\n"
@@ -2556,7 +3598,8 @@ class DataCollector:
                 f"Cena: {price}\n"
                 f"TP: {tp:.6f} | SL: {sl:.6f}\n"
                 f"━━━━━━━━━━━━━━━━━━━━\n"
-                f"Pewność: {conf_pct}% | Ocena: {rating}/5 | Edge: {edge_score:.1f}\n"
+                f"Pewność: {conf_pct}% | Ocena: {rating}/5 | Edge: {edge_score:.4f} | Q: {composite:.4f}\n"
+                f"HTF: {htf_note}\n"
                 f"Powód techniczny: {why}\n"
                 f"Pozycja: {rank_info}\n"
                 f"Zakresy AI: KUP {buy_rng} | SPRZEDAJ {sell_rng}\n"
@@ -2828,6 +3871,12 @@ class DataCollector:
             except Exception as exc:
                 log_exception("collector", "Błąd sync Binance", exc, db=db)
 
+            # Monitor LIVE LIMIT BUY przed generowaniem nowych wejść, aby uniknąć dubli.
+            try:
+                self._monitor_limit_orders(db, runtime_ctx=self._runtime_context(db))
+            except Exception as exc:
+                log_exception("collector", "Błąd monitoringu LIMIT orders", exc, db=db)
+
             # Generuj sygnały heurystyczne co cykl (do DB dla collectora)
             try:
                 from backend.analysis import generate_market_insights, _heuristic_ranges, _merge_ranges_with_insights, persist_insights_as_signals
@@ -2849,6 +3898,12 @@ class DataCollector:
             # DEMO trading
             self._demo_trading(db, mode="demo")
 
+            # Zapisz demo_state do DB (cooldowny i streaki przeżywają restart)
+            try:
+                self._save_demo_state(db)
+            except Exception as exc:
+                log_exception("collector", "Błąd zapisu demo_state", exc, db=db)
+
             # LIVE trading (równoległe z demo)
             try:
                 self._demo_trading(db, mode="live")
@@ -2860,6 +3915,11 @@ class DataCollector:
                 self._execute_confirmed_pending_orders(db)
             except Exception as exc:
                 log_exception("collector", "Błąd wykonania auto-confirmed transakcji", exc, db=db)
+
+            try:
+                self._monitor_limit_orders(db, runtime_ctx=self._runtime_context(db))
+            except Exception as exc:
+                log_exception("collector", "Błąd końcowego monitoringu LIMIT orders", exc, db=db)
 
             # Sprawdź trafność prognoz (co cykl — szybkie)
             try:
@@ -2929,7 +3989,7 @@ class DataCollector:
         self._last_purge_ts = now
 
         purge_specs = [
-            ("market_data", "timestamp", timedelta(days=7)),
+            ("market_data", "timestamp", timedelta(days=2)),   # tick data — 2 dni wystarczy; klines(30d) ma historię
             ("signals", "timestamp", timedelta(days=7)),
             ("system_logs", "timestamp", timedelta(days=14)),
             ("klines", "open_time", timedelta(days=30)),
@@ -2982,6 +4042,19 @@ class DataCollector:
                 log_to_db("INFO", "collector", f"VACUUM po usunięciu {total_deleted} wierszy", db=db)
             except Exception:
                 pass  # VACUUM nie jest krytyczny
+
+        # WAL checkpoint PASSIVE — co godzinę przenosi zacommitowane strony WAL → main DB
+        # Nie blokuje aktywnych czytelników; zapobiega narastaniu pliku WAL do setek MB.
+        try:
+            db.commit()
+            result = db.execute(text("PRAGMA wal_checkpoint(PASSIVE)")).fetchone()
+            if result:
+                busy, total_wal, moved = result
+                if total_wal > 500:  # wiele stron oczekujących — loguj jako info
+                    log_to_db("INFO", "collector",
+                               f"WAL checkpoint PASSIVE: busy={busy}, wal={total_wal}, moved={moved}", db=db)
+        except Exception:
+            pass  # checkpoint nie jest krytyczny
 
     def _learn_from_history(self, db: Session):
         """Prosta kalibracja parametrów na historii (konserwatywna)."""

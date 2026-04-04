@@ -1,9 +1,16 @@
+import { Metadata, Viewport } from 'next'
 import '../styles/globals.css'
-import { Metadata } from 'next'
 
 export const metadata: Metadata = {
   title: 'RLDC AiNalyzer - Trading Terminal',
   description: 'Advanced AI Trading Platform',
+}
+
+export const viewport: Viewport = {
+  width: 'device-width',
+  initialScale: 1,
+  maximumScale: 5,
+  viewportFit: 'cover',
 }
 
 export default function RootLayout({

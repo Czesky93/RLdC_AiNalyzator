@@ -1,231 +1,531 @@
 ================================================================================
-RAPORT AUDYTU REPOZYTORIUM RLdC AiNalyzator v0.7 beta
-================================================================================
-Data: 2026-02-03
-Audytor: Codex (GPT-5)
-Status: ETAP 1 - AUDYT ZAKOŃCZONY
-
-================================================================================
-1. STRUKTURA REPOZYTORIUM - OBECNY STAN
+RLdC AiNalyzator / RLdC Trading Bot
+Raport audytu i wdrożonych zmian
+Data: 2026-04-03
 ================================================================================
 
-KATALOGI GŁÓWNE:
-├── ai_trading/               [ZARYS] tylko __init__.py
-├── blockchain_analysis/      [ZARYS] tylko __init__.py
-├── hft_engine/               [PUSTY] tylko .gitkeep
-├── infrastructure/           [PUSTY] tylko .gitkeep
-├── portfolio_management/     [ZARYS] tylko __init__.py
-├── quantum_optimization/     [PUSTY] tylko .gitkeep
-├── recommendation_engine/    [ZARYS] tylko __init__.py
-├── telegram_bot/             [ZARYS] tylko __init__.py
-├── tests/                    [PUSTY] tylko .gitkeep
-├── web_portal/               [ZAIMPLEMENTOWANY] Next.js 16 + React 19
-├── backend/                  [ZAIMPLEMENTOWANY] FastAPI + SQLAlchemy + Collector
-├── docs/                     [OK] dokumentacja projektowa
-└── webportalinfo             [PLIK] info o środowisku
+PLAN
+- wykonać pełny audyt logiki tradingowej, execution i spójności danych,
+- nadpisać nieaktualny raport,
+- przebudować silnik z heurystycznych zakresów na formalny plan transakcji,
+- dołączyć plan do collectora, API, UI i Telegrama,
+- dodać testy economics / snapshot / plan / payloady,
+- uruchomić compileall i smoke testy.
 
-PLIKI GŁÓWNE:
-✅ README.md                  - opis projektu (brak komend uruchomienia end-to-end)
-✅ instrukcje.txt             - wymagania wdrożeniowe
-✅ .env.example               - kompletne zmienne środowiskowe
-✅ requirements.txt           - zależności backendu i testów
-❌ docker-compose.yml         - brak
-❌ Dockerfile                 - brak
+AUDYT / WNIOSKI
+
+P0
+- `backend/analysis.py`: stary model AI zwracał głównie zakresy BUY/SELL, bez kompletnego planu transakcji.
+- `backend/collector.py`: wejścia miały cost gate, ale wyjścia mogły zamykać pozycję bez równoważnej bramki netto.
+- `backend/collector.py`: brak formalnego runtime flow plan -> monitoring -> rewizja -> nowa decyzja.
+- `backend/routers/positions.py`: ręczne zamknięcie LIVE/Demo nie korzystało z pełnego planu ani economics guard.
+- `backend/routers/orders.py`: LIVE ordery mogły przechodzić bez pełnego planu, bez twardego sprawdzenia oczekiwanego wyniku netto.
+- `backend/database.py`: brakowało pól do trwałego zapisu snapshotu, planu, rewizji i mapowania orderów LIVE.
+- `backend/routers/signals.py`: API sygnałów nie zwracało kompletnego planu tradera.
+- `web_portal/src/components/widgets/MarketOverview.tsx`: błędny kontekst walutowy (`$` zamiast EUR).
+- `log.txt`: był nieaktualny i zawierał twierdzenia sprzeczne z bieżącym stanem repo.
+
+P1
+- LIVE nadal ma ograniczenia zależne od jakości danych Binance i strojenia parametrów.
+- część starszych widoków UI nadal wymaga dalszego porządkowania etykiet i prezentacji planu.
+- pełna strategia BACKTEST nadal nie jest osobnym, dojrzałym silnikiem.
+
+P2
+- dalsze strojenie progów `expected_net_profit`, `RR`, trailing i triggerów rewizji,
+- rozszerzenie testów pod mock reconciliation LIVE z rzeczywistymi odpowiedziami Binance,
+- dalsza redukcja dublowania starych heurystyk w starszych ścieżkach UI.
+
+ZMIANY
+
+1. Rdzeń tradingowy i baza
+- `backend/database.py`
+  - rozszerzono modele `Signal`, `Order`, `Position`, `PendingOrder`, `DecisionTrace`
+  - dodano trwały zapis:
+    - `snapshot_json`
+    - `plan_json` / `decision_plan_json`
+    - `plan_status`
+    - `requires_revision`
+    - `invalidation_reason`
+    - `last_consulted_at`
+    - `exchange_order_id`
+    - `notes`
+    - `created_at`
+    - `filled_at`
+    - `revision_of_trace_id`
+  - `_ensure_schema()` dopisuje brakujące kolumny dla istniejącej bazy
+
+- `backend/accounting.py`
+  - dodano `estimate_trade_costs(...)`
+  - dodano `build_profitability_guard(...)`
+  - ujednolicono pojęcia:
+    - fee
+    - spread cost
+    - slippage cost
+    - total cost
+    - break-even
+    - minimum profitable price
+    - expected gross profit
+    - expected net profit
+  - dodano alias `total_round_trip_cost`
+
+Wpływ:
+- zyskowność: wejścia i wyjścia mogą być filtrowane po realnym wyniku netto
+- koszty: system zna break-even i koszt round trip
+- Binance: łatwiejsze porównanie execution vs DB
+- stabilność: plan i snapshot są trwałe po restarcie
+
+2. Snapshot rynku, plan transakcji i rewizja
+- `backend/analysis.py`
+  - dodano `build_market_snapshot(...)`
+  - dodano `build_trade_plan_from_snapshot(...)`
+  - dodano `consult_trade_plan(...)`
+  - dodano `evaluate_plan_revision(...)`
+  - snapshot zawiera:
+    - multi-TF
+    - wskaźniki
+    - koszty
+    - pozycję
+    - ryzyko
+    - filtry Binance
+    - source freshness
+  - plan zawiera:
+    - `action`
+    - `entry_price`
+    - `acceptable_entry_range`
+    - `take_profit_price`
+    - `stop_loss_price`
+    - `break_even_price`
+    - `trailing_activation_price`
+    - `trailing_distance`
+    - `expected_total_cost`
+    - `expected_net_profit`
+    - `confidence_score`
+    - `risk_score`
+    - `trade_quality_score`
+    - `cost_efficiency_score`
+    - `plan_invalidation_conditions`
+    - `reconsult_triggers`
+  - LLM jest warstwą opcjonalną; brak odpowiedzi przełącza system na fallback heurystyczny w tym samym schemacie JSON
+
+Wpływ:
+- zyskowność: program generuje konkretny plan, nie samą etykietę BUY/SELL
+- koszty: expected net i break-even są liczone w programie
+- stabilność: AI nie jest pojedynczym punktem awarii
+
+3. Collector, execution guard i trace
+- `backend/collector.py`
+  - trace decyzji zapisuje snapshot, plan i rewizję
+  - pending orders zapisują plan transakcji
+  - wykonanie potwierdzonych pending orders aktualizuje plan w `Order` i `Position`
+  - screening wejść wykorzystuje plan i blokuje akcje niezgodne z `action`
+  - `_check_exits(...)` używa planu i guardów netto
+  - wyjścia typu trailing/TP/reversal są blokowane poniżej break-even / minimum opłacalności
+  - twarde wyjścia są rozróżniane reason code
+
+Wpływ:
+- zyskowność: mniej stratnych, panikarskich wyjść
+- koszty: zamknięcie nie przechodzi automatycznie, jeśli netto nie ma sensu
+- stabilność: pełniejsza ścieżka decyzyjna w DB i audit trail
+
+4. API i zgodność payloadów
+- `backend/routers/positions.py`
+  - endpointy pozycji zwracają plan tradera
+  - ręczne zamknięcie pozycji przechodzi przez snapshot/plan/revision
+  - LIVE używa normalizacji qty przez Binance i sprawdza minQty / minNotional
+  - demo ma fallback `manual_close_fallback`, żeby nie blokować jawnego zamknięcia zyskownej pozycji przy braku pełnych klines
+
+- `backend/routers/orders.py`
+  - `GET /api/orders` i `GET /api/orders/pending` zwracają plan
+  - `POST /api/orders/pending` zapisuje plan
+  - `POST /api/orders` w LIVE blokuje BUY bez dodatniego expected net
+  - `POST /api/orders` w LIVE blokuje SELL bez twardego powodu lub rewizji planu
+  - ordery LIVE zapisują `exchange_order_id`, `notes`, `decision_plan_json`
+
+- `backend/routers/portfolio.py`
+  - portfolio zwraca `plan_status`, `requires_revision`, `invalidation_reason`, `last_consulted_at`, `plan`
+
+- `backend/routers/signals.py`
+  - sygnały live i zapisane sygnały zwracają plan tradera
+  - `latest/top5/top10` niosą entry/TP/SL/break-even/expected net/confidence/risk
+
+Wpływ:
+- UI/backend/DB: spójniejszy kontrakt danych
+- Binance: LIVE execution jest bliżej realnych filtrów giełdy
+- stabilność: mniej rozjazdów między endpointami
+
+5. Telegram i UI
+- `telegram_bot/bot.py`
+  - dodano prezentację planu w:
+    - `/portfolio`
+    - `/positions`
+    - `/orders`
+    - `/top10`
+    - `/top5`
+    - `/lastsignal`
+  - bot pokazuje:
+    - action
+    - plan status
+    - entry / TP / SL
+    - break-even
+    - expected net profit
+    - confidence
+    - risk
+    - status rewizji
+
+- `web_portal/src/components/widgets/MarketOverview.tsx`
+  - waluta zmieniona na EUR
+  - dodano informację o źródle i czasie aktualizacji
+  - etykiety po polsku
+
+Wpływ:
+- UI: mniej fałszywego kontekstu walutowego
+- użytkownik: widzi plan tradera, a nie sam status
+
+6. Testy
+- `tests/test_smoke.py`
+  - dodano testy dla:
+    - kosztów i break-even
+    - profitability guard
+    - budowy snapshotu i planu
+    - payloadu sygnału z planem
+
+TESTY
+- `python -m compileall backend telegram_bot tests`
+  - wynik: OK
+- `pytest tests/test_smoke.py -q`
+  - wynik: `200 passed in 27.53s`
+
+RYZYKA / UWAGI
+- brak kluczy Binance uniemożliwia pełne zweryfikowanie LIVE reconciliation na realnym koncie
+- brak pełnego, zewnętrznego test harness dla odpowiedzi Binance oznacza, że część logiki LIVE jest nadal zweryfikowana głównie przez smoke i kontrakty lokalne
+- część starszych komponentów UI nadal może wymagać dalszego czyszczenia językowego i prezentacyjnego
+- heurystyczny fallback planu działa, ale docelowo powinien być dalej strojonym modelem decyzji, nie końcowym optimum strategii
+
+ZMIENIONE PLIKI
+- `backend/database.py`
+- `backend/accounting.py`
+- `backend/analysis.py`
+- `backend/collector.py`
+- `backend/routers/positions.py`
+- `backend/routers/orders.py`
+- `backend/routers/portfolio.py`
+- `backend/routers/signals.py`
+- `telegram_bot/bot.py`
+- `web_portal/src/components/widgets/MarketOverview.tsx`
+- `tests/test_smoke.py`
+- `README.md`
+- `log.txt`
+
+NOWE PLIKI
+- brak
+
+POZOSTAŁE OPCJONALNE RZECZY DO ZROBIENIA
+- pełniejsza ekspozycja planu w głównych widokach `MainContent.tsx`
+- rozszerzenie testów o bardziej realistyczny mock Binance fills / balances / order status
+- dalsze dostrojenie parametrów decision engine pod realne statystyki skuteczności LIVE
 
 ================================================================================
-2. ANALIZA KOMPONENTÓW - ZGODNOŚĆ Z ZAŁOŻENIAMI
+AKTUALIZACJA KONTYNUACYJNA
+Data: 2026-04-03
 ================================================================================
 
-2.1. WWW (Web Portal) - IMPLEMENTACJA: 70%
-------------------------------------------
-STATUS: ⚠️ LAYOUT GOTOWY, BRAK INTEGRACJI Z API
+WYKONANE DODATKOWE ZMIANY
+- `web_portal/src/components/widgets/PositionsTable.tsx`
+  - dodano prezentację `plan_status`, `break_even_price`, `expected_net_profit`, `take_profit_price`, `stop_loss_price`, `requires_revision`
+- `web_portal/src/components/MainContent.tsx`
+  - panel symbolu pokazuje plan tradera zamiast samego sygnału
+  - karta najlepszej okazji pokazuje entry / TP / SL / expected net profit
+  - widoki sygnałów i pozycji pokazują plan i rewizję
+- `backend/analysis.py`
+  - usunięto techniczny placeholder przy `trend_conflict`, flaga jest liczona realnie
+- `tests/test_smoke.py`
+  - dodano test kontraktu `GET /api/positions`, który wymusza obecność pól planu
 
-ZREALIZOWANE:
-✅ Layout trading-terminal z Topbar + Sidebar
-✅ Topbar: tryby DEMO/LIVE/BACKTEST + STOP TRADING
-✅ Sidebar: pełna lista modułów po polsku
-✅ Dashboard: Market Overview, Trading View, Open Orders, Market Insights
-✅ Design system (dark theme) i responsywny layout
-
-BRAKI UI:
-❌ UI używa mock data (brak połączenia z backendem)
-❌ Brak panelu „Decyzje & Ryzyko” w dashboardzie
-❌ Brak panelu Account Summary/KPI
-❌ Brak orderbook w dashboardzie
-❌ Brak „ostatnia aktualizacja danych”
-❌ Brak loading/error states
-
-PLIKI FRONTEND:
-- web_portal/src/app/page.tsx
-- web_portal/src/app/layout.tsx
-- web_portal/src/components/Dashboard.tsx
-- web_portal/src/components/Topbar.tsx
-- web_portal/src/components/Sidebar.tsx
-- web_portal/src/components/MainContent.tsx
-- web_portal/src/components/widgets/TradingView.tsx
-- web_portal/src/components/widgets/OpenOrders.tsx
-- web_portal/src/components/widgets/MarketOverview.tsx
-- web_portal/src/components/widgets/MarketInsights.tsx
-
-2.2. BACKEND / API - IMPLEMENTACJA: 65%
----------------------------------------
-STATUS: ⚠️ API ISTNIEJE, BRAK KRYTYCZNYCH FUNKCJI
-
-ZREALIZOWANE:
-✅ FastAPI app (backend/app.py) + CORS
-✅ SQLAlchemy modele (market, klines, signals, orders, positions, alerts, logs, blog, telegram)
-✅ Binance REST client z obsługą błędów
-✅ DataCollector (REST) zapisujący dane do DB
-✅ Endpointy:
-   - /api/market/summary
-   - /api/market/kline
-   - /api/market/ticker/{symbol}
-   - /api/market/orderbook/{symbol}
-   - /api/portfolio
-   - /api/orders (GET/POST + export + stats)
-   - /api/signals/latest, /api/signals/top10, /api/signals/top5
-   - /api/account/summary, /api/account/history, /api/account/kpi
-
-BRAKI BACKEND:
-❌ Brak /api/positions (wymagany endpoint)
-❌ Brak modułu analizy + generacji bloga
-❌ Brak scheduler/worker dla analizy i bloga
-❌ Brak automatycznego uruchomienia kolektora po starcie API
-❌ Brak WebSocket collector (binance WS + reconnect)
-❌ Brak spójnego logowania do DB (SystemLog) w kluczowych miejscach
-
-2.3. BAZA DANYCH - IMPLEMENTACJA: 70%
--------------------------------------
-STATUS: ⚠️ SCHEMAT ISTNIEJE, BRAK MIGRACJI I SEED
-
-ZREALIZOWANE:
-✅ SQLite domyślnie (DATABASE_URL)
-✅ Tabele: market_data, klines, signals, orders, positions,
-   account_snapshots, alerts, system_logs, blog_posts, telegram_messages
-✅ init_db() tworzący tabele
-
-BRAKI:
-❌ Brak migracji (Alembic skonfigurowany w requirements, brak skryptów)
-❌ Brak orderbook snapshots (opcjonalne)
-❌ Brak seeding danych systemowych (np. alerty/ryzyko)
-
-2.4. BINANCE INTEGRATION - IMPLEMENTACJA: 55%
----------------------------------------------
-STATUS: ⚠️ REST OK, BRAK WS
-
-ZREALIZOWANE:
-✅ python-binance client (REST)
-✅ pobieranie tickerów, klines, orderbook, account info (read-only)
-✅ obsługa błędów i logowanie
-
-BRAKI:
-❌ WebSocket (ticker/kline) + reconnect/backoff
-❌ Walidacja danych po WS
-
-2.5. TELEGRAM BOT - IMPLEMENTACJA: 0%
---------------------------------------
-STATUS: ❌ BRAK IMPLEMENTACJI
-
-WYMAGANE KOMENDY:
-/start /status /stop /risk /top10 /top5 /portfolio /orders /positions /lastsignal /blog /logs
-
-2.6. ANALIZA + BLOG - IMPLEMENTACJA: 0%
----------------------------------------
-STATUS: ❌ BRAK IMPLEMENTACJI
-
-WYMAGANE:
-- Wskaźniki techniczne (EMA, RSI, MACD, Bollinger, Ichimoku jeśli możliwe)
-- Wnioski „Market Insights” po polsku
-- Generowanie wpisów bloga i zapis do DB
-- Endpoint do pobrania wpisu (draft/published)
+WERYFIKACJA
+- `python -m compileall backend telegram_bot tests` → OK
+- `pytest tests/test_smoke.py -q` → `201 passed`
+- `npm run build` w `web_portal/` → OK
 
 ================================================================================
-3. BŁĘDY / NIESPÓJNOŚCI
+AKTUALIZACJA KONTYNUACYJNA 2
+Data: 2026-04-03
 ================================================================================
 
-BŁĘDY RUNTIME (POTENCJALNE):
-- Brak automatycznego startu kolektora po uruchomieniu API
-- UI nie pokaże danych po restarcie (brak integracji z DB)
+WYKONANE DODATKOWE ZMIANY
+- `backend/routers/signals.py`
+  - `best-opportunity` zwraca teraz pełny plan tradera:
+    - `entry_price`
+    - `take_profit_price`
+    - `stop_loss_price`
+    - `break_even_price`
+    - `expected_net_profit`
+    - `plan_status`
+    - `requires_revision`
+  - `entry-readiness` zwraca plan i economics dla kandydatów oraz blokad
+- `docs/C0_CHECKPOINT_REPORT.md`
+  - zastąpiono pusty, nieaktualny checkpoint realnym raportem C0
+- `tests/test_smoke.py`
+  - dodano test kontraktu dla `GET /api/signals/best-opportunity`
 
-NIESPÓJNOŚCI:
-- log.txt zawiera nieaktualne informacje (to jest nowa wersja audytu)
-- webportalinfo to plik informacyjny, nie używany w kodzie
-
-================================================================================
-4. PRIORYTETY
-================================================================================
-
-P0 (BLOKUJE DZIAŁANIE):
-- Implementacja Telegram bota z komendami i logowaniem do DB
-- Auto-start kolektora + WS z Binance
-- Integracja WWW z backendem (pobieranie danych)
-- Moduł analizy + blog
-- Endpoint /api/positions
-
-P1 (WAŻNE):
-- Logowanie do DB (SystemLog) w kluczowych miejscach
-- Minimalne testy smoke (backend, DB, Telegram mock)
-- README z komendami uruchomienia end-to-end
-
-P2 (DODATKOWE):
-- Migracje Alembic
-- Orderbook snapshots do DB
-- Dockerfile/compose
+WERYFIKACJA
+- `pytest tests/test_smoke.py -q` → `202 passed`
+- `npm run build` w `web_portal/` → OK
 
 ================================================================================
-5. PLAN NAPRAWY (ETAP 2+3)
+AKTUALIZACJA KONTYNUACYJNA 3
+Data: 2026-04-03
 ================================================================================
 
-1) Backend:
-   - dodać /api/positions
-   - dodać moduł analizy + blog + endpointy
-   - uruchomić kolektor i WS w lifespan FastAPI
-   - dodać spójne logowanie do DB
+WYKONANE DODATKOWE ZMIANY
+- `backend/operator_console.py`
+  - dodano sekcję `decision_intelligence`
+  - operator widzi teraz:
+    - najnowsze decyzje tradingowe,
+    - `plan_status`,
+    - `action`,
+    - `break_even_price`,
+    - `expected_net_profit`,
+    - `requires_revision`,
+    - stan risk/cost/execution gate
+- `tests/test_smoke.py`
+  - zaktualizowano kontrakt konsoli operatora
+  - dodano test struktury `decision_intelligence`
 
-2) Telegram:
-   - pełna implementacja bota z komendami
-   - logowanie wysyłek do DB
-
-3) WWW:
-   - podpiąć dane z backendu (market, orders, positions, insights, blog)
-   - dodać panele „Decyzje & Ryzyko”, Account Summary, Orderbook
-   - loading/error states i „ostatnia aktualizacja”
-
-4) Testy:
-   - smoke testy dla API i DB
-   - mock Binance i Telegram
-
-5) README:
-   - pełne komendy uruchomieniowe
-
+WERYFIKACJA
+- `python -m compileall backend tests` → OK
+- `pytest tests/test_smoke.py -q` → `203 passed`
 
 ================================================================================
-ETAP 2 - WYKONANE ZMIANY (2026-02-03)
+AKTUALIZACJA KONTYNUACYJNA 4
+Data: 2026-04-03
 ================================================================================
 
-BACKEND:
-- Dodano auto-start kolektora w lifespan FastAPI (z możliwością wyłączenia przez DISABLE_COLLECTOR)
-- Dodano WebSocket collector Binance (ticker + kline 1m/1h) z reconnect/backoff
-- Dodano logowanie do DB (SystemLog) w kolektorze i WS
-- Dodano moduł analizy technicznej i generacji bloga (backend/analysis.py)
-- Dodano endpointy /api/positions oraz /api/blog (latest/list)
+RESTART RUNTIME
+- backend uruchomiony ponownie na `:8000`
+- frontend uruchomiony ponownie na `:3000`
+- Telegram bot uruchomiony ponownie
+- Cloudflare tunnel uruchomiony ponownie
+- health backendu: `GET /health` → `healthy`
+- publiczny URL po restarcie:
+  - `https://jokes-breach-safe-php.trycloudflare.com`
 
-TELEGRAM:
-- Dodano bota Telegram z wymaganymi komendami i logowaniem do DB (telegram_bot/bot.py)
+WYKONANE DODATKOWE ZMIANY
+- `web_portal/src/components/widgets/ControlCenter.tsx`
+  - status tab konsumuje `/api/account/analytics/console`
+  - dodano panel operatorski dla `decision_intelligence`
+  - operator widzi:
+    - liczbę decyzji,
+    - blokady,
+    - rewizje,
+    - decyzje z ujemnym expected net,
+    - per-symbol `plan_status`, `action`, `break_even_price`, `expected_net_profit`, `confidence_score`, `risk_score`
 
-WWW:
-- Podłączono widgety do API (market, klines, positions, signals, orderbook, account summary)
-- Dodano panele: Podsumowanie Konta, Decyzje & Ryzyko, Orderbook
-- Dodano loading/error states oraz „ostatnia aktualizacja” na wykresie
+WERYFIKACJA
+- `pytest tests/test_smoke.py -q` → `203 passed`
+- `npm run build` w `web_portal/` → OK
 
-TESTY:
-- Dodano minimalne testy smoke (tests/test_smoke.py)
+================================================================================
+AKTUALIZACJA KONTYNUACYJNA 5
+Data: 2026-04-04
+================================================================================
 
-DOKUMENTACJA:
-- Uzupełniono README o komendy uruchomienia end-to-end
-- Zaktualizowano .env.example (WS_ENABLED)
+RUNTIME / DIAGNOSTYKA
+- backend przełączono na stabilny start bez dev-reloadera:
+  - `uvicorn backend.app:app --host 0.0.0.0 --port 8000`
+- `GET /health` wraca poprawnie na stabilnym procesie
+- potwierdzono, że wcześniejsze zawieszenia były związane z:
+  - ciężkimi batch endpointami sygnałowymi,
+  - nadmiarowym skanowaniem universe,
+  - zbędnym pobieraniem danych live/Binance w ścieżkach DEMO,
+  - kosztownym snapshotem na każdy symbol
 
-POZOSTAŁO OPCJONALNIE:
-- Migracje Alembic i seeding danych
-- Dockerfile/docker-compose
-- Dalsza rozbudowa UI (pozostałe sekcje)
+WYKONANE DODATKOWE ZMIANY
+- `backend/analysis.py`
+  - `consult_trade_plan(..., allow_remote=False)` dla batch endpointów
+  - `build_market_snapshot(..., lightweight=True)`:
+    - mniej TF,
+    - bez ciężkiego risk-contextu,
+    - bez orderbooku w ścieżkach listujących
+- `backend/routers/signals.py`
+  - `_build_live_signals()` używa lekkiego snapshotu i nie odpala zdalnego AI
+  - `_score_opportunity()` nie dubluje już `get_live_context()` dla tego samego symbolu
+  - `best-opportunity`
+    - ograniczony zakres skanowania,
+    - DEMO nie dociąga zbędnie live spot positions z Binance,
+    - dodano szybki short-circuit dla:
+      - kill switch,
+      - limitu otwartych pozycji,
+      - braku gotówki
+  - `wait-status`
+    - dodano ograniczenie `wait_status_scan_limit`
+    - DEMO skanuje tylko lokalny universe bez spot holdings
+    - zwraca `symbols_scanned`
+  - `entry-readiness`
+    - dodano ograniczenie `entry_readiness_scan_limit`
+    - usunięto N+1 dla pending/order cooldown checks
+    - używa batch map zamiast osobnych query per symbol
+    - zwraca `symbols_scanned`
+- `backend/database.py`
+  - zwiększono parametry puli połączeń SQLAlchemy:
+    - `DB_POOL_SIZE`
+    - `DB_MAX_OVERFLOW`
+    - `DB_POOL_TIMEOUT`
+- `tests/test_smoke.py`
+  - dodano testy kontraktu dla `wait-status` i `entry-readiness`
+  - utrzymano zgodność po optymalizacjach
+
+WERYFIKACJA
+- `pytest tests/test_smoke.py -q` → `203 passed`
+- pomiar endpointów po optymalizacji:
+  - `/api/signals/wait-status` → ok. `0.97s`
+  - `/api/signals/entry-readiness?mode=demo` → ok. `0.25s`
+  - `/api/signals/best-opportunity?mode=demo` → ok. `1.64s`
+
+POZOSTAŁE OBSZARY DO DALSZEJ PRACY
+- dalsze odchudzanie:
+  - `/api/signals/final-decisions`
+  - `/api/signals/expectations`
+  - `/api/positions/analysis`
+- ograniczenie nadmiarowego pollingu z UI dla trybu live
+- dalsze strojenie runtime collectora i workerów pod realny ruch
+
+================================================================================
+AKTUALIZACJA KONTYNUACYJNA 6
+Data: 2026-04-04
+================================================================================
+
+WYKONANE DODATKOWE ZMIANY
+- `backend/routers/signals.py`
+  - zoptymalizowano `/api/signals/final-decisions`
+  - dodano `final_decisions_scan_limit`
+  - priorytet skanowania:
+    - symbole z pozycjami,
+    - symbole z aktywnymi oczekiwaniami,
+    - dopiero potem reszta universe
+  - endpoint zwraca teraz `symbols_scanned`
+- `tests/test_smoke.py`
+  - dodano test kontraktu dla `GET /api/signals/final-decisions`
+
+WERYFIKACJA
+- pomiar runtime:
+  - `/api/signals/final-decisions?mode=live`
+    - przed: ok. `4.36s`
+    - po: ok. `0.07s`
+
+STATUS
+- `/api/signals/expectations?mode=live` → ok. `0.006s`
+- `/api/positions/analysis?mode=live` → ok. `0.71s`
+- główne bottlenecki sygnałowe zostały istotnie zredukowane
+
+================================================================================
+AKTUALIZACJA KONTYNUACYJNA 7
+Data: 2026-04-04
+================================================================================
+
+P0 — KOREKTA LOGIKI WEJŚĆ BUY
+- zidentyfikowano ryzyko wejść kontrariańskich:
+  - BUY mógł być promowany przez samo wyprzedanie RSI,
+  - BUY mógł być promowany przez samo `EMA20 > EMA50`,
+  - brakowało twardego wymogu potwierdzenia momentum/wolumenu/trendu dla nowych wejść
+- objaw biznesowy:
+  - bot mógł kupować instrumenty, które nadal były w lokalnym ruchu spadkowym lub bez realnego potwierdzenia odbicia
+
+WYKONANE DODATKOWE ZMIANY
+- `backend/analysis.py`
+  - `get_live_context()` zwraca teraz dodatkowo:
+    - `macd`
+    - `macd_hist`
+    - `price_change_1h`
+  - `build_trade_plan_from_snapshot()` blokuje BUY dla nowych wejść, jeśli brak pełnego potwierdzenia:
+    - trend low TF = wzrostowy,
+    - trend high TF = wzrostowy,
+    - momentum dodatnie,
+    - `macd_hist > 0`,
+    - `volume_ratio >= 0.9`,
+    - `supertrend_dir >= 0`,
+    - `adx >= 18`
+- `backend/routers/signals.py`
+  - `_build_live_signals()` nie daje już BUY tylko dlatego, że:
+    - RSI jest niskie,
+    - albo EMA20 minimalnie przeszła nad EMA50
+  - BUY wymaga teraz:
+    - trendu,
+    - potwierdzenia Supertrend/ADX,
+    - dodatniego momentum,
+    - co najmniej akceptowalnego wolumenu
+  - w przeciwnym razie system zapisuje powód typu:
+    - „wyprzedanie bez potwierdzenia, BUY zablokowany”
+- `tests/test_smoke.py`
+  - dodano test blokujący BUY bez potwierdzenia trendu/momentum
+  - dodano test pilnujący, że oversold w trendzie spadkowym nie jest automatycznie BUY
+
+WERYFIKACJA
+- `pytest tests/test_smoke.py -q` → `208 passed`
+- `python -m compileall backend tests` → OK
+- runtime po zmianie:
+  - `/api/signals/best-opportunity?mode=demo` → `200`, ok. `0.91s`
+  - przykładowo najlepsza okazja nie wraca już jako lekki BUY, tylko jako plan `BLOCK`, gdy setup nie ma pełnego potwierdzenia
+
+WNIOSKI
+- to nie jest jeszcze gwarancja zyskowności, ale usuwa jedną z najbardziej prawdopodobnych przyczyn kupowania „za wcześnie” i kupowania kontynuacji spadku bez potwierdzenia odwrócenia
+
+================================================================================
+AKTUALIZACJA KONTYNUACYJNA 8
+Data: 2026-04-04
+================================================================================
+
+P0 — KOREKTA SEMANTYKI KIERUNKU BUY/SELL
+- zweryfikowano podejrzenie, że trader zachowuje się jakby BUY/SELL były semantycznie „odwrócone”
+- ustalenie:
+  - nie było literalnej zamiany BUY ↔ SELL,
+  - ale kilka reguł dawało dodatnie punkty BUY za sam spadek / wyprzedanie
+  - to tworzyło efekt „kupuje to, co właśnie dalej spada”
+
+NAJWAŻNIEJSZE PROBLEMY ZNALEZIONE
+- `backend/analysis.py`
+  - analiza wskaźników premiowała:
+    - spadek `price_change_1h < -2%`,
+    - dolne Bollingery,
+    - niski RSI/MFI/Stochastic,
+    nawet bez potwierdzenia trendu i momentum
+- `backend/collector.py`
+  - BUY miał zbyt luźny `rsi_buy_gate` (`<= 65`)
+  - trend BUY mógł przejść na `EMA` albo `Supertrend` zamiast spójnego potwierdzenia
+  - aktywny był mean-reversion bypass dla ekstremalnego oversold
+  - aktywne były soft BUY entries poza zakresem AI
+
+WYKONANE DODATKOWE ZMIANY
+- `backend/analysis.py`
+  - `_insight_from_indicators()`:
+    - przestał traktować szybki spadek jako dodatni sygnał BUY
+    - niski RSI / MFI / Stochastic / dolny Bollinger nie dodają już BUY bez:
+      - potwierdzonego trendu wzrostowego,
+      - dodatniego momentum
+    - silny spadek w potwierdzonym trendzie spadkowym daje teraz kontekst negatywny, nie dodatni
+- `backend/runtime_settings.py`
+  - `demo_allow_soft_buy_entries` domyślnie `False`
+  - `bear_oversold_bypass_conf` podniesione do `0.80`
+- `backend/collector.py`
+  - BUY:
+    - `rsi_buy_gate` zaostrzone do max `55`
+    - wymagane zgodne potwierdzenie EMA + Supertrend
+    - dodatkowo wymagane ADX i minimalny wolumen
+    - usunięto praktyczny mean-reversion shortcut jako standardowy tor wejścia
+  - SELL:
+    - uporządkowano analogicznie na potwierdzonym kierunku
+- `tests/test_smoke.py`
+  - dodano testy:
+    - szybki spadek bez potwierdzenia nie daje BUY
+    - BUY preferowany jest dopiero przy trendzie i momentum
+
+WERYFIKACJA
+- `pytest tests/test_smoke.py -q` → `210 passed`
+- `curl /health` → `healthy`
+- `/api/signals/best-opportunity?mode=demo` po korekcie zwraca:
+  - `CZEKAJ`, gdy system i tak nie powinien wchodzić,
+  - bez sztucznego promowania BUY tylko dlatego, że instrument spadł
+
+EFEKT BIZNESOWY
+- trader jest mniej kontrariański „na siłę”
+- mniej ryzyka kupowania kontynuacji spadku bez realnego potwierdzenia odwrócenia
+- semantyka BUY/SELL została urealniona w stronę trend-following z filtrem momentum zamiast łapania spadającego noża

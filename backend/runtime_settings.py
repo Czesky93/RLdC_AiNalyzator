@@ -34,6 +34,7 @@ _LIVE_GUARD_KEYS = {
     "spread_buffer_bps",
     "min_edge_multiplier",
     "min_order_notional",
+    "bear_regime_min_conf",
 }
 
 
@@ -118,7 +119,7 @@ AGGRESSIVENESS_PROFILES = {
         "max_open_positions": 2,
         "demo_min_signal_confidence": 0.70,
         "demo_min_entry_score": 7.0,
-        "pending_order_cooldown_seconds": 900,
+        "pending_order_cooldown_seconds": 0,
         "risk_per_trade": 0.005,
         "demo_allow_soft_buy_entries": False,
     },
@@ -126,7 +127,7 @@ AGGRESSIVENESS_PROFILES = {
         "max_open_positions": 3,
         "demo_min_signal_confidence": 0.55,
         "demo_min_entry_score": 5.5,
-        "pending_order_cooldown_seconds": 300,
+        "pending_order_cooldown_seconds": 0,
         "risk_per_trade": 0.01,
         "demo_allow_soft_buy_entries": True,
     },
@@ -134,7 +135,7 @@ AGGRESSIVENESS_PROFILES = {
         "max_open_positions": 5,
         "demo_min_signal_confidence": 0.50,
         "demo_min_entry_score": 4.5,
-        "pending_order_cooldown_seconds": 300,
+        "pending_order_cooldown_seconds": 0,
         "risk_per_trade": 0.02,
         "demo_allow_soft_buy_entries": True,
     },
@@ -445,7 +446,7 @@ _SETTINGS: Dict[str, SettingSpec] = {
         section="costs",
         parser=_parse_positive_float,
         serializer=_serialize_float,
-        default=2.5,
+        default=4.0,  # PROFIT-FIX: 2.5→4.0 — TP musi być 4× większy od kosztów round-trip
         env_var="MIN_EDGE_MULTIPLIER",
         validators=(_validate_positive("min_edge_multiplier"),),
     ),
@@ -458,12 +459,23 @@ _SETTINGS: Dict[str, SettingSpec] = {
         env_var="MIN_EXPECTED_RR",
         validators=(_validate_positive("min_expected_rr"),),
     ),
+    # PROFIT-FIX: minimalny ATR jako % ceny — blokuje wniesienie do tokenów bez odpowiedniej zmienności
+    # ATR/price < 0.5% → TP×3.5 = 1.75% vs koszty 0.36% round-trip → edge za wąski
+    "min_atr_pct": SettingSpec(
+        key="min_atr_pct",
+        section="execution",
+        parser=_parse_positive_float,
+        serializer=_serialize_float,
+        default=0.005,   # 0.5% — wymagane minimum ATR relative to price
+        env_var="MIN_ATR_PCT",
+        validators=(_validate_positive("min_atr_pct"),),
+    ),
     "min_order_notional": SettingSpec(
         key="min_order_notional",
         section="execution",
         parser=_parse_positive_float,
         serializer=_serialize_float,
-        default=25.0,
+        default=60.0,
         env_var="MIN_ORDER_NOTIONAL",
         validators=(_validate_positive("min_order_notional"),),
     ),
@@ -473,7 +485,7 @@ _SETTINGS: Dict[str, SettingSpec] = {
         section="execution",
         parser=_parse_positive_float,
         serializer=_serialize_float,
-        default=1.3,
+        default=2.0,  # PROFIT-FIX: 1.3→2.0 — szerszy SL, mniej fłaszywych exitów SL
         env_var="ATR_STOP_MULT",
         validators=(_validate_positive("atr_stop_mult"),),
     ),
@@ -482,7 +494,7 @@ _SETTINGS: Dict[str, SettingSpec] = {
         section="execution",
         parser=_parse_positive_float,
         serializer=_serialize_float,
-        default=2.2,
+        default=3.5,  # PROFIT-FIX: 2.2→3.5 — szerszy TP, utrzymuje R:R=1.75
         env_var="ATR_TAKE_MULT",
         validators=(_validate_positive("atr_take_mult"),),
     ),
@@ -513,6 +525,67 @@ _SETTINGS: Dict[str, SettingSpec] = {
         default=0.85,
         env_var="EXTREME_MIN_CONFIDENCE",
         validators=(_validate_probability("extreme_min_confidence"),),
+    ),
+    "bear_regime_min_conf": SettingSpec(
+        key="bear_regime_min_conf",
+        section="execution",
+        parser=_parse_positive_float,
+        serializer=_serialize_float,
+        default=0.70,  # PROFIT-FIX: 0.62→0.70 — wyższy próg w bessie, rzadziej ale lepsze sygnały
+        env_var="BEAR_REGIME_MIN_CONF",
+        validators=(_validate_probability("bear_regime_min_conf"),),
+    ),
+    # T-08: typ zlecenia dla wejść LIVE — MARKET (domyślnie, natychmiastowe) lub LIMIT (maker fee)
+    # LIMIT = niższy koszt (0.05% vs 0.10%), ale ryzyko braku wypełnienia
+    # Zmiana tylko wpływa na BUY entries w trybie LIVE. SELL exits zawsze MARKET.
+    "live_entry_order_type": SettingSpec(
+        key="live_entry_order_type",
+        section="execution",
+        parser=lambda v: str(v or "MARKET").strip().upper(),
+        serializer=_serialize_text,
+        default="MARKET",
+        env_var="LIVE_ENTRY_ORDER_TYPE",
+    ),
+    "limit_order_timeout": SettingSpec(
+        key="limit_order_timeout",
+        section="execution",
+        parser=_parse_positive_float,
+        serializer=_serialize_float,
+        default=300.0,
+        env_var="LIMIT_ORDER_TIMEOUT",
+        validators=(_validate_positive("limit_order_timeout"),),
+    ),
+    # Próg confidence do BUY przy ekstremalnym wyprzedaniu (RSI < extreme_oversold_rsi_threshold)
+    # Umożliwia mean-reversion entry w bessie gdy RSI jest ekstremalnie niski
+    "bear_oversold_bypass_conf": SettingSpec(
+        key="bear_oversold_bypass_conf",
+        section="execution",
+        parser=_parse_positive_float,
+        serializer=_serialize_float,
+        default=0.80,
+        env_var="BEAR_OVERSOLD_BYPASS_CONF",
+        validators=(_validate_probability("bear_oversold_bypass_conf"),),
+    ),
+    # Poziom RSI poniżej którego aktywuje się mean-reversion bypass (domyślnie 28)
+    "extreme_oversold_rsi_threshold": SettingSpec(
+        key="extreme_oversold_rsi_threshold",
+        section="execution",
+        parser=_parse_positive_float,
+        serializer=_serialize_float,
+        default=28.0,
+        env_var="EXTREME_OVERSOLD_RSI_THRESHOLD",
+        validators=(_validate_positive("extreme_oversold_rsi_threshold"),),
+    ),
+    # Minimalny RSI dla sygnałów SELL w trybie CRASH/BEAR (niższy niż normalne 35)
+    # Rynek może być wyprzedany ale dalej spada — SELL jest poprawne
+    "bear_rsi_sell_gate": SettingSpec(
+        key="bear_rsi_sell_gate",
+        section="execution",
+        parser=_parse_positive_float,
+        serializer=_serialize_float,
+        default=20.0,
+        env_var="BEAR_RSI_SELL_GATE",
+        validators=(_validate_non_negative("bear_rsi_sell_gate"),),
     ),
     "extreme_min_rating": SettingSpec(
         key="extreme_min_rating",
@@ -575,9 +648,9 @@ _SETTINGS: Dict[str, SettingSpec] = {
         section="execution",
         parser=_parse_positive_int,
         serializer=_serialize_int,
-        default=300,  # 5 min — obniżone z 3600; dla DEMO szybka rotacja
+        default=300,  # 5 min — obniżone z 3600; dla DEMO szybka rotacja; 0 = brak cooldownu
         env_var="PENDING_ORDER_COOLDOWN_SECONDS",
-        validators=(_validate_positive("pending_order_cooldown_seconds"),),
+        validators=(_validate_non_negative("pending_order_cooldown_seconds"),),
     ),
     # --- DEMO-specific controls ---
     "demo_require_manual_confirm": SettingSpec(
@@ -593,7 +666,7 @@ _SETTINGS: Dict[str, SettingSpec] = {
         section="execution",
         parser=_parse_required_bool,
         serializer=_serialize_bool,
-        default=True,  # ROZWAŻ_ZAKUP traktuje jak akcjonalny kandydat
+        default=False,  # Domyślnie wyłączone — nie kupuj bez pełnego potwierdzenia
         env_var="DEMO_ALLOW_SOFT_BUY_ENTRIES",
     ),
     "demo_use_heuristic_ranges_fallback": SettingSpec(
@@ -696,15 +769,25 @@ _SETTINGS: Dict[str, SettingSpec] = {
                 "max_trades_per_day_per_symbol": 3,
             },
             "SPECULATIVE": {
-                "symbols": ["WLFIEUR", "WLFIUSDC"],
+                "symbols": ["WLFIEUR", "WLFIUSDC", "RENDEREUR", "RENDERUSDC",
+                             "PEPEEUR", "PEPEUSDC"],
                 "min_confidence_add": 0.10,
                 "min_edge_multiplier_add": 1.0,
                 "risk_scale": 0.3,
-                "max_trades_per_day_per_symbol": 2,
+                "max_trades_per_day_per_symbol": 3,
             },
         },
         env_var="SYMBOL_TIERS",
         clearable=True,
+    ),
+    # --- Live account state (auto-updated by collector) ---
+    "live_balance_eur": SettingSpec(
+        key="live_balance_eur",
+        section="risk",
+        parser=_parse_positive_float,
+        serializer=_serialize_float,
+        default=0.0,
+        env_var="LIVE_INITIAL_BALANCE",
     ),
 }
 
@@ -988,6 +1071,7 @@ def build_runtime_state(
         "watchlist_source": watchlist_source,
         "enabled_strategies": effective["enabled_strategies"],
         "active_position_count": active_position_count,
+        "config": effective,
         "config_sections": sections,
         "config_snapshot_id": snapshot["id"],
         "config_hash": snapshot.get("config_hash"),
@@ -1057,7 +1141,11 @@ def apply_runtime_updates(
     after = _build_effective_flat_config(candidate_overrides)
     changed_keys = [key for key in override_updates.keys() if before.get(key) != after.get(key)]
     if not changed_keys:
-        return {"changed": [], "state": build_runtime_state(db, active_position_count=active_position_count)}
+        return {
+            "changed": [],
+            "state": build_runtime_state(db, active_position_count=active_position_count),
+            "snapshot": previous_snapshot,
+        }
 
     if active_position_count > 0 and any(key in _LIVE_GUARD_KEYS for key in changed_keys):
         raise RuntimeSettingsError(

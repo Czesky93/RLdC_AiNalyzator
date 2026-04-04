@@ -42,7 +42,7 @@ async def get_state_consistency(
         buy_filled = db.query(Order).filter(Order.mode == mode, Order.side == "BUY", Order.status == "FILLED").count()
         sell_filled = db.query(Order).filter(Order.mode == mode, Order.side == "SELL", Order.status == "FILLED").count()
         pending_active = db.query(PendingOrder).filter(
-            PendingOrder.mode == mode, PendingOrder.status.in_(["PENDING", "CONFIRMED"])
+            PendingOrder.mode == mode, PendingOrder.status.in_(["PENDING", "CONFIRMED", "OPEN"])
         ).count()
 
         latest_snap = (
@@ -62,9 +62,11 @@ async def get_state_consistency(
 
         inconsistencies: list[str] = []
 
-        if sell_filled > buy_filled:
+        # Próg 3x — przy partial TP (1 BUY → kilka SELLy) SELL jest naturalnie wyższy niż BUY.
+        # Anomalię sygnalizujemy dopiero gdy SELL > BUY * 3 (np. 30 SELL na 10 BUY).
+        if sell_filled > buy_filled * 3:
             inconsistencies.append(
-                f"SELL ({sell_filled}) > BUY ({buy_filled}) — możliwy problem z historią zleceń"
+                f"SELL ({sell_filled}) >> BUY ({buy_filled}) — ponad 3× więcej sprzedaży niż zakupów, możliwy błąd historii"
             )
 
         for p in positions:

@@ -31,8 +31,9 @@ echo "[HTTP]"
 check_url() {
     local url="$1"
     local label="$2"
+    local timeout="${3:-5}"
     local code
-    code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 5 "$url" 2>/dev/null || echo "ERR")
+    code=$(curl -s -o /dev/null -w "%{http_code}" --max-time "$timeout" "$url" 2>/dev/null || echo "000ERR")
     if [[ "$code" == "200" ]]; then
         echo "  ✅ $label → $url [$code]"
     else
@@ -40,12 +41,12 @@ check_url() {
     fi
 }
 
-check_url "http://localhost:8000/"                        "Backend  (localhost)"
-check_url "http://localhost:3000/"                        "Frontend (localhost)"
-check_url "http://$LAN_IP:8000/"                         "Backend  (LAN)"
-check_url "http://$LAN_IP:3000/"                         "Frontend (LAN)"
-check_url "http://localhost:8000/api/signals/best-opportunity" "Best-opportunity API"
-check_url "http://localhost:8000/api/positions/analysis"      "Positions analysis API"
+check_url "http://localhost:8000/"                             "Backend  (localhost)"
+check_url "http://localhost:3000/"                             "Frontend (localhost)"
+check_url "http://$LAN_IP:8000/"                              "Backend  (LAN)"
+check_url "http://$LAN_IP:3000/"                              "Frontend (LAN)"
+check_url "http://localhost:8000/api/signals/best-opportunity" "Best-opportunity API"    15
+check_url "http://localhost:8000/api/positions/analysis"       "Positions analysis API"
 
 echo ""
 echo "============================================"

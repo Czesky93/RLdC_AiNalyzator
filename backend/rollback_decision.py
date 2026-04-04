@@ -5,7 +5,8 @@ Rollback decision layer consuming post-promotion monitoring verdicts.
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+import os
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List
 
 from sqlalchemy.orm import Session
@@ -172,6 +173,30 @@ def create_rollback_decision(
     )
     if existing is not None:
         return get_rollback_decision(db, int(existing.id))
+
+    # Cooldown: jeśli niedawno wykonano rollback dla tej samej promocji, nie twórz nowego
+    try:
+        cooldown_secs = max(0, int(os.getenv("ROLLBACK_COOLDOWN_SECONDS", "3600") or 3600))
+    except Exception:
+        cooldown_secs = 3600
+    if cooldown_secs > 0:
+        cooldown_threshold = utc_now_naive() - timedelta(seconds=cooldown_secs)
+        recent_rollback = (
+            db.query(ConfigRollback)
+            .filter(
+                ConfigRollback.promotion_id == promotion_id,
+                ConfigRollback.execution_status == "executed",
+                ConfigRollback.executed_at.isnot(None),
+                ConfigRollback.executed_at > cooldown_threshold,
+            )
+            .first()
+        )
+        if recent_rollback is not None:
+            raise ValueError(
+                f"ROLLBACK_COOLDOWN_ACTIVE: rollback dla promocji {promotion_id} "
+                f"wykonano niedawno (id={recent_rollback.id}). "
+                f"Cooldown: {cooldown_secs}s. Spróbuj ponownie później."
+            )
 
     decision = evaluate_rollback_decision(monitoring)
     validation_summary = {

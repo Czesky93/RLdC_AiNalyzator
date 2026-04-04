@@ -13,6 +13,13 @@ interface Position {
   current_price: number
   unrealized_pnl: number
   pnl_percent: number
+  break_even_price?: number | null
+  expected_net_profit?: number | null
+  take_profit_price?: number | null
+  stop_loss_price?: number | null
+  plan_status?: string | null
+  requires_revision?: boolean
+  confidence_score?: number | null
 }
 
 export default function PositionsTable({ mode = 'demo' }: { mode?: 'demo' | 'live' }) {
@@ -74,19 +81,20 @@ export default function PositionsTable({ mode = 'demo' }: { mode?: 'demo' | 'liv
               <th className="pb-3 font-medium text-right">Cena kupna</th>
               <th className="pb-3 font-medium text-right">Cena teraz</th>
               <th className="pb-3 font-medium text-right">P&L</th>
+              <th className="pb-3 font-medium text-right">Plan</th>
               <th className="pb-3 font-medium text-center">Akcje</th>
             </tr>
           </thead>
           <tbody>
             {loading ? (
               <tr>
-                <td colSpan={8} className="py-8 text-center text-slate-400">
+                <td colSpan={9} className="py-8 text-center text-slate-400">
                   Ładowanie pozycji...
                 </td>
               </tr>
             ) : displayPositions.length === 0 ? (
               <tr>
-                <td colSpan={8} className="py-8 text-center text-slate-400">
+                <td colSpan={9} className="py-8 text-center text-slate-400">
                   Brak otwartych pozycji
                 </td>
               </tr>
@@ -110,6 +118,23 @@ export default function PositionsTable({ mode = 'demo' }: { mode?: 'demo' | 'liv
                     <td className={`py-2.5 text-right font-semibold ${isPnlPositive ? 'text-green-primary' : 'text-red-primary'}`}>
                       {isPnlPositive ? '+' : ''}{pnl.toFixed(4)} EUR
                       <span className="text-xs ml-1">({isPnlPositive ? '+' : ''}{position.pnl_percent.toFixed(2)}%)</span>
+                    </td>
+                    <td className="py-2.5 text-right text-[10px] leading-relaxed">
+                      <div className="text-slate-300">{position.plan_status || 'brak planu'}</div>
+                      <div className="text-slate-500">
+                        BE: {position.break_even_price != null ? `${fmtPrice(position.break_even_price)} EUR` : '—'}
+                      </div>
+                      <div className="text-slate-500">
+                        Net: {position.expected_net_profit != null ? `${position.expected_net_profit >= 0 ? '+' : ''}${position.expected_net_profit.toFixed(2)} EUR` : '—'}
+                      </div>
+                      {(position.take_profit_price != null || position.stop_loss_price != null) && (
+                        <div className="text-slate-500">
+                          TP {position.take_profit_price != null ? fmtPrice(position.take_profit_price) : '—'} / SL {position.stop_loss_price != null ? fmtPrice(position.stop_loss_price) : '—'}
+                        </div>
+                      )}
+                      {position.requires_revision && (
+                        <div className="text-amber-400">rewizja wymagana</div>
+                      )}
                     </td>
                     <td className="py-2.5 text-center">
                       <button 

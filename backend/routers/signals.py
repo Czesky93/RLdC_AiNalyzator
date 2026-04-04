@@ -8,19 +8,73 @@ from typing import Optional, List
 from datetime import datetime, timedelta, timezone
 import os
 import json
+import time as _time
 
 from backend.database import get_db, Signal, MarketData, Kline, Position, UserExpectation, DecisionAudit, DecisionTrace, PendingOrder, utc_now_naive
 from backend.analysis import persist_insights_as_signals
 
 router = APIRouter()
 
+# In-memory TTL cache dla _build_live_signals — unika 14× pandas-ta per request
+_live_signals_cache: dict = {}
+_LIVE_SIGNALS_TTL = 20  # sekund (kolektor zbiera co 60s)
+
+# Cache dla _get_symbols_from_db_or_env — krok 4 (Binance spot) kosztuje ~3.6s per call
+_symbols_cache: dict = {}
+_SYMBOLS_CACHE_TTL = 30  # sekund
+
+
+def _load_json_blob(raw: Optional[str]) -> dict:
+    if not raw:
+        return {}
+    try:
+        data = json.loads(raw)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _signal_plan_payload(sig: Signal) -> dict:
+    plan = _load_json_blob(getattr(sig, "plan_json", None))
+    snapshot = _load_json_blob(getattr(sig, "snapshot_json", None))
+    return {
+        "plan_status": getattr(sig, "plan_status", None) or plan.get("plan_status"),
+        "requires_revision": bool(getattr(sig, "requires_revision", False) or plan.get("requires_revision")),
+        "invalidation_reason": getattr(sig, "invalidation_reason", None) or plan.get("invalidation_reason"),
+        "last_consulted_at": sig.last_consulted_at.isoformat() if getattr(sig, "last_consulted_at", None) else plan.get("last_consulted_at"),
+        "action": plan.get("action"),
+        "entry_price": plan.get("entry_price"),
+        "acceptable_entry_range": plan.get("acceptable_entry_range"),
+        "take_profit_price": plan.get("take_profit_price"),
+        "stop_loss_price": plan.get("stop_loss_price"),
+        "break_even_price": plan.get("break_even_price"),
+        "trailing_activation_price": plan.get("trailing_activation_price"),
+        "trailing_distance": plan.get("trailing_distance"),
+        "expected_total_cost": plan.get("expected_total_cost"),
+        "expected_net_profit": plan.get("expected_net_profit"),
+        "expected_net_profit_pct": plan.get("expected_net_profit_pct"),
+        "confidence_score": plan.get("confidence_score"),
+        "risk_score": plan.get("risk_score"),
+        "trade_quality_score": plan.get("trade_quality_score"),
+        "cost_efficiency_score": plan.get("cost_efficiency_score"),
+        "market_snapshot": snapshot,
+        "plan": plan,
+    }
+
 
 def _build_live_signals(db: Session, symbols: List[str], limit: int = 20) -> List[dict]:
     """
     Wygeneruj sygnały oparte o prawdziwą analizę techniczną (RSI, EMA, MACD).
     Nie używa random ani OpenAI — czyste wskaźniki z historii klines.
+    Cache TTL 55s — kolektor zbiera dane co 60s.
     """
-    from backend.analysis import get_live_context
+    from backend.analysis import get_live_context, build_market_snapshot, consult_trade_plan, evaluate_plan_revision
+
+    # Sprawdź cache — unika 14× pandas-ta per request (koszt ~0.5s/symbol)
+    cache_key = tuple(sorted(symbols))
+    cached = _live_signals_cache.get(cache_key)
+    if cached and (_time.time() - cached["ts"]) < _LIVE_SIGNALS_TTL:
+        return cached["result"][:limit]
 
     results = []
     for symbol in symbols:
@@ -34,6 +88,12 @@ def _build_live_signals(db: Session, symbols: List[str], limit: int = 20) -> Lis
         close = ctx.get("close")
         rsi_buy = ctx.get("rsi_buy", 35)
         rsi_sell = ctx.get("rsi_sell", 65)
+        adx = ctx.get("adx")
+        supertrend_dir = ctx.get("supertrend_dir")
+        volume_ratio = ctx.get("volume_ratio")
+        macd = ctx.get("macd")
+        macd_hist = ctx.get("macd_hist")
+        price_change_1h = ctx.get("price_change_1h")
 
         if not close or close <= 0:
             continue
@@ -41,16 +101,30 @@ def _build_live_signals(db: Session, symbols: List[str], limit: int = 20) -> Lis
         signal_type = "HOLD"
         confidence = 0.50
         reasons: list = []
+        trend_up = bool(ema_20 and ema_50 and ema_20 > ema_50)
+        trend_down = bool(ema_20 and ema_50 and ema_20 < ema_50)
+        supertrend_up = supertrend_dir is not None and float(supertrend_dir) > 0
+        supertrend_down = supertrend_dir is not None and float(supertrend_dir) < 0
+        momentum_up = (macd_hist is not None and float(macd_hist) > 0) or (price_change_1h is not None and float(price_change_1h) > 0)
+        momentum_down = (macd_hist is not None and float(macd_hist) < 0) or (price_change_1h is not None and float(price_change_1h) < 0)
+        volume_support = volume_ratio is None or float(volume_ratio) >= 0.9
+        strong_trend = adx is not None and float(adx) >= 18
 
         if rsi is not None:
             if rsi < rsi_buy:
-                signal_type = "BUY"
-                confidence += min(0.20, (rsi_buy - rsi) / rsi_buy * 0.25)
-                reasons.append(f"RSI {rsi:.0f} — wyprzedanie")
+                if trend_up and (supertrend_up or strong_trend) and momentum_up and volume_support:
+                    signal_type = "BUY"
+                    confidence += min(0.20, (rsi_buy - rsi) / max(rsi_buy, 1) * 0.20)
+                    reasons.append(f"RSI {rsi:.0f} — wyprzedanie z potwierdzeniem trendu i momentum")
+                else:
+                    reasons.append(f"RSI {rsi:.0f} — wyprzedanie bez potwierdzenia, BUY zablokowany")
             elif rsi > rsi_sell:
-                signal_type = "SELL"
-                confidence += min(0.20, (rsi - rsi_sell) / (100 - rsi_sell) * 0.25)
-                reasons.append(f"RSI {rsi:.0f} — wykupienie")
+                if trend_down and (supertrend_down or strong_trend) and momentum_down:
+                    signal_type = "SELL"
+                    confidence += min(0.20, (rsi - rsi_sell) / max(100 - rsi_sell, 1) * 0.20)
+                    reasons.append(f"RSI {rsi:.0f} — wykupienie z potwierdzeniem trendu i momentum")
+                else:
+                    reasons.append(f"RSI {rsi:.0f} — wykupienie bez potwierdzenia, SELL osłabiony")
             else:
                 reasons.append(f"RSI {rsi:.0f} — neutralny")
 
@@ -59,16 +133,20 @@ def _build_live_signals(db: Session, symbols: List[str], limit: int = 20) -> Lis
                 reasons.append("EMA20 > EMA50 — trend wzrostowy")
                 if signal_type == "BUY":
                     confidence += 0.10
-                elif signal_type == "HOLD":
-                    signal_type = "BUY"
-                    confidence += 0.05
             else:
                 reasons.append("EMA20 < EMA50 — trend spadkowy")
                 if signal_type == "SELL":
                     confidence += 0.10
-                elif signal_type == "HOLD":
-                    signal_type = "SELL"
-                    confidence += 0.05
+
+        if signal_type == "HOLD":
+            if trend_up and supertrend_up and momentum_up and volume_support and rsi is not None and float(rsi) <= 58:
+                signal_type = "BUY"
+                confidence += 0.08
+                reasons.append("Trend wzrostowy + momentum dodatnie + wolumen potwierdza — BUY trend-following")
+            elif trend_down and supertrend_down and momentum_down and rsi is not None and float(rsi) >= 42:
+                signal_type = "SELL"
+                confidence += 0.08
+                reasons.append("Trend spadkowy + momentum ujemne — SELL trend-following")
 
         confidence = round(max(0.45, min(confidence, 0.97)), 2)
 
@@ -91,13 +169,58 @@ def _build_live_signals(db: Session, symbols: List[str], limit: int = 20) -> Lis
                 "rsi": round(rsi, 1) if rsi else None,
                 "ema_20": round(ema_20, 6) if ema_20 else None,
                 "ema_50": round(ema_50, 6) if ema_50 else None,
+                "adx": round(adx, 2) if adx is not None else None,
+                "macd": round(macd, 6) if macd is not None else None,
+                "macd_hist": round(macd_hist, 6) if macd_hist is not None else None,
+                "volume_ratio": round(volume_ratio, 3) if volume_ratio is not None else None,
+                "price_change_1h": round(price_change_1h, 3) if price_change_1h is not None else None,
             },
             "reason": "; ".join(reasons) if reasons else "Brak wystarczających danych",
             "timestamp": utc_now_naive().isoformat(),
             "source": "live_analysis",
         })
+        snapshot = build_market_snapshot(
+            db,
+            symbol,
+            mode="demo",
+            include_orderbook=False,
+            lightweight=True,
+        )
+        plan = consult_trade_plan(snapshot, allow_remote=False) if snapshot else None
+        revision = evaluate_plan_revision(snapshot or {}, plan or {}) if snapshot and plan else None
+        if plan:
+            primary_tf = (snapshot.get("timeframes") or {}).get("1h") or next(iter((snapshot.get("timeframes") or {}).values()), {})
+            primary_indicators = primary_tf.get("indicators") or {}
+            results[-1].update({
+                "plan_status": plan.get("plan_status"),
+                "requires_revision": bool(revision and revision.get("requires_revision")),
+                "invalidation_reason": (revision or {}).get("reason") or plan.get("invalidation_reason"),
+                "last_consulted_at": plan.get("last_consulted_at") or snapshot.get("timestamp"),
+                "action": plan.get("action"),
+                "entry_price": plan.get("entry_price"),
+                "acceptable_entry_range": plan.get("acceptable_entry_range"),
+                "take_profit_price": plan.get("take_profit_price"),
+                "stop_loss_price": plan.get("stop_loss_price"),
+                "break_even_price": plan.get("break_even_price"),
+                "trailing_activation_price": plan.get("trailing_activation_price"),
+                "trailing_distance": plan.get("trailing_distance"),
+                "expected_total_cost": plan.get("expected_total_cost"),
+                "expected_net_profit": plan.get("expected_net_profit"),
+                "expected_net_profit_pct": plan.get("expected_net_profit_pct"),
+                "confidence_score": plan.get("confidence_score"),
+                "risk_score": plan.get("risk_score"),
+                "trade_quality_score": plan.get("trade_quality_score"),
+                "cost_efficiency_score": plan.get("cost_efficiency_score"),
+                "atr": primary_indicators.get("atr_14"),
+                "plan": plan,
+                "market_snapshot": snapshot,
+            })
 
     results.sort(key=lambda x: (-x["confidence"], x["signal_type"] == "HOLD"))
+
+    # Zapisz do cache
+    _live_signals_cache[cache_key] = {"result": results, "ts": _time.time()}
+
     return results[:limit]
 
 
@@ -110,7 +233,13 @@ def _get_symbols_from_db_or_env(db: Session, include_spot: bool = True) -> List[
     3. ENV WATCHLIST (fallback)
     4. Symbole z Binance spot (realne aktywa użytkownika)
     Deduplikuje i zwraca unikalną listę.
+    Cache TTL 60s — krok 4 (Binance API) kosztuje ~3s per call.
     """
+    cache_key = f"include_spot={include_spot}"
+    cached = _symbols_cache.get(cache_key)
+    if cached and (_time.time() - cached["ts"]) < _SYMBOLS_CACHE_TTL:
+        return cached["result"]
+
     seen: set[str] = set()
     result: List[str] = []
 
@@ -156,6 +285,8 @@ def _get_symbols_from_db_or_env(db: Session, include_spot: bool = True) -> List[
         except Exception:
             pass
 
+    # Zapisz do cache
+    _symbols_cache[cache_key] = {"result": result[:], "ts": _time.time()}
     return result
 
 
@@ -192,11 +323,12 @@ def get_latest_signals(
                     "reason": sig.reason,
                     "timestamp": sig.timestamp.isoformat(),
                     "source": "database",
+                    **_signal_plan_payload(sig),
                 })
             return {"success": True, "data": result, "count": len(result)}
 
         # Fallback: live analiza — zapisz do DB żeby collector mógł korzystać
-        symbols = _get_symbols_from_db_or_env(db)
+        symbols = _get_symbols_from_db_or_env(db, include_spot=(mode == "live"))
         live = _build_live_signals(db, symbols, limit=limit)
         if live:
             persist_insights_as_signals(db, live)
@@ -253,8 +385,6 @@ def _score_opportunity(signal: dict, db: Session) -> dict:
     Oblicz score okazji tradingowej dla jednego sygnału.
     Zwraca wzbogacony słownik z polami: score, expected_profit_pct, risk_pct, score_breakdown.
     """
-    from backend.analysis import get_live_context
-
     symbol = signal.get("symbol", "")
     signal_type = signal.get("signal_type", "HOLD")
     confidence = float(signal.get("confidence") or 0.5)
@@ -264,9 +394,12 @@ def _score_opportunity(signal: dict, db: Session) -> dict:
     ema_50 = ind.get("ema_50")
     price = float(signal.get("price") or 0)
 
-    # Pobierz ATR z pełnego kontekstu
-    ctx = get_live_context(db, symbol, timeframe="1h", limit=200)
-    atr = ctx.get("atr") if ctx else None
+    # Wykorzystaj ATR już policzony w snapshot/build_live_signals, bez dodatkowego odczytu.
+    atr = signal.get("atr")
+    if atr is None:
+        snapshot = signal.get("market_snapshot") or {}
+        primary_tf = (snapshot.get("timeframes") or {}).get("1h") or next(iter((snapshot.get("timeframes") or {}).values()), {})
+        atr = (primary_tf.get("indicators") or {}).get("atr_14")
 
     # --- Scoring ---
     score = round(confidence * 10, 2)
@@ -324,6 +457,25 @@ def _score_opportunity(signal: dict, db: Session) -> dict:
     result["expected_profit_pct"] = expected_profit_pct
     result["risk_pct"] = risk_pct
     result["score_breakdown"] = breakdown
+    result["action"] = signal.get("action")
+    result["entry_price"] = signal.get("entry_price")
+    result["acceptable_entry_range"] = signal.get("acceptable_entry_range")
+    result["take_profit_price"] = signal.get("take_profit_price")
+    result["stop_loss_price"] = signal.get("stop_loss_price")
+    result["break_even_price"] = signal.get("break_even_price")
+    result["trailing_activation_price"] = signal.get("trailing_activation_price")
+    result["trailing_distance"] = signal.get("trailing_distance")
+    result["expected_total_cost"] = signal.get("expected_total_cost")
+    result["expected_net_profit"] = signal.get("expected_net_profit")
+    result["expected_net_profit_pct"] = signal.get("expected_net_profit_pct")
+    result["confidence_score"] = signal.get("confidence_score")
+    result["risk_score"] = signal.get("risk_score")
+    result["trade_quality_score"] = signal.get("trade_quality_score")
+    result["cost_efficiency_score"] = signal.get("cost_efficiency_score")
+    result["plan_status"] = signal.get("plan_status")
+    result["requires_revision"] = signal.get("requires_revision")
+    result["invalidation_reason"] = signal.get("invalidation_reason")
+    result["last_consulted_at"] = signal.get("last_consulted_at")
     return result
 
 
@@ -357,7 +509,7 @@ def get_best_opportunity(
         config = runtime_ctx.get("config", {})
         kill_switch = bool(config.get("kill_switch_enabled", True)) and bool(config.get("kill_switch_active", False))
         max_open_positions = int(config.get("max_open_positions", 3))
-        min_order_notional = float(config.get("min_order_notional", 25.0))
+        min_order_notional = float(config.get("min_order_notional", 60.0))
         demo_min_conf = float(config.get("demo_min_signal_confidence", 0.55))
         base_cooldown_s = int(float(config.get("cooldown_after_loss_streak_minutes", 15)) * 60)
 
@@ -365,6 +517,8 @@ def get_best_opportunity(
         from backend.runtime_settings import AGGRESSIVENESS_PROFILES
         aggressiveness = str(config.get("trading_aggressiveness", "balanced")).lower()
         aggr_profile = AGGRESSIVENESS_PROFILES.get(aggressiveness, AGGRESSIVENESS_PROFILES["balanced"])
+        scan_limit = int(config.get("best_opportunity_scan_limit", 24))
+        symbols = symbols[: max(1, scan_limit)]
 
         # Stan konta
         demo_quote_ccy = os.getenv("DEMO_QUOTE_CCY", "EUR")
@@ -387,6 +541,39 @@ def get_best_opportunity(
 
         now = utc_now_naive()
 
+        if kill_switch:
+            return {
+                "success": True,
+                "opportunity": None,
+                "action": "CZEKAJ",
+                "reason": "Kill switch aktywny",
+                "candidates_evaluated": 0,
+                "blocked_count": 0,
+                "symbols_scanned": 0,
+            }
+
+        if open_count >= max_open_positions:
+            return {
+                "success": True,
+                "opportunity": None,
+                "action": "CZEKAJ",
+                "reason": f"Osiągnięto limit {max_open_positions} otwartych pozycji",
+                "candidates_evaluated": 0,
+                "blocked_count": 0,
+                "symbols_scanned": 0,
+            }
+
+        if cash < min_order_notional:
+            return {
+                "success": True,
+                "opportunity": None,
+                "action": "CZEKAJ",
+                "reason": f"Brak gotówki ({cash:.2f} < {min_order_notional})",
+                "candidates_evaluated": 0,
+                "blocked_count": 0,
+                "symbols_scanned": 0,
+            }
+
         live = _build_live_signals(db, symbols, limit=len(symbols))
         actionable = [s for s in live if s["signal_type"] != "HOLD"]
 
@@ -399,6 +586,7 @@ def get_best_opportunity(
                 "reason": "Wszystkie sygnały HOLD — rynek bez wyraźnego kierunku",
                 "best_hold_symbol": best_hold["symbol"] if best_hold else None,
                 "candidates_evaluated": len(live),
+                "symbols_scanned": len(symbols),
             }
 
         scored = [_score_opportunity(s, db) for s in actionable]
@@ -460,6 +648,7 @@ def get_best_opportunity(
                 "best_candidate": top_blocked,
                 "candidates_evaluated": len(scored),
                 "blocked_count": len(blocked_candidates),
+                "symbols_scanned": len(symbols),
             }
 
         best = allowed_candidates[0]
@@ -481,7 +670,7 @@ def get_best_opportunity(
             "success": True,
             "opportunity": {
                 "symbol": best["symbol"],
-                "action": best["signal_type"],
+                "action": best.get("action") or best["signal_type"],
                 "confidence": best["confidence"],
                 "score": best["score"],
                 "expected_profit_pct": best.get("expected_profit_pct"),
@@ -490,17 +679,42 @@ def get_best_opportunity(
                 "indicators": best.get("indicators"),
                 "score_breakdown": best.get("score_breakdown"),
                 "timestamp": best.get("timestamp"),
+                "entry_price": best.get("entry_price"),
+                "acceptable_entry_range": best.get("acceptable_entry_range"),
+                "take_profit_price": best.get("take_profit_price"),
+                "stop_loss_price": best.get("stop_loss_price"),
+                "break_even_price": best.get("break_even_price"),
+                "trailing_activation_price": best.get("trailing_activation_price"),
+                "trailing_distance": best.get("trailing_distance"),
+                "expected_total_cost": best.get("expected_total_cost"),
+                "expected_net_profit": best.get("expected_net_profit"),
+                "expected_net_profit_pct": best.get("expected_net_profit_pct"),
+                "confidence_score": best.get("confidence_score"),
+                "risk_score": best.get("risk_score"),
+                "trade_quality_score": best.get("trade_quality_score"),
+                "cost_efficiency_score": best.get("cost_efficiency_score"),
+                "plan_status": best.get("plan_status"),
+                "requires_revision": best.get("requires_revision"),
+                "invalidation_reason": best.get("invalidation_reason"),
+                "last_consulted_at": best.get("last_consulted_at"),
             },
-            "action": best["signal_type"],
+            "action": best.get("action") or best["signal_type"],
             "reason": " | ".join(reason_parts),
             "candidates_evaluated": len(scored),
             "allowed_count": len(allowed_candidates),
             "blocked_count": len(blocked_candidates),
+            "symbols_scanned": len(symbols),
             "runner_up": {
                 "symbol": allowed_candidates[1]["symbol"],
-                "action": allowed_candidates[1]["signal_type"],
+                "action": allowed_candidates[1].get("action") or allowed_candidates[1]["signal_type"],
                 "score": allowed_candidates[1]["score"],
                 "confidence": allowed_candidates[1]["confidence"],
+                "entry_price": allowed_candidates[1].get("entry_price"),
+                "take_profit_price": allowed_candidates[1].get("take_profit_price"),
+                "stop_loss_price": allowed_candidates[1].get("stop_loss_price"),
+                "break_even_price": allowed_candidates[1].get("break_even_price"),
+                "expected_net_profit": allowed_candidates[1].get("expected_net_profit"),
+                "plan_status": allowed_candidates[1].get("plan_status"),
             } if len(allowed_candidates) > 1 else None,
         }
     except Exception as e:
@@ -521,14 +735,26 @@ def get_wait_status(db: Session = Depends(get_db)):
         aggr_profile = AGGRESSIVENESS_PROFILES.get(aggressiveness, AGGRESSIVENESS_PROFILES["balanced"])
         MIN_SCORE = float(config.get("demo_min_entry_score", aggr_profile["demo_min_entry_score"]))
         MIN_CONFIDENCE = float(config.get("demo_min_signal_confidence", aggr_profile["demo_min_signal_confidence"]))
+        scan_limit = int(config.get("wait_status_scan_limit", 24))
 
-        symbols = _get_symbols_from_db_or_env(db)
+        symbols = _get_symbols_from_db_or_env(db, include_spot=False)[: max(1, scan_limit)]
         if not symbols:
             return {
                 "success": True,
                 "items": [],
                 "note": "Brak danych rynkowych — kolektor nie zebrał jeszcze danych",
             }
+
+        # Pobierz reżim rynkowy (raz dla całego batcha)
+        from backend.analysis import get_market_regime
+        market_regime = get_market_regime()
+        regime_buy_blocked = bool(market_regime.get("buy_blocked", False))
+        bear_min_conf = float(config.get("bear_regime_min_conf", 0.68))
+        oversold_bypass_conf = float(config.get("bear_oversold_bypass_conf", 0.55))
+        oversold_rsi_thresh = float(config.get("extreme_oversold_rsi_threshold", 28.0))
+        bear_rsi_sell_gate = float(config.get("bear_rsi_sell_gate", 20.0))
+        regime_name = market_regime.get("regime", "UNKNOWN")
+        regime_reason = market_regime.get("reason", "")
 
         live = _build_live_signals(db, symbols, limit=len(symbols))
 
@@ -560,6 +786,28 @@ def get_wait_status(db: Session = Depends(get_db)):
                 })
                 status = "HOLD"
             else:
+                # Sprawdź reżim rynkowy (BEAR/CRASH blokuje BUY z niską pewnością)
+                # WYJĄTEK: ekstremalnie wyprzedany (RSI < oversold_rsi_thresh) → niższy próg
+                if signal_type == "BUY" and regime_buy_blocked:
+                    _rsi_for_regime = float(rsi) if rsi is not None else 50.0
+                    _is_oversold_in_regime = rsi is not None and _rsi_for_regime < oversold_rsi_thresh
+                    _effective_min = oversold_bypass_conf if _is_oversold_in_regime else bear_min_conf
+                    if confidence < _effective_min:
+                        if _is_oversold_in_regime:
+                            missing_conditions.append({
+                                "condition": f"Reżim rynkowy ({regime_name}) + Oversold bypass",
+                                "current": f"Pewność {confidence:.0%} — za niska nawet dla mean-reversion",
+                                "required": f"Pewność ≥ {_effective_min:.0%} (RSI={_rsi_for_regime:.0f}<{oversold_rsi_thresh:.0f})",
+                                "met": False,
+                            })
+                        else:
+                            missing_conditions.append({
+                                "condition": f"Reżim rynkowy ({regime_name})",
+                                "current": f"Pewność {confidence:.0%} — za niska dla BUY w bessie",
+                                "required": f"Pewność ≥ {bear_min_conf:.0%} w reżimie {regime_name}",
+                                "met": False,
+                            })
+
                 # Sprawdź confidence
                 if confidence < MIN_CONFIDENCE:
                     missing_conditions.append({
@@ -580,7 +828,11 @@ def get_wait_status(db: Session = Depends(get_db)):
 
                 # Trend
                 trend_up = ema_20 and ema_50 and float(ema_20) > float(ema_50)
-                if signal_type == "BUY" and not trend_up and ema_20 and ema_50:
+                # BUY trend check: pomiń gdy extreme oversold w reżimie CRASH/BEAR (mean-reversion)
+                _rsi_val_ws = float(rsi) if rsi is not None else 50.0
+                _oversold_bypass_active = (regime_buy_blocked and rsi is not None
+                                           and _rsi_val_ws < oversold_rsi_thresh)
+                if signal_type == "BUY" and not trend_up and ema_20 and ema_50 and not _oversold_bypass_active:
                     missing_conditions.append({
                         "condition": "Trend wzrostowy (EMA20>EMA50)",
                         "current": f"EMA20={float(ema_20):.4f} < EMA50={float(ema_50):.4f}",
@@ -598,13 +850,16 @@ def get_wait_status(db: Session = Depends(get_db)):
                             "required": "RSI < 65",
                             "met": False,
                         })
-                    elif signal_type == "SELL" and rsi_f < 35:
-                        missing_conditions.append({
-                            "condition": "RSI > 35 (nie wyprzedany)",
-                            "current": f"RSI={rsi_f:.0f}",
-                            "required": "RSI > 35",
-                            "met": False,
-                        })
+                    elif signal_type == "SELL":
+                        # W reżimie CRASH/BEAR: próg RSI dla SELL jest niższy (20 zamiast 35)
+                        _rsi_sell_min_ws = bear_rsi_sell_gate if regime_buy_blocked else 35.0
+                        if rsi_f < _rsi_sell_min_ws:
+                            missing_conditions.append({
+                                "condition": f"RSI > {_rsi_sell_min_ws:.0f} ({'CRASH: obniżony próg' if regime_buy_blocked else 'nie wyprzedany'})",
+                                "current": f"RSI={rsi_f:.0f}",
+                                "required": f"RSI > {_rsi_sell_min_ws:.0f}",
+                                "met": False,
+                            })
 
                 # Jeśli nie brakuje warunków — okazja jest aktywna
                 if not missing_conditions:
@@ -649,6 +904,13 @@ def get_wait_status(db: Session = Depends(get_db)):
                 "ready": len(ready),
                 "waiting": len(waiting),
                 "holding": len(holding),
+            },
+            "symbols_scanned": len(symbols),
+            "market_regime": {
+                "name": regime_name,
+                "buy_blocked": regime_buy_blocked,
+                "bear_min_conf": bear_min_conf if regime_buy_blocked else None,
+                "reason": regime_reason,
             },
             "min_confidence": MIN_CONFIDENCE,
             "min_score": MIN_SCORE,
@@ -831,6 +1093,8 @@ _ACTION_PL = {
     "WAIT_FOR_SIGNAL":  "CZEKAJ NA SYGNAŁ",
     "KANDYDAT_DO_WEJŚCIA": "KANDYDAT DO WEJŚCIA",
     "WEJŚCIE_AKTYWNE":  "WEJŚCIE AKTYWNE",
+    # P2-03: sygnał SELL gdy brak otwartej pozycji — informacyjny, nie do egzekucji
+    "RYNEK_SPRZEDAŻY":  "SYGNAŁ SPRZEDAŻY (brak pozycji)",
 }
 
 
@@ -1167,8 +1431,13 @@ def _final_action_resolver(
             final_action = "BUY"
             final_reason = signal.get("reason") or "RSI/EMA dają sygnał kupna"
         elif signal_type == "SELL" and confidence >= 0.60:
-            final_action = "SELL"
-            final_reason = signal.get("reason") or "RSI/EMA dają sygnał sprzedaży"
+            if position_state is None:
+                # P2-03: Brak otwartej pozycji — nie egzekwujemy SELL, pokazujemy informacyjnie
+                final_action = "RYNEK_SPRZEDAŻY"
+                final_reason = "Sygnał sprzedaży — brak otwartej pozycji do zamknięcia"
+            else:
+                final_action = "SELL"
+                final_reason = signal.get("reason") or "RSI/EMA dają sygnał sprzedaży"
         elif signal_type == "BUY" and confidence >= 0.45:
             final_action = "KANDYDAT_DO_WEJŚCIA"
             final_reason = f"Kandydat do wejścia (pewność {confidence*100:.0f}%) — sygnał kupna"
@@ -1340,8 +1609,9 @@ def get_final_decisions(
         rs = get_runtime_config(db)
         symbol_tiers = rs.get("symbol_tiers") or {}
         tier_map = build_symbol_tier_map(symbol_tiers)
+        scan_limit = int(rs.get("final_decisions_scan_limit", 24))
 
-        symbols = _get_symbols_from_db_or_env(db)
+        symbols = _get_symbols_from_db_or_env(db, include_spot=(mode == "live"))
         if not symbols:
             return {"success": True, "decisions": [], "note": "Brak danych rynkowych"}
 
@@ -1371,6 +1641,24 @@ def get_final_decisions(
             for r in expectations_rows
         ]
 
+        prioritized_symbols: List[str] = []
+        seen_symbols: set[str] = set()
+
+        def _append_symbol(sym: Optional[str]) -> None:
+            normalized = (sym or "").strip().upper().replace("/", "").replace("-", "")
+            if normalized and normalized not in seen_symbols:
+                seen_symbols.add(normalized)
+                prioritized_symbols.append(normalized)
+
+        for sym in positions_by_symbol.keys():
+            _append_symbol(sym)
+        for exp in user_expectations:
+            _append_symbol(exp.get("symbol"))
+        for sym in symbols:
+            _append_symbol(sym)
+
+        symbols = prioritized_symbols[: max(1, scan_limit)]
+
         live = _build_live_signals(db, symbols, limit=len(symbols))
 
         # Cache aktywnych pending orders per symbol
@@ -1378,7 +1666,7 @@ def get_final_decisions(
         try:
             pending_rows = db.query(PendingOrder.symbol).filter(
                 PendingOrder.mode == mode,
-                PendingOrder.status.in_(["PENDING", "CONFIRMED"]),
+                PendingOrder.status.in_(["PENDING", "CONFIRMED", "OPEN"]),
             ).all()
             for row in pending_rows:
                 if row[0]:
@@ -1416,6 +1704,7 @@ def get_final_decisions(
             "SELL_AT_TARGET": 0, "PREPARE_EXIT": 1, "HOLD_TARGET": 2,
             "DO_NOT_ADD": 3, "KANDYDAT_DO_WEJŚCIA": 3, "BUY": 4,
             "SELL": 5, "PARTIAL_EXIT": 5, "WAIT": 6, "HOLD": 7,
+            "RYNEK_SPRZEDAŻY": 8,  # P2-03: informacyjny, najniższy priorytet w UI
         }
         decisions.sort(key=lambda x: (
             priority_order.get(x["final_action"], 9),
@@ -1429,6 +1718,8 @@ def get_final_decisions(
             "buy_ready":      sum(1 for d in decisions if d["final_action"] == "BUY"),
             "consider_buy":   sum(1 for d in decisions if d["final_action"] == "KANDYDAT_DO_WEJŚCIA"),
             "sell_ready":     sum(1 for d in decisions if d["final_action"] in ("SELL", "PARTIAL_EXIT")),
+            # P2-03: sygnał SELL bez pozycji — informacyjny licznik
+            "sell_signal_no_pos": sum(1 for d in decisions if d["final_action"] == "RYNEK_SPRZEDAŻY"),
             "blocked":        sum(1 for d in decisions if d["final_action"] in ("DO_NOT_ADD", "WAIT", "WAIT_FOR_SIGNAL")),
             "hold":           sum(1 for d in decisions if d["final_action"] == "HOLD"),
         }
@@ -1439,6 +1730,7 @@ def get_final_decisions(
             "decisions": decisions,
             "summary": summary,
             "total": len(decisions),
+            "symbols_scanned": len(symbols),
             "active_expectations": len(user_expectations),
             "updated_at": utc_now_naive().isoformat(),
         }
@@ -1458,7 +1750,7 @@ _REASON_PL = {
     "signal_filters_not_met":            "❌ Filtry techniczne (EMA/RSI/zakres) niezaliczone",
     "active_pending_exists":             "⏳ Mamy otwarte zlecenie dla tego symbolu",
     "buy_blocked_existing_position":     "⏳ Już mamy otwartą pozycję BUY",
-    "sell_blocked_no_position":          "❌ SELL bez otwartej pozycji — pomijamy",
+    "sell_blocked_no_position":          "👀 Sygnał sprzedaży — brak pozycji do zamknięcia (obserwujemy)",
     "symbol_not_in_any_tier":            "❌ Symbol nie jest w żadnym tierze (watchliście AI)",
     "hold_mode_no_new_entries":          "🔒 Symbol w trybie HOLD — nie otwieramy nowych",
     "symbol_cooldown_active":            "⏳ Cooldown po ostatniej transakcji",
@@ -1469,6 +1761,8 @@ _REASON_PL = {
     "tier_daily_trade_limit":            "❌ Dzienny limit transakcji dla tego tieru osiągnięty",
     "daily_loss_brake_active":           "🛑 Dzienny limit strat — bot wstrzymał handel",
     "risk_evaluation_failed":            "❌ Ocena ryzyka negatywna",
+    "entry_score_below_min":             "❌ Ocena wejścia zbyt niska (słabe potwierdzenie wskaźników)",
+    "market_regime_buy_blocked":         "🟠 BEAR/CRASH: BUY zablokowany przez reżim rynkowy (za niska pewność sygnału dla handlu w bessie)",
     "no_trace":                          "ℹ️ Brak decyzji w tym oknie — czeka na następny cykl collectora",
 }
 
@@ -1516,7 +1810,7 @@ def get_execution_trace(
         pending_map: dict[str, PendingOrder] = {}
         for po in (
             db.query(PendingOrder)
-            .filter(PendingOrder.mode == mode, PendingOrder.status.in_(["PENDING", "CONFIRMED"]))
+            .filter(PendingOrder.mode == mode, PendingOrder.status.in_(["PENDING", "CONFIRMED", "OPEN"]))
             .order_by(desc(PendingOrder.created_at))
             .all()
         ):
@@ -1620,6 +1914,8 @@ _ENTRY_BLOCK_PL = {
     "ENTRY_BLOCKED_PENDING_EXISTS":       "Oczekujące zlecenie już istnieje",
     "ENTRY_BLOCKED_SIGNAL_FILTERS":       "Filtry techniczne nie spełnione (trend/RSI/zakres)",
     "ENTRY_BLOCKED_COST_GATE":            "Bramka kosztowa — oczekiwany zysk za mały",
+    "ENTRY_BLOCKED_NO_POSITION_TO_SELL":  "Brak otwartej pozycji do zamknięcia (sygnał SELL bez pozycji)",
+    "ENTRY_BLOCKED_BEAR_REGIME":          "Reżim BEAR/CRASH — nowe wejścia BUY zablokowane",
     "ENTRY_ALLOWED":                      "Wejście dozwolone",
     "NO_SIGNAL":                          "Brak sygnału dla symbolu",
 }
@@ -1648,24 +1944,36 @@ def get_entry_readiness(
 
         # Sprawdź konfigurację
         max_open_positions = int(config.get("max_open_positions", 3))
-        min_order_notional = float(config.get("min_order_notional", 25.0))
+        min_order_notional = float(config.get("min_order_notional", 60.0))
         demo_min_conf = float(config.get("demo_min_signal_confidence", 0.55))
         pending_cooldown_s = int(config.get("pending_order_cooldown_seconds", 300))
         base_cooldown_s = int(float(config.get("cooldown_after_loss_streak_minutes", 15)) * 60)
+        scan_limit = int(config.get("entry_readiness_scan_limit", 24))
 
         # Pobierz account state
         from backend.accounting import get_demo_quote_ccy
         demo_quote_ccy = get_demo_quote_ccy()
-        account_state = compute_demo_account_state(db, quote_ccy=demo_quote_ccy)
-        initial_balance = float(account_state.get("initial_balance") or 10000)
-        cash = float(account_state.get("cash") or initial_balance)
+        if mode == "live":
+            # LIVE: pobierz wolne EUR z Binance API
+            from backend.binance_client import BinanceClient
+            _bc = BinanceClient()
+            _balances = _bc.get_balances() or []
+            cash = 0.0
+            for _b in _balances:
+                if (_b.get("asset") or "").upper() == demo_quote_ccy.upper():
+                    cash = float(_b.get("free", 0) or 0)
+                    break
+        else:
+            account_state = compute_demo_account_state(db, quote_ccy=demo_quote_ccy)
+            initial_balance = float(account_state.get("initial_balance") or 10000)
+            cash = float(account_state.get("cash") or initial_balance)
 
         # Reserved cash (pending BUY orders)
         reserved_cash = 0.0
         active_pending = db.query(PO).filter(
             PO.mode == mode,
             PO.side == "BUY",
-            PO.status.in_(["PENDING", "CONFIRMED"]),
+            PO.status.in_(["PENDING", "CONFIRMED", "OPEN"]),
         ).all()
         for p in active_pending:
             try:
@@ -1678,11 +1986,26 @@ def get_entry_readiness(
         open_positions = db.query(Position).filter(Position.mode == mode).all()
         open_count = len(open_positions)
         open_symbols = {p.symbol for p in open_positions}
+        pending_by_symbol = {}
+        last_pending_by_symbol = {}
+        for p in db.query(PO).filter(PO.mode == mode).order_by(PO.created_at.desc()).all():
+            sym = (p.symbol or "").strip().upper().replace("/", "").replace("-", "")
+            if not sym:
+                continue
+            if p.status in ["PENDING", "CONFIRMED"]:
+                pending_by_symbol[sym] = pending_by_symbol.get(sym, 0) + 1
+            if sym not in last_pending_by_symbol:
+                last_pending_by_symbol[sym] = p
+        last_order_by_symbol = {}
+        for o in db.query(Ord).filter(Ord.mode == mode).order_by(Ord.timestamp.desc()).all():
+            sym = (o.symbol or "").strip().upper().replace("/", "").replace("-", "")
+            if sym and sym not in last_order_by_symbol:
+                last_order_by_symbol[sym] = o
 
         now = utc_now_naive()
 
         # Zbierz sygnały
-        symbols = _get_symbols_from_db_or_env(db)
+        symbols = _get_symbols_from_db_or_env(db, include_spot=(mode == "live"))[: max(1, scan_limit)]
         live_signals = _build_live_signals(db, symbols, limit=len(symbols)) if symbols else []
         signal_map = {s["symbol"]: s for s in live_signals}
 
@@ -1699,10 +2022,7 @@ def get_entry_readiness(
             signal_type = sig.get("signal_type", "HOLD")
             score_data = _score_opportunity(sig, db) if sig else {}
             score = float(score_data.get("score", 0.0))
-            price = sig.get("price") or float(
-                (db.query(MarketData).filter(MarketData.symbol == sym)
-                 .order_by(MarketData.timestamp.desc()).first() or type("x", (), {"price": None})()).price or 0
-            )
+            price = float(sig.get("price") or 0.0)
 
             entry_reason = "NO_SIGNAL"
             entry_reason_pl = _ENTRY_BLOCK_PL["NO_SIGNAL"]
@@ -1712,14 +2032,13 @@ def get_entry_readiness(
                 entry_reason = "ENTRY_BLOCKED_KILL_SWITCH"
             elif signal_type == "HOLD":
                 entry_reason = "NO_SIGNAL"
+            elif signal_type == "SELL" and sym not in open_symbols:
+                entry_reason = "ENTRY_BLOCKED_NO_POSITION_TO_SELL"
             elif open_count >= max_open_positions:
                 entry_reason = "ENTRY_BLOCKED_MAX_POSITIONS"
             elif sym in open_symbols:
                 entry_reason = "ENTRY_BLOCKED_ALREADY_HAS_POSITION"
-            elif db.query(PO).filter(
-                PO.mode == mode, PO.symbol == sym,
-                PO.status.in_(["PENDING", "CONFIRMED"])
-            ).count() > 0:
+            elif pending_by_symbol.get(sym_norm, 0) > 0:
                 entry_reason = "ENTRY_BLOCKED_PENDING_EXISTS"
             elif confidence < demo_min_conf:
                 entry_reason = "ENTRY_BLOCKED_SIGNAL_CONFIDENCE"
@@ -1727,14 +2046,10 @@ def get_entry_readiness(
                 entry_reason = "ENTRY_BLOCKED_NO_CASH"
             else:
                 # Sprawdź cooldown ostatniego zlecenia
-                last_ord = db.query(Ord).filter(
-                    Ord.symbol == sym, Ord.mode == mode
-                ).order_by(Ord.timestamp.desc()).first()
+                last_ord = last_order_by_symbol.get(sym_norm)
                 in_cooldown = last_ord and (now - last_ord.timestamp).total_seconds() < base_cooldown_s
                 # Sprawdź cooldown pending
-                last_pend = db.query(PO).filter(
-                    PO.mode == mode, PO.symbol == sym
-                ).order_by(PO.created_at.desc()).first()
+                last_pend = last_pending_by_symbol.get(sym_norm)
                 in_pending_cooldown = last_pend and last_pend.created_at and (
                     now - last_pend.created_at
                 ).total_seconds() < pending_cooldown_s
@@ -1758,6 +2073,23 @@ def get_entry_readiness(
                 "score": round(score, 2),
                 "signal_type": signal_type,
                 "price": price,
+                "action": score_data.get("action"),
+                "entry_price": score_data.get("entry_price"),
+                "acceptable_entry_range": score_data.get("acceptable_entry_range"),
+                "take_profit_price": score_data.get("take_profit_price"),
+                "stop_loss_price": score_data.get("stop_loss_price"),
+                "break_even_price": score_data.get("break_even_price"),
+                "expected_total_cost": score_data.get("expected_total_cost"),
+                "expected_net_profit": score_data.get("expected_net_profit"),
+                "expected_net_profit_pct": score_data.get("expected_net_profit_pct"),
+                "confidence_score": score_data.get("confidence_score"),
+                "risk_score": score_data.get("risk_score"),
+                "trade_quality_score": score_data.get("trade_quality_score"),
+                "cost_efficiency_score": score_data.get("cost_efficiency_score"),
+                "plan_status": score_data.get("plan_status"),
+                "requires_revision": score_data.get("requires_revision"),
+                "invalidation_reason": score_data.get("invalidation_reason"),
+                "last_consulted_at": score_data.get("last_consulted_at"),
             }
             if allowed:
                 candidates.append(item)
@@ -1793,6 +2125,7 @@ def get_entry_readiness(
             "cash_available": round(available_cash, 2),
             "min_notional": min_order_notional,
             "kill_switch_active": kill_switch,
+            "symbols_scanned": len(symbols),
             "best_ready_symbol": best_ready["symbol"] if best_ready else None,
             "best_ready_score": best_ready["score"] if best_ready else None,
             "best_blocked_symbol": best_blocked["symbol"] if best_blocked else None,
@@ -1805,4 +2138,3 @@ def get_entry_readiness(
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Błąd entry-readiness: {str(e)}")
-

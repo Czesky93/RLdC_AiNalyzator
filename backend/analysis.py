@@ -3,18 +3,20 @@ Moduł analizy technicznej i generacji bloga.
 """
 from __future__ import annotations
 
-from typing import List, Dict, Optional
+from typing import Any, List, Dict, Optional
 from datetime import datetime, timedelta, timezone
 import json
 import os
 import requests
 import re
+import time as _time
 
 import pandas as pd
 import pandas_ta as ta
 
 from backend.database import Kline, Signal, BlogPost, utc_now_naive
 from backend.system_logger import log_to_db, log_exception
+from backend.accounting import build_profitability_guard, estimate_trade_costs
 
 _last_openai_error_ts: Optional[datetime] = None
 _last_gemini_error_ts: Optional[datetime] = None
@@ -26,6 +28,11 @@ _fear_greed_cache: dict = {"value": None, "ts": None}
 _coingecko_cache: dict = {"data": None, "ts": None}
 _FEAR_GREED_TTL = 300   # 5 min
 _COINGECKO_TTL = 600    # 10 min
+
+# Cache dla get_live_context — unika powtórnych DB queries + pandas-ta per request
+# Kolektor zapisuje nowe klines co 60s, więc TTL 55s jest bezpieczny.
+_live_ctx_cache: dict = {}
+_LIVE_CTX_TTL = 20  # sekund (kolektor co 60s, frontend co 15-25s → max staleness ~20s)
 
 
 def _fetch_fear_greed_index() -> Optional[int]:
@@ -76,6 +83,77 @@ def _fetch_coingecko_global() -> Optional[dict]:
     except Exception:
         pass
     return _coingecko_cache.get("data")
+
+
+# Cache dla market regime — odnawia się co 30 minut
+_market_regime_cache: dict = {"data": None, "ts": None}
+_MARKET_REGIME_TTL = 1800  # 30 minut
+
+
+def get_market_regime() -> dict:
+    """Wyznacza aktualny reżim rynkowy na podstawie F&G + CoinGecko.
+
+    Zwraca:
+        regime: CRASH / BEAR / BEAR_SOFT / SIDEWAYS / BULL / UNKNOWN
+        buy_confidence_adj: korekta min_confidence dla wejść BUY (dodatnia = ostrzejszy filtr)
+        buy_blocked: czy wejścia BUY mają być zablokowane
+        reason: opis sytuacji rynkowej
+    """
+    global _market_regime_cache
+    now = datetime.now(timezone.utc)
+    ts = _market_regime_cache.get("ts")
+    if ts and (now - ts).total_seconds() < _MARKET_REGIME_TTL and _market_regime_cache["data"]:
+        return _market_regime_cache["data"]
+
+    fg = _fetch_fear_greed_index()
+    coingecko = _fetch_coingecko_global()
+    mc_chg = float((coingecko or {}).get("market_cap_change_24h", 0) or 0)
+
+    if fg is None:
+        result = {
+            "regime": "UNKNOWN",
+            "buy_confidence_adj": 0.0,
+            "buy_blocked": False,
+            "reason": "Brak danych F&G — tryb neutralny",
+        }
+    elif fg <= 15 and mc_chg < -2.5:
+        result = {
+            "regime": "CRASH",
+            "buy_confidence_adj": 0.15,  # P1-FIX: 0.20→0.15 — nadal blokujące ale mniej agresywne
+            "buy_blocked": True,
+            "reason": f"🔴 CRASH: F&G={fg} Extreme Fear + MCap {mc_chg:+.1f}% — BUY ZABLOKOWANY",
+        }
+    elif fg <= 20 and mc_chg < -1.0:
+        result = {
+            "regime": "BEAR",
+            "buy_confidence_adj": 0.10,  # P1-FIX: 0.15→0.10 — mniej agresywne blokowanie
+            "buy_blocked": True,
+            "reason": f"🟠 BEAR: F&G={fg} Extreme Fear + MCap {mc_chg:+.1f}% — BUY ZABLOKOWANY",
+        }
+    elif fg <= 30 and mc_chg < 0:
+        result = {
+            "regime": "BEAR_SOFT",
+            "buy_confidence_adj": 0.05,  # P1-FIX: 0.10→0.05 — BEAR_SOFT nie może blokować typowych sygnałów
+            "buy_blocked": False,
+            "reason": f"🟡 BEAR_SOFT: F&G={fg} Fear + MCap {mc_chg:+.1f}% — podwyższone progi BUY",
+        }
+    elif fg >= 75 and mc_chg > 2.0:
+        result = {
+            "regime": "BULL",
+            "buy_confidence_adj": -0.05,
+            "buy_blocked": False,
+            "reason": f"🟢 BULL: F&G={fg} Extreme Greed + MCap {mc_chg:+.1f}%",
+        }
+    else:
+        result = {
+            "regime": "SIDEWAYS",
+            "buy_confidence_adj": 0.0,
+            "buy_blocked": False,
+            "reason": f"⚪ SIDEWAYS: F&G={fg} + MCap {mc_chg:+.1f}%",
+        }
+
+    _market_regime_cache = {"data": result, "ts": now}
+    return result
 
 
 def _get_openai_api_key() -> str:
@@ -378,20 +456,43 @@ def _insight_from_indicators(indicators: Dict[str, float]) -> Dict[str, str]:
     score = 0  # >0 = BUY, <0 = SELL
     base_confidence = 0.58
 
+    trend_up_confirmed = bool(
+        ema_20 is not None and ema_50 is not None and ema_20 > ema_50
+        and supertrend_dir is not None and supertrend_dir > 0
+    )
+    trend_down_confirmed = bool(
+        ema_20 is not None and ema_50 is not None and ema_20 < ema_50
+        and supertrend_dir is not None and supertrend_dir < 0
+    )
+    bullish_momentum = bool((macd_hist is not None and macd_hist > 0) or (pct_1h is not None and pct_1h > 0))
+    bearish_momentum = bool((macd_hist is not None and macd_hist < 0) or (pct_1h is not None and pct_1h < 0))
+
     # ---- RSI (waga: 2) ----
     if rsi is not None:
         if rsi < 30:
-            score += 2
-            reasons.append(f"RSI={rsi:.0f} — skrajne wyprzedanie (SILNY sygnał BUY)")
+            if trend_up_confirmed and bullish_momentum:
+                score += 2
+                reasons.append(f"RSI={rsi:.0f} — skrajne wyprzedanie, ale z potwierdzeniem odbicia")
+            else:
+                reasons.append(f"RSI={rsi:.0f} — skrajne wyprzedanie bez potwierdzenia odbicia")
         elif rsi < 40:
-            score += 1
-            reasons.append(f"RSI={rsi:.0f} — strefa kupna")
+            if trend_up_confirmed and bullish_momentum:
+                score += 1
+                reasons.append(f"RSI={rsi:.0f} — strefa kupna z potwierdzeniem trendu")
+            else:
+                reasons.append(f"RSI={rsi:.0f} — niskie, ale bez potwierdzenia BUY")
         elif rsi > 70:
-            score -= 2
-            reasons.append(f"RSI={rsi:.0f} — skrajne wykupienie (SILNY sygnał SELL)")
+            if trend_down_confirmed and bearish_momentum:
+                score -= 2
+                reasons.append(f"RSI={rsi:.0f} — skrajne wykupienie z potwierdzeniem słabości")
+            else:
+                reasons.append(f"RSI={rsi:.0f} — skrajne wykupienie bez potwierdzenia SELL")
         elif rsi > 60:
-            score -= 1
-            reasons.append(f"RSI={rsi:.0f} — strefa sprzedaży")
+            if trend_down_confirmed and bearish_momentum:
+                score -= 1
+                reasons.append(f"RSI={rsi:.0f} — strefa sprzedaży z potwierdzeniem trendu")
+            else:
+                reasons.append(f"RSI={rsi:.0f} — wysokie, ale bez potwierdzenia SELL")
         else:
             reasons.append(f"RSI={rsi:.0f} — strefa neutralna")
 
@@ -423,28 +524,46 @@ def _insight_from_indicators(indicators: Dict[str, float]) -> Dict[str, str]:
         bb_range = bb_upper - bb_lower
         pct_b = (close - bb_lower) / bb_range if bb_range > 0 else 0.5
         if close < bb_lower:
-            score += 2
-            reasons.append(f"%B={pct_b:.2f} — cena poniżej dolnego BB (rebound BUY)")
+            if trend_up_confirmed and bullish_momentum:
+                score += 1
+                reasons.append(f"%B={pct_b:.2f} — cena przy dolnym BB, ale rynek już odbija")
+            else:
+                reasons.append(f"%B={pct_b:.2f} — cena poniżej dolnego BB bez potwierdzenia odbicia")
         elif pct_b < 0.25:
-            score += 1
-            reasons.append(f"%B={pct_b:.2f} — cena w dolnej ćwiartce BB")
+            if trend_up_confirmed and bullish_momentum:
+                score += 1
+                reasons.append(f"%B={pct_b:.2f} — cena w dolnej ćwiartce BB z potwierdzeniem trendu")
+            else:
+                reasons.append(f"%B={pct_b:.2f} — dolna ćwiartka BB bez potwierdzenia BUY")
         elif close > bb_upper:
-            score -= 2
-            reasons.append(f"%B={pct_b:.2f} — cena powyżej górnego BB (sprzedaż)")
+            if trend_down_confirmed and bearish_momentum:
+                score -= 1
+                reasons.append(f"%B={pct_b:.2f} — cena powyżej górnego BB z potwierdzeniem słabości")
+            else:
+                reasons.append(f"%B={pct_b:.2f} — cena powyżej górnego BB bez potwierdzenia SELL")
         elif pct_b > 0.75:
-            score -= 1
-            reasons.append(f"%B={pct_b:.2f} — cena w górnej ćwiartce BB")
+            if trend_down_confirmed and bearish_momentum:
+                score -= 1
+                reasons.append(f"%B={pct_b:.2f} — cena w górnej ćwiartce BB z potwierdzeniem SELL")
+            else:
+                reasons.append(f"%B={pct_b:.2f} — górna ćwiartka BB bez potwierdzenia SELL")
         else:
             reasons.append(f"%B={pct_b:.2f} — cena w środku BB")
 
     # ---- Stochastic %K (waga: 1) ----
     if stoch_k is not None:
         if stoch_k < 20:
-            score += 1
-            reasons.append(f"Stoch%K={stoch_k:.0f} — wyprzedanie")
+            if trend_up_confirmed and bullish_momentum:
+                score += 1
+                reasons.append(f"Stoch%K={stoch_k:.0f} — wyprzedanie z potwierdzeniem odbicia")
+            else:
+                reasons.append(f"Stoch%K={stoch_k:.0f} — wyprzedanie bez potwierdzenia")
         elif stoch_k > 80:
-            score -= 1
-            reasons.append(f"Stoch%K={stoch_k:.0f} — wykupienie")
+            if trend_down_confirmed and bearish_momentum:
+                score -= 1
+                reasons.append(f"Stoch%K={stoch_k:.0f} — wykupienie z potwierdzeniem słabości")
+            else:
+                reasons.append(f"Stoch%K={stoch_k:.0f} — wykupienie bez potwierdzenia")
 
     # ---- ADX — siła trendu (modyfikator, nie głos) ----
     trend_strength = "boczny"
@@ -480,11 +599,17 @@ def _insight_from_indicators(indicators: Dict[str, float]) -> Dict[str, str]:
     # ---- Zmiana % ceny (kontekst) ----
     if pct_1h is not None:
         if pct_1h < -2.0:
-            score += 1  # nagły spadek = szansa na odbicie
-            reasons.append(f"Spadek {pct_1h:.1f}% w 1h — potencjalne odbicie")
+            if trend_down_confirmed:
+                score -= 1
+                reasons.append(f"Spadek {pct_1h:.1f}% w 1h — momentum spadkowe, nie łap spadającego noża")
+            else:
+                reasons.append(f"Spadek {pct_1h:.1f}% w 1h — obserwacja, bez automatycznego BUY")
         elif pct_1h > 2.0:
-            score -= 1  # nagły wzrost = ryzyko korekty
-            reasons.append(f"Wzrost {pct_1h:.1f}% w 1h — możliwa korekta")
+            if trend_up_confirmed:
+                score += 1
+                reasons.append(f"Wzrost {pct_1h:.1f}% w 1h — momentum wzrostowe potwierdza trend")
+            else:
+                reasons.append(f"Wzrost {pct_1h:.1f}% w 1h — bez pełnego potwierdzenia trendu")
 
     # ---- VWAP rolling 24h (waga: 1) ----
     if vwap_24 is not None and close is not None and vwap_24 > 0:
@@ -526,13 +651,19 @@ def _insight_from_indicators(indicators: Dict[str, float]) -> Dict[str, str]:
     # ---- MFI — Money Flow Index (waga: 1) ----
     if mfi_14 is not None:
         if mfi_14 < 20:
-            score += 1
-            reasons.append(f"MFI={mfi_14:.0f} — skrajny outflow (BUY)")
+            if trend_up_confirmed and bullish_momentum:
+                score += 1
+                reasons.append(f"MFI={mfi_14:.0f} — skrajny outflow, ale już z potwierdzeniem odbicia")
+            else:
+                reasons.append(f"MFI={mfi_14:.0f} — skrajny outflow bez potwierdzenia BUY")
         elif mfi_14 < 35:
             reasons.append(f"MFI={mfi_14:.0f} — strefa kupna")
         elif mfi_14 > 80:
-            score -= 1
-            reasons.append(f"MFI={mfi_14:.0f} — skrajny inflow (SELL)")
+            if trend_down_confirmed and bearish_momentum:
+                score -= 1
+                reasons.append(f"MFI={mfi_14:.0f} — skrajny inflow z potwierdzeniem SELL")
+            else:
+                reasons.append(f"MFI={mfi_14:.0f} — skrajny inflow bez potwierdzenia SELL")
         elif mfi_14 > 65:
             reasons.append(f"MFI={mfi_14:.0f} — strefa sprzedaży")
         else:
@@ -617,7 +748,14 @@ def get_live_context(db, symbol: str, timeframe: str = "1h", limit: int = 200) -
     """
     Dynamiczny kontekst rynkowy na podstawie live danych:
     EMA20/EMA50, RSI, ATR, progi RSI (percentyle).
+    Wyniki są cache'owane na 55s — kolektor zapisuje nowe dane co 60s.
     """
+    # Cache lookup
+    cache_key = (symbol, timeframe, limit)
+    cached = _live_ctx_cache.get(cache_key)
+    if cached and (_time.time() - cached["ts"]) < _LIVE_CTX_TTL:
+        return cached["result"]
+
     klines = (
         db.query(Kline)
         .filter(Kline.symbol == symbol, Kline.timeframe == timeframe)
@@ -634,6 +772,47 @@ def get_live_context(db, symbol: str, timeframe: str = "1h", limit: int = 200) -
     df["ema_50"] = ta.ema(df["close"], length=50)
     df["rsi_14"] = ta.rsi(df["close"], length=14)
     df["atr_14"] = ta.atr(df["high"], df["low"], df["close"], length=14)
+    try:
+        macd_df = ta.macd(df["close"], fast=12, slow=26, signal=9)
+        if macd_df is not None:
+            macd_col = next((c for c in macd_df.columns if c.startswith("MACD_")), None)
+            hist_col = next((c for c in macd_df.columns if c.startswith("MACDh_")), None)
+            df["macd"] = macd_df[macd_col] if macd_col else None
+            df["macd_hist"] = macd_df[hist_col] if hist_col else None
+        else:
+            df["macd"] = None
+            df["macd_hist"] = None
+    except Exception:
+        df["macd"] = None
+        df["macd_hist"] = None
+    # P1-FIX: ADX(14) — siła trendu. Potrzebny przez exit engine do oceny trend_strong.
+    try:
+        adx_df = ta.adx(df["high"], df["low"], df["close"], length=14)
+        if adx_df is not None and "ADX_14" in adx_df.columns:
+            df["adx_14"] = adx_df["ADX_14"]
+        else:
+            df["adx_14"] = None
+    except Exception:
+        df["adx_14"] = None
+    # Supertrend(7,3) — kierunek trendu ATR-based
+    try:
+        st_df = ta.supertrend(df["high"], df["low"], df["close"], length=7, multiplier=3.0)
+        if st_df is not None:
+            _st_dir_col = next((c for c in st_df.columns if "SUPERTd" in c), None)
+            if _st_dir_col:
+                df["supertrend_dir"] = st_df[_st_dir_col]
+            else:
+                df["supertrend_dir"] = None
+        else:
+            df["supertrend_dir"] = None
+    except Exception:
+        df["supertrend_dir"] = None
+    # Volume ratio (close/SMA20 wolumenu)
+    try:
+        df["vol_sma20"] = ta.sma(df["volume"], length=20)
+        df["volume_ratio"] = df["volume"] / df["vol_sma20"].replace(0, float("nan"))
+    except Exception:
+        df["volume_ratio"] = None
 
     rsi_series = df["rsi_14"].dropna()
     if rsi_series.empty:
@@ -643,7 +822,18 @@ def get_live_context(db, symbol: str, timeframe: str = "1h", limit: int = 200) -
     rsi_sell = float(rsi_series.quantile(0.8))
 
     last = df.iloc[-1]
-    return {
+    _adx = float(last["adx_14"]) if "adx_14" in df.columns and pd.notna(last["adx_14"]) else None
+    _st_dir = float(last["supertrend_dir"]) if "supertrend_dir" in df.columns and pd.notna(last["supertrend_dir"]) else None
+    _vol_ratio = float(last["volume_ratio"]) if "volume_ratio" in df.columns and pd.notna(last["volume_ratio"]) else None
+    _macd = float(last["macd"]) if "macd" in df.columns and pd.notna(last["macd"]) else None
+    _macd_hist = float(last["macd_hist"]) if "macd_hist" in df.columns and pd.notna(last["macd_hist"]) else None
+    _price_change_1h = None
+    try:
+        if len(df) >= 2 and float(df.iloc[-2]["close"]) > 0:
+            _price_change_1h = ((float(last["close"]) - float(df.iloc[-2]["close"])) / float(df.iloc[-2]["close"])) * 100.0
+    except Exception:
+        _price_change_1h = None
+    result = {
         "ema_20": float(last["ema_20"]) if pd.notna(last["ema_20"]) else None,
         "ema_50": float(last["ema_50"]) if pd.notna(last["ema_50"]) else None,
         "rsi": float(last["rsi_14"]) if pd.notna(last["rsi_14"]) else None,
@@ -651,7 +841,463 @@ def get_live_context(db, symbol: str, timeframe: str = "1h", limit: int = 200) -
         "rsi_buy": rsi_buy,
         "rsi_sell": rsi_sell,
         "close": float(last["close"]),
+        "adx": _adx,                  # P1-FIX: ADX — siła trendu (>25 = silny trend)
+        "supertrend_dir": _st_dir,    # P1-FIX: Supertrend (+1 bycze, -1 niedźwiedzie)
+        "volume_ratio": _vol_ratio,   # P1-FIX: ratio wolumenu vs SMA20
+        "macd": _macd,
+        "macd_hist": _macd_hist,
+        "price_change_1h": _price_change_1h,
     }
+    # Zapisz do cache
+    _live_ctx_cache[cache_key] = {"result": result, "ts": _time.time()}
+    return result
+
+
+def _safe_float(value: Any, default: float = 0.0) -> float:
+    try:
+        if value is None:
+            return default
+        return float(value)
+    except Exception:
+        return default
+
+
+def _load_timeframe_snapshot(db, symbol: str, timeframe: str, limit: int) -> Optional[Dict[str, Any]]:
+    klines = (
+        db.query(Kline)
+        .filter(Kline.symbol == symbol, Kline.timeframe == timeframe)
+        .order_by(Kline.open_time.desc())
+        .limit(limit)
+        .all()
+    )
+    df = _klines_to_df(list(reversed(klines)))
+    if df is None or len(df) < min(30, limit):
+        return None
+    indicators = _compute_indicators(df)
+    if not indicators:
+        return None
+    last = df.iloc[-1]
+    first = df.iloc[max(0, len(df) - min(len(df), 20))]
+    close = _safe_float(indicators.get("close"))
+    open_ref = _safe_float(first.get("close"))
+    momentum_pct = ((close - open_ref) / open_ref * 100.0) if open_ref > 0 else 0.0
+    swing_high = _safe_float(df["high"].tail(20).max(), close)
+    swing_low = _safe_float(df["low"].tail(20).min(), close)
+    bb_upper = _safe_float(indicators.get("bb_upper"), close)
+    bb_lower = _safe_float(indicators.get("bb_lower"), close)
+    bb_width_pct = ((bb_upper - bb_lower) / close * 100.0) if close > 0 else 0.0
+    support_distance_pct = ((close - swing_low) / close * 100.0) if close > 0 else 0.0
+    resistance_distance_pct = ((swing_high - close) / close * 100.0) if close > 0 else 0.0
+    trend = "WZROSTOWY"
+    if indicators.get("ema_20") is not None and indicators.get("ema_50") is not None:
+        trend = "WZROSTOWY" if indicators["ema_20"] >= indicators["ema_50"] else "SPADKOWY"
+    return {
+        "timeframe": timeframe,
+        "close": close,
+        "open_time": last["open_time"].isoformat() if "open_time" in last and pd.notna(last["open_time"]) else None,
+        "trend": trend,
+        "momentum_pct": round(momentum_pct, 4),
+        "volatility_pct": round((_safe_float(indicators.get("atr_14")) / close * 100.0) if close > 0 else 0.0, 4),
+        "bb_width_pct": round(bb_width_pct, 4),
+        "support_distance_pct": round(support_distance_pct, 4),
+        "resistance_distance_pct": round(resistance_distance_pct, 4),
+        "swing_high": round(swing_high, 8),
+        "swing_low": round(swing_low, 8),
+        "indicators": indicators,
+    }
+
+
+def build_market_snapshot(
+    db,
+    symbol: str,
+    *,
+    mode: str = "demo",
+    position: Optional[Any] = None,
+    include_orderbook: bool = True,
+    lightweight: bool = False,
+) -> Optional[Dict[str, Any]]:
+    """
+    Formalny snapshot rynku dla decision engine.
+    """
+    from backend.database import MarketData, Position
+    from backend.binance_client import get_binance_client
+    from backend.risk import build_risk_context, evaluate_risk
+
+    sym = (symbol or "").strip().upper().replace("/", "").replace("-", "")
+    if not sym:
+        return None
+
+    latest = (
+        db.query(MarketData)
+        .filter(MarketData.symbol == sym)
+        .order_by(MarketData.timestamp.desc())
+        .first()
+    )
+    if latest is None:
+        return None
+
+    binance = get_binance_client()
+    current_price = _safe_float(latest.price)
+    bid = _safe_float(latest.bid, current_price)
+    ask = _safe_float(latest.ask, current_price)
+    spread = max(0.0, ask - bid) if ask > 0 and bid > 0 else 0.0
+    spread_pct = (spread / current_price * 100.0) if current_price > 0 else 0.0
+    data_age_seconds = max(
+        0.0,
+        (utc_now_naive() - latest.timestamp).total_seconds() if latest.timestamp else 999999.0,
+    )
+
+    tf_limits = (
+        {"5m": 120, "1h": 180, "4h": 120}
+        if lightweight
+        else {"1m": 240, "3m": 180, "5m": 160, "15m": 140, "1h": 220, "4h": 160, "1d": 120}
+    )
+    timeframe_data: Dict[str, Any] = {}
+    for tf, limit in tf_limits.items():
+        snap = _load_timeframe_snapshot(db, sym, tf, limit)
+        if snap:
+            timeframe_data[tf] = snap
+
+    primary_tf = timeframe_data.get("1h") or next(iter(timeframe_data.values()), None)
+    low_tf = timeframe_data.get("5m") or timeframe_data.get("3m") or timeframe_data.get("1m")
+    high_tf = timeframe_data.get("4h") or timeframe_data.get("1d") or timeframe_data.get("1h")
+    if primary_tf is None:
+        return None
+
+    indicators_1h = primary_tf.get("indicators") or {}
+    signal_hint = _insight_from_indicators(indicators_1h)
+    regime = get_market_regime()
+
+    position_row = position
+    if position_row is None:
+        position_row = (
+            db.query(Position)
+            .filter(Position.symbol == sym, Position.mode == mode)
+            .order_by(Position.opened_at.desc())
+            .first()
+        )
+
+    qty = _safe_float(getattr(position_row, "quantity", 0.0), 0.0)
+    entry_price = _safe_float(getattr(position_row, "entry_price", 0.0), 0.0)
+    unrealized_gross = ((current_price - entry_price) * qty) if entry_price > 0 and qty > 0 else 0.0
+    stored_total_cost = _safe_float(getattr(position_row, "total_cost", 0.0), 0.0)
+    unrealized_net = unrealized_gross - stored_total_cost
+
+    orderbook = None
+    orderbook_imbalance = 0.0
+    if include_orderbook:
+        try:
+            orderbook = binance.get_orderbook(sym, limit=10)
+            if orderbook:
+                bid_depth = sum(_safe_float(level[1]) for level in orderbook.get("bids", []))
+                ask_depth = sum(_safe_float(level[1]) for level in orderbook.get("asks", []))
+                denom = bid_depth + ask_depth
+                orderbook_imbalance = ((bid_depth - ask_depth) / denom) if denom > 0 else 0.0
+        except Exception:
+            orderbook = None
+
+    exchange_filters = binance.get_allowed_symbols().get(sym, {})
+    atr = _safe_float(indicators_1h.get("atr_14"))
+    tp_price = _safe_float(getattr(position_row, "planned_tp", 0.0), 0.0)
+    sl_price = _safe_float(getattr(position_row, "planned_sl", 0.0), 0.0)
+    if tp_price <= 0 and atr > 0:
+        tp_price = current_price + atr * 2.2
+    if sl_price <= 0 and atr > 0:
+        sl_price = current_price - atr * 1.4
+
+    target_for_costs = tp_price if tp_price > 0 else current_price + atr * 2.2 if atr > 0 else current_price
+    taker_fee_rate = _safe_float(exchange_filters.get("taker_fee_rate"), 0.001)
+    maker_fee_rate = _safe_float(exchange_filters.get("maker_fee_rate"), 0.0)
+    economics = estimate_trade_costs(
+        price=current_price,
+        quantity=max(qty, max(_safe_float(exchange_filters.get("min_qty"), 0.0), 1.0 if current_price < 1 else 0.01)),
+        maker_fee_rate=maker_fee_rate,
+        taker_fee_rate=taker_fee_rate if taker_fee_rate > 0 else 0.001,
+        slippage_bps=5.0,
+        spread_bps=max(spread_pct * 100.0, 3.0),
+        target_price=target_for_costs,
+    )
+
+    if lightweight:
+        risk_decision = {
+            "allowed": True,
+            "risk_score": 0.0,
+            "warnings": [],
+            "reason_codes": ["LIGHTWEIGHT_SNAPSHOT"],
+            "requires_human_review": False,
+        }
+    else:
+        risk_context = build_risk_context(
+            db,
+            symbol=sym,
+            side="SELL" if qty > 0 else "BUY",
+            notional=max(current_price * max(qty, 0.0), current_price),
+            strategy_name="ai_trader_flow",
+            mode=mode,
+            signal_summary=signal_hint,
+        )
+        risk_decision = evaluate_risk(risk_context).to_dict()
+
+    snapshot = {
+        "symbol": sym,
+        "mode": mode,
+        "timestamp": utc_now_naive().isoformat(),
+        "source_freshness": {
+            "market_data_age_seconds": round(data_age_seconds, 2),
+            "is_stale": data_age_seconds > 120.0,
+        },
+        "market": {
+            "price": round(current_price, 8),
+            "bid": round(bid, 8),
+            "ask": round(ask, 8),
+            "spread": round(spread, 8),
+            "spread_pct": round(spread_pct, 6),
+            "volume": _safe_float(latest.volume),
+            "orderbook_imbalance": round(orderbook_imbalance, 6),
+            "orderbook": orderbook,
+        },
+        "timeframes": timeframe_data,
+        "trend_low_tf": (low_tf or primary_tf).get("trend") if (low_tf or primary_tf) else "BRAK DANYCH",
+        "trend_high_tf": (high_tf or primary_tf).get("trend") if (high_tf or primary_tf) else "BRAK DANYCH",
+        "momentum": {
+            "low_tf_pct": _safe_float((low_tf or primary_tf).get("momentum_pct")),
+            "primary_tf_pct": _safe_float(primary_tf.get("momentum_pct")),
+            "high_tf_pct": _safe_float((high_tf or primary_tf).get("momentum_pct")),
+        },
+        "position": {
+            "has_position": bool(position_row and qty > 0),
+            "entry_price": round(entry_price, 8) if entry_price > 0 else None,
+            "current_qty": round(qty, 8),
+            "planned_tp": round(tp_price, 8) if tp_price > 0 else None,
+            "planned_sl": round(sl_price, 8) if sl_price > 0 else None,
+            "unrealized_gross_pnl": round(unrealized_gross, 8),
+            "unrealized_net_pnl": round(unrealized_net, 8),
+            "stored_total_cost": round(stored_total_cost, 8),
+        },
+        "costs": economics,
+        "technical_levels": {
+            "support_price": (primary_tf or {}).get("swing_low"),
+            "resistance_price": (primary_tf or {}).get("swing_high"),
+            "distance_to_tp_pct": round(((tp_price - current_price) / current_price * 100.0), 4) if current_price > 0 and tp_price > 0 else None,
+            "distance_to_sl_pct": round(((current_price - sl_price) / current_price * 100.0), 4) if current_price > 0 and sl_price > 0 else None,
+            "distance_to_break_even_pct": round(((economics["break_even_price"] - current_price) / current_price * 100.0), 4) if current_price > 0 else None,
+        },
+        "market_regime": regime,
+        "risk": risk_decision,
+        "signal_hint": signal_hint,
+        "exchange_filters": exchange_filters,
+        "alerts": {
+            "market_stale": data_age_seconds > 120.0,
+            "spread_wide": spread_pct > 0.35,
+            "trend_conflict": str((low_tf or primary_tf).get("trend") or "").upper() != str((high_tf or primary_tf).get("trend") or "").upper(),
+        },
+    }
+    return snapshot
+
+
+def _plan_action_label(signal: str, has_position: bool, expected_net_profit: float) -> str:
+    signal = (signal or "HOLD").upper()
+    if has_position:
+        if expected_net_profit <= 0:
+            return "HOLD"
+        if signal == "SELL":
+            return "SELL"
+        if signal == "BUY":
+            return "HOLD"
+        return "HOLD"
+    if signal == "BUY" and expected_net_profit > 0:
+        return "BUY"
+    if signal == "SELL":
+        return "WAIT"
+    return "WAIT"
+
+
+def build_trade_plan_from_snapshot(snapshot: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Deterministyczny fallback/hard guard dla planu transakcji.
+    """
+    market = snapshot.get("market") or {}
+    costs = snapshot.get("costs") or {}
+    position = snapshot.get("position") or {}
+    primary_tf = (snapshot.get("timeframes") or {}).get("1h") or next(iter((snapshot.get("timeframes") or {}).values()), {})
+    indicators = primary_tf.get("indicators") or {}
+    signal_hint = snapshot.get("signal_hint") or {}
+    current_price = _safe_float(market.get("price"))
+    atr = _safe_float(indicators.get("atr_14"))
+    support_price = _safe_float((snapshot.get("technical_levels") or {}).get("support_price"), current_price)
+    resistance_price = _safe_float((snapshot.get("technical_levels") or {}).get("resistance_price"), current_price)
+    trend_low = snapshot.get("trend_low_tf") or "BRAK DANYCH"
+    trend_high = snapshot.get("trend_high_tf") or "BRAK DANYCH"
+    has_position = bool(position.get("has_position"))
+    entry_ref = _safe_float(position.get("entry_price"), current_price)
+    qty = _safe_float(position.get("current_qty"), 0.0)
+    risk = snapshot.get("risk") or {}
+    macd_hist = _safe_float(indicators.get("macd_hist"))
+    adx = _safe_float(indicators.get("adx"))
+    volume_ratio = _safe_float(indicators.get("volume_ratio"), 1.0)
+    momentum_primary = _safe_float((snapshot.get("momentum") or {}).get("primary_tf_pct"))
+    supertrend_dir = _safe_float(indicators.get("supertrend_dir"))
+
+    if atr <= 0 and current_price > 0:
+        atr = current_price * 0.01
+
+    if has_position:
+        entry_price = entry_ref
+        position_size = qty
+    else:
+        entry_price = current_price
+        min_qty = _safe_float((snapshot.get("exchange_filters") or {}).get("min_qty"), 0.0)
+        position_size = max(min_qty, round(50.0 / current_price, 8) if current_price > 0 else min_qty)
+
+    acceptable_entry_range = {
+        "low": round(max(0.0, min(entry_price, support_price, current_price - atr * 0.35)), 8),
+        "high": round(max(entry_price, min(current_price + atr * 0.15, resistance_price, current_price * 1.0025)), 8),
+    }
+    take_profit_price = round(max(current_price, resistance_price, entry_price + atr * 2.2), 8)
+    stop_loss_price = round(max(0.0, min(entry_price - atr * 1.25, support_price if support_price > 0 else entry_price - atr * 1.25)), 8)
+    guard = build_profitability_guard(
+        entry_price=entry_price,
+        target_price=take_profit_price,
+        quantity=max(position_size, 1e-9),
+        maker_fee_rate=_safe_float((snapshot.get("exchange_filters") or {}).get("maker_fee_rate"), 0.0),
+        taker_fee_rate=0.001,
+        slippage_bps=5.0,
+        spread_bps=max(_safe_float(market.get("spread_pct")) * 100.0, 3.0),
+        min_profit_margin_bps=12.0,
+        min_expected_rr=1.2,
+        stop_price=stop_loss_price,
+    )
+    confidence = float(signal_hint.get("confidence") or 0.5)
+    if trend_low == trend_high and trend_low in {"WZROSTOWY", "SPADKOWY"}:
+        confidence = min(0.95, confidence + 0.06)
+    if bool(risk.get("allowed")) is False:
+        confidence = max(0.2, confidence - 0.25)
+
+    expected_net_profit = _safe_float(guard.get("expected_net_profit"))
+    action = _plan_action_label(str(signal_hint.get("signal") or "HOLD"), has_position, expected_net_profit)
+    if not guard.get("eligible"):
+        action = "BLOCK" if not has_position else "HOLD"
+
+    if has_position:
+        break_even_price = max(_safe_float(costs.get("break_even_price")), entry_price)
+        minimal_profit_to_allow_exit = max(_safe_float(costs.get("minimum_profit_price")), break_even_price)
+    else:
+        break_even_price = _safe_float(guard.get("break_even_price"))
+        minimal_profit_to_allow_exit = _safe_float(guard.get("minimum_profit_price"))
+
+    trailing_activation_price = round(max(entry_price, break_even_price) + atr * 0.8, 8)
+    trailing_distance = round(max(atr * 0.75, current_price * 0.0025), 8)
+    plan_status = "ready"
+    invalidation_conditions = []
+    reconsult_triggers = []
+    if trend_low != trend_high and trend_high != "BRAK DANYCH":
+        invalidation_conditions.append("Konflikt trendu między niższym i wyższym interwałem")
+    if _safe_float(market.get("spread_pct")) > 0.35:
+        invalidation_conditions.append("Spread wzrósł ponad bezpieczny poziom")
+    if bool((snapshot.get("market_regime") or {}).get("buy_blocked")) and action == "BUY":
+        invalidation_conditions.append("Reżim rynku blokuje wejście BUY")
+        action = "BLOCK"
+        plan_status = "blocked"
+    buy_setup_confirmed = all([
+        trend_low == "WZROSTOWY",
+        trend_high == "WZROSTOWY",
+        momentum_primary > 0,
+        macd_hist > 0,
+        volume_ratio >= 0.9,
+        supertrend_dir >= 0,
+        adx >= 18,
+    ])
+    if not has_position and action == "BUY" and not buy_setup_confirmed:
+        invalidation_conditions.append("BUY bez pełnego potwierdzenia trendu, momentum i wolumenu")
+        action = "BLOCK"
+        plan_status = "blocked"
+    reconsult_triggers.extend([
+        "Cena wybija poza acceptable_entry_range",
+        "Trend 5m/1h odwraca się względem planu",
+        "Expected net profit spada poniżej zera",
+        "Spread lub slippage rośnie ponad próg ochronny",
+        "Pojawia się risk gate lub kill switch",
+    ])
+
+    risk_score = round(min(1.0, max(0.0, _safe_float(risk.get("risk_score"), 0.0))), 4)
+    trade_quality_score = round(min(1.0, max(0.0, (confidence * 0.55) + (float(guard.get("cost_efficiency_score") or 0.0) * 0.45))), 4)
+    plan = {
+        "action": action,
+        "plan_status": plan_status,
+        "justification": signal_hint.get("reason") or "Plan heurystyczny zbudowany na bazie snapshotu rynku.",
+        "entry_price": round(entry_price, 8),
+        "acceptable_entry_range": acceptable_entry_range,
+        "max_entry_slippage": round(max(current_price * 0.0015, atr * 0.15), 8),
+        "position_size": round(position_size, 8),
+        "take_profit_price": take_profit_price,
+        "stop_loss_price": stop_loss_price,
+        "break_even_price": round(break_even_price, 8),
+        "trailing_activation_price": trailing_activation_price,
+        "trailing_distance": trailing_distance,
+        "minimal_profit_to_allow_exit": round(minimal_profit_to_allow_exit, 8),
+        "expected_gross_profit": round(_safe_float(guard.get("expected_gross_profit")), 8),
+        "expected_total_cost": round(_safe_float(guard.get("total_cost")), 8),
+        "expected_net_profit": round(expected_net_profit, 8),
+        "expected_net_profit_pct": round(_safe_float(guard.get("expected_net_profit_pct")), 8),
+        "expected_time_horizon": "1h-4h" if trend_high == "WZROSTOWY" else "15m-1h",
+        "confidence_score": round(confidence, 4),
+        "risk_score": risk_score,
+        "trade_quality_score": trade_quality_score,
+        "cost_efficiency_score": round(_safe_float(guard.get("cost_efficiency_score")), 4),
+        "rr_ratio": round(_safe_float(guard.get("rr_ratio")), 4),
+        "plan_invalidation_conditions": invalidation_conditions,
+        "reconsult_triggers": reconsult_triggers,
+        "requires_revision": False,
+        "invalidation_reason": None,
+        "last_consulted_at": utc_now_naive().isoformat(),
+    }
+    return plan
+
+
+def _trade_plan_prompt(snapshot: Dict[str, Any]) -> str:
+    return (
+        "Jesteś AI decision engine dla realnego tradera kryptowalut. "
+        "Na podstawie snapshotu rynku zwróć WYŁĄCZNIE JSON z planem transakcji. "
+        "Pole action musi być jednym z: BUY, SELL, HOLD, WAIT, REDUCE, BLOCK. "
+        "Uwzględnij koszty, break-even, expected_net_profit, invalidation i reconsult_triggers. "
+        "Nie wolno zwrócić planu z BUY/SELL, jeśli expected_net_profit <= 0. "
+        "Dane:\n"
+        + json.dumps(snapshot, ensure_ascii=False)
+    )
+
+
+def _normalize_trade_plan(plan: Dict[str, Any], fallback: Dict[str, Any]) -> Dict[str, Any]:
+    normalized = dict(fallback)
+    normalized.update({k: v for k, v in plan.items() if v is not None})
+    action = str(normalized.get("action") or "WAIT").upper()
+    if action not in {"BUY", "SELL", "HOLD", "WAIT", "REDUCE", "BLOCK"}:
+        action = "WAIT"
+    normalized["action"] = action
+    expected_net = _safe_float(normalized.get("expected_net_profit"))
+    if action in {"BUY", "SELL"} and expected_net <= 0:
+        normalized["action"] = "BLOCK" if action == "BUY" else "HOLD"
+        normalized["plan_status"] = "blocked"
+        normalized["invalidation_reason"] = "AI zwróciła plan bez dodatniego expected net profit"
+    normalized["requires_revision"] = bool(normalized.get("requires_revision"))
+    normalized["last_consulted_at"] = normalized.get("last_consulted_at") or utc_now_naive().isoformat()
+    return normalized
+
+
+def _parse_trade_plan_response(text: str, provider: str, fallback: Dict[str, Any]) -> Dict[str, Any]:
+    extracted = _extract_json_from_text(text)
+    if not extracted:
+        log_to_db("ERROR", "analysis", f"{provider}: brak JSON planu transakcji")
+        return fallback
+    try:
+        raw = json.loads(extracted)
+        if isinstance(raw, list) and raw:
+            raw = raw[0]
+        if isinstance(raw, dict):
+            raw["ai_provider"] = provider.lower()
+            return _normalize_trade_plan(raw, fallback)
+    except json.JSONDecodeError as exc:
+        log_to_db("ERROR", "analysis", f"{provider}: błąd parsowania planu JSON: {exc}")
+    return fallback
 
 
 def _compute_quantum_weights(db, symbols: List[str], timeframe: str = "1h", limit: int = 200) -> Dict[str, Dict[str, float]]:
@@ -782,14 +1428,33 @@ def generate_market_insights(db, symbols: List[str], timeframe: str = "1h", limi
 
         if fear_greed is not None:
             fg = int(fear_greed)
+            # Kontekst trendu: htf_bias < 0 = trend spadkowy (4h bearish)
+            # F&G serve as CONTRARIAN signal TYLKO gdy rynek nie jest w silnym trendzie
+            bearish_trend = htf_bias < 0
+            bullish_trend = htf_bias > 0
+            # Dodatkowy wskaźnik siły trendu z indicators
+            supertrend_down = float(indicators.get("supertrend_dir", 0) or 0) < 0
+            obv_down = float(indicators.get("obv_trend", 0) or 0) < 0
+
             if fg <= 20:
-                # Extreme Fear — kontrariański sygnał BUY
-                if insight["signal"] == "BUY":
-                    insight["confidence"] = min(0.95, insight["confidence"] + 0.04)
-                online_notes.append(f"F&G={fg}🔴EkstrStrah(BUY)")
+                # Extreme Fear:
+                # - jeśli rynek w силным trendzie spadkowym → OSTRZEŻENIE przed BUY, nie zachęcaj
+                # - jeśli rynek neutralny lub wzrostowy → kontrariański sygnał BUY
+                if bearish_trend and supertrend_down and obv_down:
+                    # Rynek spada z siłą - Extreme Fear = panika, nie dno
+                    if insight["signal"] == "BUY":
+                        insight["confidence"] = max(0.50, insight["confidence"] - 0.05)
+                    online_notes.append(f"F&G={fg}🔴EkstrStrah+TrendSpad(UWAGA-BUY)")
+                else:
+                    # Brak potwierdzenia trendu spadkowego → kontrariański BUY ma sens
+                    if insight["signal"] == "BUY":
+                        insight["confidence"] = min(0.95, insight["confidence"] + 0.04)
+                    online_notes.append(f"F&G={fg}🔴EkstrStrah(kontr.BUY)")
             elif fg <= 40:
-                if insight["signal"] == "BUY":
+                if insight["signal"] == "BUY" and not (bearish_trend and supertrend_down):
                     insight["confidence"] = min(0.95, insight["confidence"] + 0.02)
+                elif insight["signal"] == "BUY" and bearish_trend and supertrend_down:
+                    insight["confidence"] = max(0.50, insight["confidence"] - 0.02)
                 online_notes.append(f"F&G={fg}🟠Strach")
             elif fg >= 80:
                 # Extreme Greed — kontrariański sygnał SELL
@@ -835,6 +1500,9 @@ def generate_market_insights(db, symbols: List[str], timeframe: str = "1h", limi
         if online_notes:
             insight["reason"] = insight["reason"] + " | " + " ".join(online_notes)
 
+        snapshot = build_market_snapshot(db, symbol, mode="demo")
+        plan = consult_trade_plan(snapshot) if snapshot else None
+
         insights.append(
             {
                 "symbol": symbol,
@@ -848,6 +1516,8 @@ def generate_market_insights(db, symbols: List[str], timeframe: str = "1h", limi
                 "htf_bias": htf_bias,
                 "fear_greed": fear_greed,
                 "coingecko": coingecko,
+                "snapshot": snapshot,
+                "plan": plan,
                 "timestamp": utc_now_naive().isoformat(),
             }
         )
@@ -1118,6 +1788,7 @@ def _heuristic_ranges(insights: List[Dict]) -> List[Dict]:
                 "sell_action": sell_action,
                 "sell_target": sell_target,
                 "comment": comment,
+                "origin": "heuristic",
             }
         )
 
@@ -1168,7 +1839,7 @@ def _sanitize_api_keys(msg: str) -> str:
 
 
 def _parse_ranges_response(text: str, provider: str) -> List[Dict]:
-    """Parsuje JSON z odpowiedzi LLM, zwraca listę zakresów."""
+    """Parsuje JSON z odpowiedzi LLM, zwraca listę zakresów z oznaczeniem origin."""
     extracted = _extract_json_from_text(text)
     if not extracted:
         log_to_db("ERROR", "analysis", f"{provider}: brak JSON do parsowania w odpowiedzi")
@@ -1176,6 +1847,10 @@ def _parse_ranges_response(text: str, provider: str) -> List[Dict]:
     try:
         ranges = json.loads(extracted)
         if isinstance(ranges, list):
+            origin_label = f"ai:{provider.lower()}"
+            for r in ranges:
+                if isinstance(r, dict):
+                    r["origin"] = origin_label
             return ranges
     except json.JSONDecodeError as exc:
         log_to_db("ERROR", "analysis", f"{provider}: błąd parsowania JSON: {exc}")
@@ -1210,6 +1885,15 @@ def _gemini_ranges(insights: List[Dict], force: bool = False) -> List[Dict]:
 
     try:
         resp = requests.post(url, json=payload, timeout=30)
+        if resp.status_code == 429:
+            # P1-FIX: Rate limit — specjalne logowanie + dłuższy backoff
+            _last_gemini_error_ts = utc_now_naive()
+            log_to_db(
+                "WARNING", "analysis",
+                f"Gemini HTTP 429 — RATE LIMIT. AI_PROVIDER_RATE_LIMITED. "
+                f"FALLBACK_ANALYSIS_ACTIVE. Backoff {backoff_seconds}s → heurystyka ATR/Bollinger."
+            )
+            return []
         if resp.status_code >= 400:
             _last_gemini_error_ts = utc_now_naive()
             log_to_db("ERROR", "analysis", f"Gemini HTTP {resp.status_code}: {_sanitize_api_keys(resp.text or '')[:220]}")
@@ -1269,6 +1953,15 @@ def _groq_ranges(insights: List[Dict], force: bool = False) -> List[Dict]:
             json=payload,
             timeout=30,
         )
+        if resp.status_code == 429:
+            # P1-FIX: Rate limit — specjalne logowanie + fallback
+            _last_groq_error_ts = utc_now_naive()
+            log_to_db(
+                "WARNING", "analysis",
+                f"Groq HTTP 429 — RATE LIMIT. AI_PROVIDER_RATE_LIMITED. "
+                f"FALLBACK_ANALYSIS_ACTIVE. Backoff {backoff_seconds}s → heurystyka ATR/Bollinger."
+            )
+            return []
         if resp.status_code >= 400:
             _last_groq_error_ts = utc_now_naive()
             log_to_db("ERROR", "analysis", f"Groq HTTP {resp.status_code}: {_sanitize_api_keys(resp.text or '')[:220]}")
@@ -1370,21 +2063,24 @@ def _openai_ranges(insights: List[Dict], force: bool = False) -> List[Dict]:
     if not api_key:
         return []
 
-    model = os.getenv("OPENAI_MODEL", "gpt-5-mini")
+    model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
     backoff_seconds = int(os.getenv("OPENAI_BACKOFF_SECONDS", "600"))
     global _last_openai_error_ts
     if (not force) and _last_openai_error_ts and (utc_now_naive() - _last_openai_error_ts).total_seconds() < backoff_seconds:
         return []
     payload = {
         "model": model,
-        "input": (
-            _RANGES_SYSTEM_PROMPT + "\nDane: " + json.dumps(insights, ensure_ascii=False)
-        ),
+        "messages": [
+            {"role": "system", "content": _RANGES_SYSTEM_PROMPT},
+            {"role": "user", "content": "Dane: " + json.dumps(insights, ensure_ascii=False)},
+        ],
+        "max_tokens": 2000,
+        "temperature": 0.2,
     }
 
     try:
         resp = requests.post(
-            "https://api.openai.com/v1/responses",
+            "https://api.openai.com/v1/chat/completions",
             headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
             json=payload,
             timeout=25,
@@ -1401,15 +2097,11 @@ def _openai_ranges(insights: List[Dict], force: bool = False) -> List[Dict]:
                 log_to_db("ERROR", "analysis", f"OpenAI HTTP {resp.status_code}: {_sanitize_api_keys(resp.text or '')[:220]}")
             return []
         data = resp.json()
-        text = data.get("output_text")
-        if not text:
-            output = data.get("output", [])
-            parts = []
-            for item in output:
-                for c in item.get("content", []):
-                    if c.get("type") == "output_text" and c.get("text"):
-                        parts.append(c["text"])
-            text = "\n".join(parts)
+        # chat/completions zwraca content przez choices[0].message.content
+        try:
+            text = data["choices"][0]["message"]["content"]
+        except (KeyError, IndexError, TypeError):
+            text = data.get("output_text") or ""
         if not text:
             return []
         result = _parse_ranges_response(text, "OpenAI")
@@ -1423,16 +2115,206 @@ def _openai_ranges(insights: List[Dict], force: bool = False) -> List[Dict]:
         return []
 
 
+def consult_trade_plan(
+    snapshot: Dict[str, Any],
+    force: bool = False,
+    *,
+    allow_remote: bool = True,
+) -> Dict[str, Any]:
+    """
+    Hybrydowy bridge: LLM zwraca plan, fallback to plan heurystyczny.
+    """
+    fallback = build_trade_plan_from_snapshot(snapshot)
+    provider = os.getenv("AI_PROVIDER", "auto").strip().lower()
+    prompt = _trade_plan_prompt(snapshot)
+
+    def _gemini_plan() -> Dict[str, Any]:
+        api_key = (os.getenv("GEMINI_API_KEY", "") or "").strip()
+        if not api_key:
+            return fallback
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{os.getenv('GEMINI_MODEL', 'gemini-2.0-flash')}:generateContent?key={api_key}"
+        payload = {
+            "contents": [{"parts": [{"text": prompt}]}],
+            "generationConfig": {"temperature": 0.1, "maxOutputTokens": 4096},
+        }
+        try:
+            resp = requests.post(url, json=payload, timeout=25)
+            if resp.status_code >= 400:
+                return fallback
+            data = resp.json()
+            candidates = data.get("candidates", [])
+            text = ""
+            if candidates:
+                text = "".join(p.get("text", "") for p in candidates[0].get("content", {}).get("parts", []))
+            return _parse_trade_plan_response(text, "gemini", fallback) if text else fallback
+        except Exception:
+            return fallback
+
+    def _groq_plan() -> Dict[str, Any]:
+        api_key = (os.getenv("GROQ_API_KEY", "") or "").strip()
+        if not api_key:
+            return fallback
+        payload = {
+            "model": os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile"),
+            "messages": [
+                {"role": "system", "content": "Zwróć tylko JSON planu transakcji."},
+                {"role": "user", "content": prompt},
+            ],
+            "temperature": 0.1,
+            "max_tokens": 2048,
+        }
+        try:
+            resp = requests.post(
+                "https://api.groq.com/openai/v1/chat/completions",
+                headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+                json=payload,
+                timeout=25,
+            )
+            if resp.status_code >= 400:
+                return fallback
+            text = (((resp.json() or {}).get("choices") or [{}])[0].get("message") or {}).get("content", "")
+            return _parse_trade_plan_response(text, "groq", fallback) if text else fallback
+        except Exception:
+            return fallback
+
+    def _openai_plan() -> Dict[str, Any]:
+        api_key = _get_openai_api_key()
+        if not api_key:
+            return fallback
+        payload = {
+            "model": os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
+            "messages": [
+                {"role": "system", "content": "Zwróć tylko JSON planu transakcji."},
+                {"role": "user", "content": prompt},
+            ],
+            "temperature": 0.1,
+            "max_tokens": 2048,
+        }
+        try:
+            resp = requests.post(
+                "https://api.openai.com/v1/chat/completions",
+                headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+                json=payload,
+                timeout=25,
+            )
+            if resp.status_code >= 400:
+                return fallback
+            text = ((((resp.json() or {}).get("choices") or [{}])[0]).get("message") or {}).get("content", "")
+            return _parse_trade_plan_response(text, "openai", fallback) if text else fallback
+        except Exception:
+            return fallback
+
+    def _ollama_plan() -> Dict[str, Any]:
+        base_url = (os.getenv("OLLAMA_BASE_URL", "http://localhost:11434") or "").rstrip("/")
+        payload = {
+            "model": os.getenv("OLLAMA_MODEL", "qwen2.5:1.5b"),
+            "messages": [
+                {"role": "system", "content": "Zwróć tylko JSON planu transakcji."},
+                {"role": "user", "content": prompt},
+            ],
+            "temperature": 0.1,
+            "max_tokens": 2048,
+        }
+        try:
+            resp = requests.post(f"{base_url}/v1/chat/completions", json=payload, timeout=35)
+            if resp.status_code >= 400:
+                return fallback
+            text = ((((resp.json() or {}).get("choices") or [{}])[0]).get("message") or {}).get("content", "")
+            return _parse_trade_plan_response(text, "ollama", fallback) if text else fallback
+        except Exception:
+            return fallback
+
+    if not allow_remote or provider == "heuristic" or provider == "offline":
+        plan = fallback
+    elif provider == "gemini":
+        plan = _gemini_plan()
+    elif provider == "groq":
+        plan = _groq_plan()
+    elif provider == "openai":
+        plan = _openai_plan()
+    elif provider == "ollama":
+        plan = _ollama_plan()
+    else:
+        plan = _gemini_plan()
+        if plan == fallback:
+            plan = _groq_plan()
+        if plan == fallback:
+            plan = _openai_plan()
+        if plan == fallback:
+            plan = _ollama_plan()
+    if plan == fallback:
+        plan = dict(fallback)
+        plan["ai_provider"] = "heuristic"
+    return plan
+
+
+def evaluate_plan_revision(snapshot: Dict[str, Any], plan: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Sprawdza, czy plan wymaga rewizji po zmianie rynku.
+    """
+    market = snapshot.get("market") or {}
+    position = snapshot.get("position") or {}
+    current_price = _safe_float(market.get("price"))
+    spread_pct = _safe_float(market.get("spread_pct"))
+    trend_low = snapshot.get("trend_low_tf")
+    trend_high = snapshot.get("trend_high_tf")
+    expected_net = _safe_float(plan.get("expected_net_profit"))
+    action = str(plan.get("action") or "WAIT").upper()
+    entry_price = _safe_float(plan.get("entry_price"), current_price)
+    entry_range = plan.get("acceptable_entry_range") or {}
+    entry_low = _safe_float(entry_range.get("low"), entry_price)
+    entry_high = _safe_float(entry_range.get("high"), entry_price)
+    stop_loss_price = _safe_float(plan.get("stop_loss_price"))
+    break_even_price = _safe_float(plan.get("break_even_price"))
+    has_position = bool(position.get("has_position"))
+
+    triggers: List[str] = []
+    if current_price <= 0:
+        triggers.append("Brak poprawnej ceny rynkowej")
+    if spread_pct > 0.35:
+        triggers.append("Spread przekroczył bezpieczny próg")
+    if action == "BUY" and (current_price < entry_low or current_price > entry_high):
+        triggers.append("Cena wyszła poza akceptowalny zakres wejścia")
+    if trend_low and trend_high and trend_low != trend_high and trend_high != "BRAK DANYCH":
+        triggers.append("Konflikt trendu między TF")
+    if expected_net <= 0:
+        triggers.append("Expected net profit przestał być dodatni")
+    if has_position and stop_loss_price > 0 and current_price < stop_loss_price:
+        triggers.append("Cena spadła poniżej poziomu obrony planu")
+    if has_position and break_even_price > 0 and current_price < break_even_price and action not in {"SELL", "REDUCE"}:
+        triggers.append("Cena wróciła poniżej break-even planu")
+
+    return {
+        "requires_revision": bool(triggers),
+        "invalidation_reason": "; ".join(triggers) if triggers else None,
+        "triggers": triggers,
+    }
+
+
 def persist_insights_as_signals(db, insights: List[Dict]):
-    """Zapisz insighty jako sygnały AI."""
+    """Zapisz insighty jako sygnały AI — z oznaczeniem origin zakresu (ai vs heuristic)."""
     for ins in insights:
+        # Wzbogać indicators o metadane range (origin, buy_low, sell_low)
+        # bez zmiany schematu DB — pola diagnostyczne embedded w JSON
+        ind_data = dict(ins.get("indicators") or {})
+        rng = ins.get("range")
+        if rng:
+            ind_data["range_origin"] = rng.get("origin", "unknown")
+            ind_data["range_buy_low"] = rng.get("buy_low")
+            ind_data["range_sell_low"] = rng.get("sell_low")
         signal = Signal(
             symbol=ins["symbol"],
             signal_type=ins["signal_type"],
             confidence=ins["confidence"],
             price=ins.get("price") or 0.0,
-            indicators=json.dumps(ins.get("indicators", {})),
+            indicators=json.dumps(ind_data),
             reason=ins.get("reason", ""),
+            snapshot_json=json.dumps(ins.get("snapshot")) if ins.get("snapshot") is not None else None,
+            plan_json=json.dumps(ins.get("plan")) if ins.get("plan") is not None else None,
+            plan_status=((ins.get("plan") or {}).get("plan_status") if isinstance(ins.get("plan"), dict) else "draft") or "draft",
+            requires_revision=bool((ins.get("plan") or {}).get("requires_revision")) if isinstance(ins.get("plan"), dict) else False,
+            invalidation_reason=((ins.get("plan") or {}).get("invalidation_reason") if isinstance(ins.get("plan"), dict) else None),
+            last_consulted_at=utc_now_naive(),
             timestamp=utc_now_naive(),
         )
         db.add(signal)
@@ -1521,28 +2403,64 @@ def maybe_generate_insights_and_blog(db, symbols: List[str], force: bool = False
         if not insights:
             return None
 
+        # T-18: AI zakresy tylko dla top-N symboli (oszczędność tokenów API).
+        # Kryterium sortowania: confidence × max(volume_ratio, 0.5).
+        # Reszta watchlisty → heurystyka ATR (szybka, bezkosztowa).
+        ai_top_n = int(os.getenv("AI_TOP_SYMBOLS", "5"))
         provider = os.getenv("AI_PROVIDER", "auto").strip().lower()
+
+        if provider in ("heuristic", "offline") or len(insights) <= ai_top_n:
+            top_insights = insights
+            rest_insights: List[Dict] = []
+        else:
+            sorted_ins = sorted(
+                insights,
+                key=lambda ins: float(ins.get("confidence", 0.5)) * max(
+                    float(ins.get("indicators", {}).get("volume_ratio") or 1.0), 0.5
+                ),
+                reverse=True,
+            )
+            top_insights = sorted_ins[:ai_top_n]
+            rest_insights = sorted_ins[ai_top_n:]
+
+        # Heurystyka dla symboli poza top-N (kalkulowana raz, taniej)
+        heuristic_ranges_rest = _heuristic_ranges(rest_insights) if rest_insights else []
+
         if provider in ("heuristic", "offline"):
             ranges = _heuristic_ranges(insights)
         elif provider == "gemini":
-            ranges = _gemini_ranges(insights, force=force) or _heuristic_ranges(insights)
+            ranges = _gemini_ranges(top_insights, force=force) or _heuristic_ranges(top_insights)
         elif provider == "groq":
-            ranges = _groq_ranges(insights, force=force) or _heuristic_ranges(insights)
+            ranges = _groq_ranges(top_insights, force=force) or _heuristic_ranges(top_insights)
         elif provider == "ollama":
-            ranges = _ollama_ranges(insights, force=force) or _heuristic_ranges(insights)
+            ranges = _ollama_ranges(top_insights, force=force) or _heuristic_ranges(top_insights)
         elif provider == "openai":
-            ranges = _openai_ranges(insights, force=force) or _heuristic_ranges(insights)
+            ranges = _openai_ranges(top_insights, force=force) or _heuristic_ranges(top_insights)
         else:
-            # auto (default): próbuj kolejno Ollama → Gemini → Groq → OpenAI → heurystyka
+            # auto (default): próbuj kolejno Gemini → Groq → OpenAI → Ollama (lokalne) → heurystyka
             ranges = (
-                _ollama_ranges(insights, force=force)
-                or _gemini_ranges(insights, force=force)
-                or _groq_ranges(insights, force=force)
-                or _openai_ranges(insights, force=force)
-                or _heuristic_ranges(insights)
+                _gemini_ranges(top_insights, force=force)
+                or _groq_ranges(top_insights, force=force)
+                or _openai_ranges(top_insights, force=force)
+                or _ollama_ranges(top_insights, force=force)
+                or _heuristic_ranges(top_insights)
             )
 
+        # Scal zakresy: AI (top-N) + heurystyka (reszta watchlisty)
+        ranges = list(ranges) + heuristic_ranges_rest
+
         insights = _merge_ranges_with_insights(insights, ranges)
+
+        # Log diagnostyczny: ile symboli dostało AI vs heurystykę
+        ai_syms = [r.get("symbol") for r in ranges if (r.get("origin") or "").startswith("ai:")]
+        heu_syms = [r.get("symbol") for r in ranges if r.get("origin") == "heuristic"]
+        log_to_db(
+            "INFO", "analysis",
+            f"T-18 ranges: AI({provider})={len(ai_syms)} symboli"
+            + (f" [{','.join(ai_syms[:5])}{'...' if len(ai_syms)>5 else ''}]" if ai_syms else " [fallback→heuristic]")
+            + f"; heuristic={len(heu_syms)} symboli",
+            db=db,
+        )
 
         persist_insights_as_signals(db, insights)
         post = generate_blog_post(db, insights)

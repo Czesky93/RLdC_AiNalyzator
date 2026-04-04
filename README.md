@@ -1,110 +1,75 @@
-# RLdC AiNalyzator – Trading Bot v0.7 beta
+# RLdC AiNalyzator / RLdC Trading Bot
 
-Autonomiczny bot tradingowy na kryptowaluty z FastAPI backendem, Next.js portalem webowym i integracją z Binance + Telegram.
+System działa jako hybrydowy trader AI:
+- program sam buduje snapshot rynku,
+- liczy wskaźniki i koszty,
+- tworzy plan transakcji z entry / TP / SL / break-even,
+- monitoruje plan i oznacza rewizję przy zmianie warunków,
+- blokuje wejścia i wyjścia bez przewagi netto,
+- w LIVE pilnuje zgodności z filtrami Binance.
 
-## Przegląd systemu
+## Najważniejsze elementy
 
-- 📈 **Silnik decyzyjny** – heurystyczny sygnalizator (RSI, EMA, trend, wolumen) bez zależności od OpenAI
-- 🔒 **10-warstwowy system ryzyka** – kill switch, daily drawdown, loss streak, limity ekspozycji
-- 🗄️ **SQLite z pełnym audytem** – każda decyzja logowana w `DecisionTrace` z `reason_code` i filtry diagnostyczne
-- 📊 **Portal webowy** – dark-theme dashboard z trybem DEMO/LIVE, wykresy TradingView, widoki pozycji i sygnałów
-- 🤖 **Telegram bot** – powiadomienia, potwierdzenia transakcji, podgląd statusu systemu
-- 🗂️ **Config Snapshot** – wersjonowanie konfiguracji, porównywanie wydajności między konfiguracjami
-
-## Struktura projektu
-
-```
-backend/          # Serwer FastAPI + silnik tradingowy
-  app.py          # Punkt startowy (API + kolektor)
-  collector.py    # Główna pętla decyzji — REST + WebSocket
-  risk.py         # 10 bram ryzyka w evaluate_risk()
-  database.py     # Modele SQLAlchemy + helpery DB
-  accounting.py   # PnL, koszty, snapshoty ryzyka
-  reporting.py    # Raporty analityczne
-  runtime_settings.py  # Konfiguracja z ENV + RuntimeSetting (hot-reload)
-  routers/        # Endpointy FastAPI
-    account.py    # Portfel, KPI, Stan systemu
-    market.py     # Klines, ticker, scanner, prognoza
-    orders.py     # Historia zleceń, statystyki
-    positions.py  # Otwarte pozycje, analiza
-    signals.py    # Sygnały, execution-trace, szansa rynkowa
-    control.py    # Sterowanie (start/stop kolektora, parametry)
-    portfolio.py  # Wealth, equity, prognozy portfela
-    blog.py       # Blog AI (posty generowane automatycznie)
-    debug.py      # /state-consistency — diagnostyka stanu
-    telegram_intel.py  # Telegram Intelligence — AI analiza wiadomości
-telegram_bot/     # Bot Telegram (powiadomienia + potwierdzenia)
-web_portal/       # Frontend Next.js 16 + Tailwind CSS v4
-tests/            # Testy smoke (181 testów)
-docs/             # Dokumentacja wewnętrzna
-```
+- Backend: FastAPI + collector + silnik decyzji w `backend/`
+- Frontend: Next.js w `web_portal/`
+- Telegram: bot sterujący i raportujący w `telegram_bot/`
+- Baza: SQLite domyślnie, z trwałym audytem sygnałów, pozycji, zleceń i planów
 
 ## Wymagania
 
+- Ubuntu
 - Python 3.11+
-- Node.js 20.9+
-- Konto Binance z kluczami API (read + spot trading)
-- Bot Telegram (opcjonalnie — dla powiadomień)
+- Node.js 20+
+- `python -m venv`
 
-## Uruchomienie od zera (Ubuntu)
-
-### 1. Klonowanie i środowisko
+## Szybki start od zera
 
 ```bash
 git clone <repo-url>
 cd RLdC_AiNalyzator
-
 python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
+cp .env.example .env
 ```
 
-### 2. Konfiguracja `.env`
-
-```bash
-cp .env.example .env   # jeśli brak, utwórz ręcznie
-```
-
-Minimalne zmienne środowiskowe:
+## Minimalne `.env`
 
 ```env
-BINANCE_API_KEY=...
-BINANCE_API_SECRET=...
-TRADING_MODE=demo            # demo lub live
-PORTFOLIO_QUOTES=EUR,USDC    # quote currencies z portfela Binance
-DEMO_INITIAL_BALANCE=10000   # startowy balans DEMO w EUR
+TRADING_MODE=demo
+DATABASE_URL=sqlite:///./rldc_trading.db
+DEMO_INITIAL_BALANCE=10000
+ADMIN_TOKEN=
 
-# Opcjonalnie — Telegram
-TELEGRAM_BOT_TOKEN=...
-TELEGRAM_CHAT_ID=...
+BINANCE_API_KEY=
+BINANCE_API_SECRET=
 
-# Opcjonalnie — OpenAI (blog AI, analizy GPT)
-OPENAI_API_KEY=...
+TELEGRAM_BOT_TOKEN=
+TELEGRAM_CHAT_ID=
+
+OPENAI_API_KEY=
+GROQ_API_KEY=
+GEMINI_API_KEY=
+OLLAMA_BASE_URL=
 ```
 
-> **Ważne**: Bot działa bez `OPENAI_API_KEY` — sygnały generowane są heurystycznie.
+Uwagi:
+- `TRADING_MODE=demo|live`
+- bez kluczy Binance system działa w trybie publicznych danych / demo
+- bez klucza LLM działa fallback heurystyczny i nadal generuje plan transakcji
 
-### 3. Start backendu
+## Uruchomienie backendu
 
 ```bash
 source .venv/bin/activate
 python -m backend.app
 ```
 
-API dostępne pod `http://localhost:8000`  
-Dokumentacja Swagger: `http://localhost:8000/docs`
+Backend:
+- API: `http://localhost:8000`
+- Swagger: `http://localhost:8000/docs`
 
-**Tryb dev z hot-reload:**
-```bash
-python -m backend.app --reload
-```
-
-**Start wszystkiego naraz (backend + portal):**
-```bash
-python -m backend.app --all
-```
-
-### 4. Portal webowy (oddzielnie)
+## Uruchomienie WWW
 
 ```bash
 cd web_portal
@@ -112,207 +77,79 @@ npm install
 npm run dev
 ```
 
-Web UI: `http://localhost:3000`
+Frontend:
+- `http://localhost:3000`
 
-### 5. Bot Telegram (opcjonalnie)
+## Uruchomienie Telegram
 
 ```bash
 source .venv/bin/activate
 python -m telegram_bot.bot
 ```
 
+## Tryby pracy
+
+- `DEMO`: zapis do lokalnej bazy, execution bez realnego Binance
+- `LIVE`: realne odczyty i zlecenia Binance, z guardami kosztów i filtrów
+- `BACKTEST`: UI może prezentować ten tryb, ale pełny silnik backtest wymaga dalszej rozbudowy
+
+## Najważniejsze endpointy
+
+- `GET /api/market/summary`
+- `GET /api/market/kline?symbol=BTCEUR&tf=1h`
+- `GET /api/portfolio`
+- `GET /api/portfolio/summary`
+- `GET /api/orders`
+- `GET /api/orders/pending`
+- `GET /api/positions`
+- `GET /api/signals/latest`
+- `GET /api/signals/top10`
+- `GET /api/signals/top5`
+
+Plan transakcji jest zwracany w payloadach pozycji, sygnałów, zleceń i pending orders:
+- `plan_status`
+- `action`
+- `entry_price`
+- `take_profit_price`
+- `stop_loss_price`
+- `break_even_price`
+- `expected_total_cost`
+- `expected_net_profit`
+- `confidence_score`
+- `risk_score`
+- `requires_revision`
+- `last_consulted_at`
+
+## Telegram
+
+Obsługiwane komendy:
+- `/status`
+- `/portfolio`
+- `/positions`
+- `/orders`
+- `/top10`
+- `/top5`
+- `/lastsignal`
+- `/risk`
+- `/blog`
+- `/logs`
+- `/ip`
+
+Bot pokazuje plan tradera: entry, TP, SL, break-even, expected net profit, confidence i status rewizji.
+
 ## Testy
 
 ```bash
 source .venv/bin/activate
-DISABLE_COLLECTOR=true python -m pytest tests/test_smoke.py --tb=short -q
+pytest tests/test_smoke.py -q
+python -m compileall backend telegram_bot tests
 ```
 
-## Potwierdzanie transakcji przez Telegram
+Stan po tej zmianie:
+- `200 passed` w `tests/test_smoke.py`
 
-Komendy bota:
-- `/confirm <ID>` – potwierdza transakcję
-- `/reject <ID>` – odrzuca transakcję
-- `/status` – bieżący stan systemu
+## Ważne ograniczenia
 
-## Kluczowe endpointy API
-
-| Endpoint | Opis |
-|----------|------|
-| `GET /api/account/system-status` | Stan kolektora, WS, tryb |
-| `GET /api/portfolio/wealth?mode=demo` | Equity, balans, PnL |
-| `GET /api/signals/latest?limit=50` | Ostatnie sygnały |
-| `GET /api/signals/execution-trace` | Historia decyzji z powodami |
-| `GET /api/market/scanner` | Top 5 par do handlu |
-| `POST /api/control/state` | Zmiana parametrów, start/stop |
-| `GET /api/reporting/analytics` | Pełny raport analityczny |
-
-## Design System
-
-Dark-theme oparty na kolorach terminala tradingowego:
-- Tło: `#0a1219`, karty: `#111c26`
-- Akcent teal: `#14b8a6`
-- Cały UI w języku polskim
-
-## Reset bazy danych
-
-```bash
-curl -X POST "http://localhost:8000/api/account/reset?scope=full"
-```
-
-Jeśli ustawisz `ADMIN_TOKEN` w `.env`, dodaj nagłówek:
-
-```bash
-curl -X POST "http://localhost:8000/api/account/reset?scope=full" -H "X-Admin-Token: $ADMIN_TOKEN"
-```
-
-## Web confirm/reject pending orders (DEMO)
-
-Poza Telegramem, pending orders da sie obsluzyc z web UI (przyciski Potwierdz/Odrzuc).
-
-API (na start: tylko `mode=demo`, status musi byc `PENDING`, inaczej 409):
-
-```bash
-curl -X POST "http://localhost:8000/api/orders/pending/123/confirm"
-curl -X POST "http://localhost:8000/api/orders/pending/123/reject"
-curl -X POST "http://localhost:8000/api/orders/pending/123/cancel"
-```
-
-Jesli ustawisz `ADMIN_TOKEN`, dodaj naglowek:
-
-```bash
-curl -X POST "http://localhost:8000/api/orders/pending/123/confirm" -H "X-Admin-Token: $ADMIN_TOKEN"
-```
-
-## Web create pending order (DEMO)
-
-Mozesz tez tworzyc pending ordery z web UI (Trade ticket) lub przez API:
-
-```bash
-curl -X POST "http://localhost:8000/api/orders/pending?mode=demo" \
-  -H "Content-Type: application/json" \
-  -d '{"symbol":"BTC/EUR","side":"BUY","quantity":0.01,"price":100.0,"reason":"manual"}'
-```
-
-Jesli ustawisz `ADMIN_TOKEN`, dodaj naglowek `X-Admin-Token`.
-
-## Zamkniecie pozycji (DEMO -> pending SELL)
-
-Zamykanie pozycji robi pending SELL (trzeba potwierdzic).
-
-```bash
-# 100%
-curl -X POST "http://localhost:8000/api/positions/1/close?mode=demo"
-
-# czesciowe (np. 25%)
-curl -X POST "http://localhost:8000/api/positions/1/close?mode=demo&quantity=0.25"
-
-# wszystkie pozycje
-curl -X POST "http://localhost:8000/api/positions/close-all?mode=demo"
-```
-
-Jesli ustawisz `ADMIN_TOKEN`, dodaj naglowek `X-Admin-Token`.
-
-## Control Plane (STOP TRADING)
-
-Stan runtime (z ENV + override z DB):
-
-```bash
-curl "http://localhost:8000/api/control/state"
-```
-
-Wylaczenie DEMO trading (persist do DB):
-
-```bash
-curl -X POST "http://localhost:8000/api/control/state" \
-  -H "Content-Type: application/json" \
-  -d '{"demo_trading_enabled": false}'
-```
-
-Jesli ustawisz `ADMIN_TOKEN`, dodaj naglowek `X-Admin-Token`.
-
-## ENV vs .env
-
-Backend laduje `.env` z `override=false`, wiec zmienne srodowiskowe procesu maja pierwszenstwo przed wartosciami z `.env`.
-
-## Diagnostyka (ważne)
-
-### Szybki test OpenAI (czy klucz jest poprawny)
-
-```bash
-curl "http://localhost:8000/api/account/openai-status"
-```
-
-Jeśli dostaniesz `status=error` i `code=invalid_api_key`, to **OpenAI odrzuca klucz z `.env`** (to nie jest błąd aplikacji).
-
-### Brak kasy / chcesz za free? (AI bez OpenAI)
-
-Możesz uruchomić darmowy „mózg” bez LLM: zakresy i decyzje liczone heurystycznie (ATR/Bollinger).
-
-W `.env` ustaw:
-
-```bash
-AI_PROVIDER=heuristic
-```
-
-Rekomendowane (auto): jeśli masz czasem działające OpenAI, a czasem nie — ustaw:
-
-```bash
-AI_PROVIDER=auto
-```
-
-Potem zrestartuj backend i wymuś analizę:
-
-```bash
-curl -X POST "http://localhost:8000/api/market/analyze-now?force=true"
-```
-
-### Wymuszenie analizy teraz (bez czekania 1h)
-
-```bash
-curl -X POST "http://localhost:8000/api/market/analyze-now?force=true"
-```
-
-### OpenAI nie działa (401 / invalid_api_key)
-
-Jeśli w **Logi** (WWW) lub w `system_logs` widzisz wpisy typu:
-
-- `OpenAI HTTP 401 (invalid_api_key) ...`
-
-to znaczy, że `OPENAI_API_KEY` w `.env` jest niepoprawny lub wygasł. Bot nie wygeneruje zakresów i decyzji dopóki nie podmienisz klucza na poprawny.
-
-### Watchlista pusta mimo sald na Binance
-
-Binance czasem zwraca aktywa z prefiksem `LD*` (Simple Earn/Savings). Program mapuje je na aktywa bazowe (np. `LDBTC` → `BTC`) aby zbudować pary typu `BTCEUR`, `BTCUSDC`.
-
-## Zasady działania bota
-
-- Jeśli `AI_PROVIDER=openai`: OpenAI jest wymagany (brak klucza = bot nie generuje nowych zakresów i wstrzymuje decyzje).
-- Jeśli `AI_PROVIDER=auto`: używa OpenAI jeśli działa, a jeśli nie — przełącza na heurystykę (ATR/Bollinger).
-- Jeśli `AI_PROVIDER=heuristic`: działa darmowy fallback bez OpenAI (ATR/Bollinger).
-- Symbole są pobierane wyłącznie z portfela Binance.
-- Handel działa wyłącznie w trybie DEMO (LIVE wyłączony).
-- Uczenie hybrydowe: krótkie backtesty + bieżące dostrajanie (parametr `LEARNING_DAYS`, domyślnie 180).
-- Uczenie wykonywane co 1h.
-- Telegram: raporty tylko na żądanie (`/report`), alerty tylko przy skrajnych momentach (konfigurowalne progi).
-- Telegram: tryby treści `TELEGRAM_STYLE=brief|layman|tech|both` oraz opcja `TELEGRAM_ERROR_ONLY=true` (wysyła tylko krytyczne alerty).
-- Telegram: raporty uczenia nie są wysyłane automatycznie.
-
-### Maksimum pewności (bardzo konserwatywnie)
-
-Jeśli chcesz **maksimum pewności kosztem liczby transakcji** (bot głównie będzie pisał `CZEKAJ`), w `.env` ustaw:
-
-```bash
-MAX_CERTAINTY_MODE=true
-```
-
-To automatycznie:
-- podnosi progi confidence,
-- wymaga rating `5/5`,
-- ogranicza liczbę transakcji,
-- zwiększa cooldown,
-- zmniejsza ryzyko per trade w DEMO.
-
-## License
-
-*(License information to be added)*
+- LIVE nadal zależy od jakości danych Binance, kluczy API i stabilności sieci
+- pełny autonomiczny loop re-konsultacji istnieje w collectorze i planach, ale dalsze strojenie parametrów wejścia/wyjścia jest nadal wymagane przed agresywnym LIVE
+- UI jest po polsku, ale część starszych widoków nadal wymaga dalszego porządkowania
