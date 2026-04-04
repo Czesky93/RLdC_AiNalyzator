@@ -85,11 +85,13 @@ class BinanceClient:
         self.time_offset_ms = 0
         
         # Inicjalizacja klienta - działa bez kluczy dla publicznych danych
+        # ping=False — pomijamy wstępny ping do api.binance.com/api/v3/ping;
+        # połączenie jest weryfikowane przy faktycznym zapytaniu (lub _sync_time).
         if self.api_key and self.api_secret:
-            self.client = Client(self.api_key, self.api_secret)
+            self.client = Client(self.api_key, self.api_secret, ping=False)
             logger.info("✅ Binance client initialized with API keys")
         else:
-            self.client = Client()
+            self.client = Client(ping=False)
             logger.info("⚠️  Binance client initialized without API keys (public data only)")
 
         self._sync_time()

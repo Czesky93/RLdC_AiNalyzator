@@ -4136,3 +4136,186 @@ def test_acceptance_effective_universe_not_empty(client):
     assert data.get("success") is True
     # Nie wymagamy danych (bo klines mogą być puste w testach),
     # ale endpoint nie powinien crashować
+
+
+# =====================================================================
+# ============ TELEGRAM INTELLIGENCE (ETAP 7) =========================
+# =====================================================================
+
+
+def test_telegram_intel_state_endpoint(client):
+    """GET /api/telegram-intel/state zwraca stan interpretacyjny."""
+    resp = client.get("/api/telegram-intel/state?mode=demo")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data.get("ok") is True
+    state = data.get("data")
+    assert state is not None
+    # Pola obecne zawsze (nawet gdy brak wiadomości)
+    assert "last_signal" in state
+    assert "last_execution" in state
+    assert "system_health_flags" in state
+    assert "decision_bias" in state
+    assert "last_blockers" in state
+    assert "stats" in state
+
+
+def test_telegram_intel_state_live_mode(client):
+    """GET /api/telegram-intel/state działa też dla mode=live."""
+    resp = client.get("/api/telegram-intel/state?mode=live")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data.get("ok") is True
+
+
+def test_telegram_intel_messages_endpoint(client):
+    """GET /api/telegram-intel/messages zwraca listę wiadomości i kategorie."""
+    resp = client.get("/api/telegram-intel/messages?limit=20&since_minutes=120")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data.get("ok") is True
+    assert "count" in data
+    assert "messages" in data
+    assert isinstance(data["messages"], list)
+    assert "categories" in data
+    # Sprawdź wszystkie 7 kategorii
+    cats = data["categories"]
+    assert "SIGNAL_MESSAGE" in cats
+    assert "EXECUTION_MESSAGE" in cats
+    assert "BLOCKER_MESSAGE" in cats
+    assert "RISK_MESSAGE" in cats
+    assert "SYSTEM_STATUS_MESSAGE" in cats
+    assert "OPERATOR_MESSAGE" in cats
+    assert "TARGET_MESSAGE" in cats
+
+
+def test_telegram_intel_log_event_endpoint(client):
+    """POST /api/telegram-intel/log-event zapisuje wiadomość do archiwum."""
+    resp = client.post(
+        "/api/telegram-intel/log-event",
+        json={
+            "text": "Test wiadomości z pytest — BUY BTCEUR confidence=0.75",
+            "source_module": "test_smoke",
+            "direction": "incoming",
+        },
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data.get("ok") is True
+
+
+def test_telegram_intel_log_event_visible_in_messages(client):
+    """Wiadomość zapisana przez log-event pojawia się w /messages."""
+    unique_text = "PYTEST_UNIQUE_MSG_XYZ_12345 BUY ETHEUR"
+
+    # Zapisz wiadomość
+    client.post(
+        "/api/telegram-intel/log-event",
+        json={"text": unique_text, "source_module": "test_smoke", "direction": "incoming"},
+    )
+
+    # Sprawdź że pojawia się w archiwum
+    resp = client.get("/api/telegram-intel/messages?limit=50&since_minutes=60")
+    assert resp.status_code == 200
+    messages = resp.json().get("messages", [])
+    texts = [m.get("text", "") for m in messages]
+    assert any(unique_text in t for t in texts), "Zapisana wiadomość powinna być widoczna w archiwum"
+
+
+def test_telegram_intel_evaluate_goal_position_value(client):
+    """POST /api/telegram-intel/evaluate-goal ocenia cel dla position_value."""
+    resp = client.post(
+        "/api/telegram-intel/evaluate-goal",
+        json={
+            "target_type": "position_value",
+            "current_value": 500.0,
+            "target_value": 650.0,
+            "symbol": "BTCEUR",
+        },
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data.get("ok") is True
+    result = data.get("result")
+    assert result is not None
+    assert "realism" in result
+    assert "required_move_pct" in result
+    assert "time_horizon_estimate" in result
+    assert "explanation_pl" in result
+
+
+def test_telegram_intel_evaluate_goal_portfolio_value(client):
+    """POST /api/telegram-intel/evaluate-goal ocenia cel portfolio_value."""
+    resp = client.post(
+        "/api/telegram-intel/evaluate-goal",
+        json={
+            "target_type": "portfolio_value",
+            "current_value": 10000.0,
+            "target_value": 12000.0,
+        },
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data.get("ok") is True
+    result = data.get("result")
+    assert result is not None
+    assert "realism" in result
+    # required_move_pct = (12000-10000)/10000 * 100 = 20%
+    assert abs(result["required_move_pct"] - 20.0) < 0.01
+
+
+def test_telegram_intel_evaluate_goal_invalid_values(client):
+    """POST /api/telegram-intel/evaluate-goal z zerowymi wartościami zwraca błąd."""
+    resp = client.post(
+        "/api/telegram-intel/evaluate-goal",
+        json={
+            "target_type": "position_value",
+            "current_value": 0.0,
+            "target_value": 100.0,
+        },
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data.get("ok") is True
+    result = data.get("result")
+    # Powinna być informacja o błędzie (realism=error lub explanation_pl)
+    assert result is not None
+    assert "explanation_pl" in result
+
+
+def test_telegram_intel_messages_category_filter(client):
+    """GET /api/telegram-intel/messages filtruje po kategorii."""
+    # Zapisz wiadomość z wyraźnym wzorcem blokerem
+    client.post(
+        "/api/telegram-intel/log-event",
+        json={
+            "text": "cooldown aktywny — wejście zablokowane",
+            "source_module": "test_smoke",
+            "direction": "outgoing",
+        },
+    )
+
+    # Filtruj po kategorii BLOCKER_MESSAGE
+    resp = client.get(
+        "/api/telegram-intel/messages?limit=50&category=BLOCKER_MESSAGE&since_minutes=60"
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data.get("ok") is True
+    assert isinstance(data.get("messages"), list)
+
+
+def test_telegram_intel_state_after_log_event(client):
+    """Stan intel po zapisaniu wiadomości nie crashuje."""
+    client.post(
+        "/api/telegram-intel/log-event",
+        json={
+            "text": "kill switch aktywny — ryzyko",
+            "source_module": "test_smoke",
+            "direction": "outgoing",
+        },
+    )
+    resp = client.get("/api/telegram-intel/state?mode=demo")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data.get("ok") is True
