@@ -2211,11 +2211,19 @@ class DataCollector:
             side = None
             reasons: list[str] = []
             price_tolerance = float(config.get("range_price_tolerance_pct", 0.03))
-            # RSI: permisywny próg — RSI ≤ 65 dla BUY, ≥ 35 dla SELL
+            # RSI: próg z konfiguracji (rsi_buy_gate_max > 0 ustawia podłogę) lub hardcoded 65
+            _rsi_buy_gate_max = float(config.get("rsi_buy_gate_max", 0.0))
+            _rsi_sell_gate_min = float(config.get("rsi_sell_gate_min", 0.0))
             rsi_buy_gate = float(rsi_buy) if rsi_buy is not None else 65.0
-            rsi_buy_gate = max(rsi_buy_gate, 65.0)   # Nie wymagaj głębokiego wyprzedania
+            if _rsi_buy_gate_max > 0.0:
+                rsi_buy_gate = max(rsi_buy_gate, min(_rsi_buy_gate_max, 85.0))
+            else:
+                rsi_buy_gate = max(rsi_buy_gate, 65.0)
             rsi_sell_gate = float(rsi_sell) if rsi_sell is not None else 35.0
-            rsi_sell_gate = min(rsi_sell_gate, 35.0)  # Nie wymagaj głębokiego wykupienia
+            if _rsi_sell_gate_min > 0.0:
+                rsi_sell_gate = min(rsi_sell_gate, max(_rsi_sell_gate_min, 15.0))
+            else:
+                rsi_sell_gate = min(rsi_sell_gate, 35.0)
 
             if sig.signal_type == "BUY" and r.get("buy_low") is not None and r.get("buy_high") is not None:
                 buy_low_tol = float(r.get("buy_low")) * (1 - price_tolerance)
