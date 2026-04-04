@@ -495,6 +495,34 @@ _SETTINGS: Dict[str, SettingSpec] = {
         env_var="ATR_TRAIL_MULT",
         validators=(_validate_positive("atr_trail_mult"),),
     ),
+    # --- Konfigurowalne progi RSI i momentum (odblokowanie tradingu) ---
+    "rsi_buy_gate_max": SettingSpec(
+        key="rsi_buy_gate_max",
+        section="execution",
+        parser=_parse_positive_float,
+        serializer=_serialize_float,
+        default=0.0,  # 0.0 = wyłączone (domyślny cap 55); > 0 = podłoga dla progu RSI BUY
+        env_var="RSI_BUY_GATE_MAX",
+        validators=(_validate_non_negative("rsi_buy_gate_max"),),
+    ),
+    "min_volume_ratio": SettingSpec(
+        key="min_volume_ratio",
+        section="execution",
+        parser=_parse_positive_float,
+        serializer=_serialize_float,
+        default=0.9,  # 0.9 = domyślny próg volume ratio; 0.0 = wyłączone
+        env_var="MIN_VOLUME_RATIO",
+        validators=(_validate_non_negative("min_volume_ratio"),),
+    ),
+    "min_adx_for_entry": SettingSpec(
+        key="min_adx_for_entry",
+        section="execution",
+        parser=_parse_positive_float,
+        serializer=_serialize_float,
+        default=18.0,
+        env_var="MIN_ADX_FOR_ENTRY",
+        validators=(_validate_non_negative("min_adx_for_entry"),),
+    ),
     # --- Trading core: extreme entry filter ---
     "extreme_range_margin_pct": SettingSpec(
         key="extreme_range_margin_pct",
