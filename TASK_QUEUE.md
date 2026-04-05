@@ -27,6 +27,8 @@
 | T-25 | `/api/signals/latest?symbol=` ignorował parametr → dodano filtr `Signal.symbol == symbol` | `routers/signals.py` | DONE |
 | T-26 | entry-readiness używał `_build_live_signals` (live analysis) zamiast Signal z DB → niespójność z collectorem; BNBEUR pokazywał BUY gdy DB ma SELL | `routers/signals.py` | DONE |
 | T-27 | `status_pl = "OKAZJE SĄ"` gdy brak kandydatów BUY (samo SELL bez pozycji) → `BRAK OKAZJI: {reason}` | `routers/signals.py` | DONE |
+| T-28 | Exit engine (TP/SL/trailing) pomijał BTCEUR bo pozycja `synced_from_binance` bez Order → zarządzaj wszystkimi `Position.mode=live` (entry>0, qty>0) | `collector.py` | DONE |
+| T-29 | `_sync_binance_positions` WARNING spam po restarcie dla remnant bez ceny i bez DB position → pomiń jeśli `price_eur is None AND db_qty==0` | `collector.py` | DONE |
 
 ### DONE (zamknięte w sesji 12)
 
