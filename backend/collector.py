@@ -999,8 +999,12 @@ class DataCollector:
                     if _md and _md.price:
                         price_eur = float(_md.price)
                         break
-                # Jeśli znamy cenę i wartość jest poniżej progu — pomijamy (dust)
+                # Jeśli znamy cenę i wartość jest poniżej progu — dust, pomijamy
                 if price_eur is not None and mismatch_qty * price_eur < _min_notional:
+                    continue
+                # Jeśli cena nieznana (brak klines) I bot nie ma tej pozycji w DB
+                # (db_qty==0) — asset jest remnant/leftover, nie jest śledzoną pozycją
+                if price_eur is None and db_qty == 0:
                     continue
                 mismatches.append(f"{asset}: Binance={binance_qty:.8g} DB={db_qty:.8g}")
 
@@ -1541,21 +1545,15 @@ class DataCollector:
 
         positions_all = db.query(Position).filter(Position.mode == mode).all()
         if mode == "live":
-            # LIVE: zarządzaj exit engine TYLKO dla pozycji otwartych przez bota (ma BUY Order)
-            # Pre-existing Binance holdings (bez własnych BUY orders) są pominięte
-            from backend.database import Order as _BotOrd
-
-            _bot_bought = {
-                r[0]
-                for r in db.query(_BotOrd.symbol)
-                .filter(_BotOrd.mode == "live", _BotOrd.side == "BUY")
-                .distinct()
-                .all()
-            }
+            # LIVE: zarządzaj exit engine dla WSZYSTKICH pozycji w DB (mode=live),
+            # włącznie z synced_from_binance. Dust jest wcześniej usuwany przez
+            # _get_live_spot_positions — jeśli coś jest w Position.mode=live,
+            # to jest prawdziwa, śledzona pozycja.
             positions = [
                 p
                 for p in positions_all
-                if p.symbol in _bot_bought
+                if float(p.quantity or 0) > 0
+                and float(p.entry_price or 0) > 0
                 and (p.symbol or "")
                 .strip()
                 .upper()
