@@ -1057,7 +1057,13 @@ def apply_runtime_updates(
     after = _build_effective_flat_config(candidate_overrides)
     changed_keys = [key for key in override_updates.keys() if before.get(key) != after.get(key)]
     if not changed_keys:
-        return {"changed": [], "state": build_runtime_state(db, active_position_count=active_position_count)}
+        state = build_runtime_state(db, active_position_count=active_position_count)
+        return {
+            "changed": [],
+            "state": state,
+            # Keep response shape consistent with the changed-path branch.
+            "snapshot": state.get("config_snapshot"),
+        }
 
     if active_position_count > 0 and any(key in _LIVE_GUARD_KEYS for key in changed_keys):
         raise RuntimeSettingsError(

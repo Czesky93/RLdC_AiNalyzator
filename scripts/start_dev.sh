@@ -28,15 +28,34 @@ else
     echo "[OK] Backend PID: $(cat "$LOG_DIR/backend.pid")"
 fi
 
+if pgrep -f "telegram_bot.bot" >/dev/null 2>&1; then
+    echo "[INFO] Telegram bot już działa — pomijam uruchomienie."
+else
+    echo "[START] Uruchamiam Telegram bot..."
+    cd "$PROJECT_DIR"
+    nohup .venv/bin/python -u -m telegram_bot.bot \
+        > "$LOG_DIR/telegram.log" 2>&1 &
+    echo $! > "$LOG_DIR/telegram.pid"
+    echo "[OK] Telegram PID: $(cat "$LOG_DIR/telegram.pid")"
+fi
+
 if ss -tlnp | grep -q ':3000'; then
     echo "[INFO] Frontend już działa na :3000 — pomijam uruchomienie."
 else
-    echo "[START] Uruchamiam frontend (Next.js :3000)..."
     cd "$PROJECT_DIR/web_portal"
-    nohup npx next dev --hostname 0.0.0.0 --port 3000 \
-        > "$LOG_DIR/frontend.log" 2>&1 &
-    echo $! > "$LOG_DIR/frontend.pid"
-    echo "[OK] Frontend PID: $(cat "$LOG_DIR/frontend.pid")"
+    if [[ -f ".next/BUILD_ID" ]]; then
+        echo "[START] Uruchamiam frontend produkcyjny (next start :3000)..."
+        nohup npx next start --hostname 0.0.0.0 --port 3000 \
+            > "$LOG_DIR/frontend.log" 2>&1 &
+        echo $! > "$LOG_DIR/frontend.pid"
+        echo "[OK] Frontend PROD PID: $(cat "$LOG_DIR/frontend.pid")"
+    else
+        echo "[START] Brak buildu — uruchamiam frontend dev (next dev :3000)..."
+        nohup npx next dev --hostname 0.0.0.0 --port 3000 \
+            > "$LOG_DIR/frontend.log" 2>&1 &
+        echo $! > "$LOG_DIR/frontend.pid"
+        echo "[OK] Frontend DEV PID: $(cat "$LOG_DIR/frontend.pid")"
+    fi
 fi
 
 # ---- Poczekaj na start ----
@@ -66,6 +85,12 @@ check_url "http://localhost:8000/"            "Backend  (localhost)"
 check_url "http://localhost:3000/"            "Frontend (localhost)"
 check_url "http://$LAN_IP:8000/"             "Backend  (LAN)"
 check_url "http://$LAN_IP:3000/"             "Frontend (LAN)"
+
+if pgrep -f "telegram_bot.bot" >/dev/null 2>&1; then
+    echo "  ✅ Telegram bot — DZIAŁA"
+else
+    echo "  ❌ Telegram bot — ZATRZYMANY (sprawdź logs/dev/telegram.log)"
+fi
 
 echo ""
 echo "============================================"

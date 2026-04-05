@@ -2,6 +2,9 @@
 const nextConfig = {
   reactStrictMode: true,
   allowedDevOrigins: ['192.168.0.109'],
+  turbopack: {
+    root: __dirname,
+  },
   async rewrites() {
     return [
       {

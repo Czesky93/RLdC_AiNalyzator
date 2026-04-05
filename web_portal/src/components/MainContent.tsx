@@ -585,6 +585,18 @@ function SymbolDetailPanel({
   const currentPrice: number | null = ticker?.price ?? card?.current_price ?? (forecast as any)?.current_price ?? latestSignal?.price ?? null
   const panelLoading = analysisLoading && tickerLoading
 
+  const formatPrice = (value: number | null | undefined, missing = '--') => {
+    if (value == null || Number.isNaN(value)) return missing
+    if (value < 1) return value.toFixed(6)
+    if (value < 100) return value.toFixed(4)
+    return value.toFixed(2)
+  }
+
+  const formatFixed = (value: number | null | undefined, digits: number, missing = '--') => {
+    if (value == null || Number.isNaN(value)) return missing
+    return value.toFixed(digits)
+  }
+
   return (
     <div
       className="fixed inset-0 z-50 flex items-stretch justify-end"
@@ -693,7 +705,7 @@ function SymbolDetailPanel({
                 <div className="text-[10px] text-slate-500 mb-0.5">Cena teraz</div>
                 <div className="text-xl font-mono font-bold text-slate-100">
                   {currentPrice != null
-                    ? (currentPrice < 1 ? currentPrice.toFixed(6) : currentPrice < 100 ? currentPrice.toFixed(4) : currentPrice.toFixed(2))
+                    ? formatPrice(currentPrice)
                     : '--'} <span className="text-sm font-normal text-slate-500">EUR</span>
                 </div>
               </div>
@@ -701,7 +713,7 @@ function SymbolDetailPanel({
                 <div>
                   <div className="text-[10px] text-slate-500 mb-0.5">Kupiono po</div>
                   <div className="text-xl font-mono font-bold text-slate-300">
-                    {card.entry_price < 1 ? card.entry_price.toFixed(6) : card.entry_price.toFixed(4)} <span className="text-sm font-normal text-slate-500">EUR</span>
+                    {formatPrice(card.entry_price, 'brak danych')} <span className="text-sm font-normal text-slate-500">EUR</span>
                   </div>
                 </div>
               ) : latestSignal ? (
@@ -720,22 +732,22 @@ function SymbolDetailPanel({
                 <div>
                   <div className="text-[10px] text-slate-500 mb-0.5">Wynik</div>
                   <div className={`text-base font-mono font-bold ${pnlColor(card.pnl_eur || 0)}`}>
-                    {(card.pnl_eur >= 0 ? '+' : '')}{card.pnl_eur?.toFixed(2)} EUR
+                    {(card.pnl_eur >= 0 ? '+' : '')}{formatFixed(card.pnl_eur, 2, '0.00')} EUR
                   </div>
                   <div className={`text-[10px] ${pnlColor(card.pnl_pct || 0)}`}>
-                    {(card.pnl_pct >= 0 ? '+' : '')}{card.pnl_pct?.toFixed(2)}%
+                    {(card.pnl_pct >= 0 ? '+' : '')}{formatFixed(card.pnl_pct, 2, '0.00')}%
                   </div>
                 </div>
                 <div>
                   <div className="text-[10px] text-slate-500 mb-0.5">Wartość pozycji</div>
                   <div className="text-base font-mono font-bold text-slate-200">
-                    {card.position_value_eur?.toFixed(2)} EUR
+                    {formatFixed(card.position_value_eur, 2, 'brak danych')} EUR
                   </div>
                 </div>
                 <div>
                   <div className="text-[10px] text-slate-500 mb-0.5">Ilość</div>
                   <div className="text-base font-mono font-bold text-slate-200">
-                    {card.quantity < 1 ? card.quantity.toFixed(6) : card.quantity < 100 ? card.quantity.toFixed(4) : card.quantity.toFixed(2)} {baseCoin}
+                    {formatPrice(card.quantity, 'brak danych')} {baseCoin}
                   </div>
                 </div>
               </div>
@@ -4535,7 +4547,7 @@ function PortfolioView({ mode, onSymbolClick }: { mode: 'demo' | 'live'; onSymbo
                     <td className="py-2 text-slate-200 text-right font-semibold">{item.value_eur.toFixed(2)} EUR</td>
                     <td className="py-2 text-slate-400 text-right">{item.weight_pct}%</td>
                     <td className={`py-2 text-right font-semibold ${pnlCls(item.pnl_eur)}`}>
-                      {item.pnl_eur >= 0 ? '+' : ''}{item.pnl_eur.toFixed(2)} EUR
+                      {item.pnl_eur != null ? `${item.pnl_eur >= 0 ? '+' : ''}${item.pnl_eur.toFixed(2)} EUR` : '--'}
                       <span className="text-[10px] ml-1 opacity-70">({item.pnl_pct >= 0 ? '+' : ''}{item.pnl_pct}%)</span>
                     </td>
                   </tr>

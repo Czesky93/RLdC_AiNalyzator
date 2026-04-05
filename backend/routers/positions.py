@@ -19,6 +19,182 @@ from backend.binance_client import get_binance_client
 router = APIRouter()
 
 
+def _as_float(value: Any) -> float:
+    try:
+        return float(value)
+    except Exception:
+        return 0.0
+
+
+def _trade_ts_to_naive(ts_ms: Any) -> Optional[datetime]:
+    try:
+        ts_int = int(ts_ms)
+    except Exception:
+        return None
+    if ts_int <= 0:
+        return None
+    return datetime.fromtimestamp(ts_int / 1000, tz=timezone.utc).replace(tzinfo=None)
+
+
+def _estimate_live_entry_from_trades(
+    trades: Optional[List[Dict[str, Any]]],
+    current_qty: float,
+) -> tuple[Optional[float], Optional[datetime], str]:
+    """Odtwórz średni koszt aktualnie trzymanej pozycji z historii myTrades."""
+    if current_qty <= 0:
+        return None, None, "no_open_quantity"
+
+    held_qty = 0.0
+    avg_entry = 0.0
+    opened_at: Optional[datetime] = None
+
+    for trade in sorted(trades or [], key=lambda item: int(item.get("time", 0) or 0)):
+        qty = _as_float(trade.get("qty"))
+        price = _as_float(trade.get("price"))
+        if qty <= 0 or price <= 0:
+            continue
+
+        if bool(trade.get("isBuyer")):
+            new_qty = held_qty + qty
+            if held_qty <= 1e-12:
+                opened_at = _trade_ts_to_naive(trade.get("time"))
+            avg_entry = (((avg_entry * held_qty) + (price * qty)) / new_qty) if new_qty > 0 else 0.0
+            held_qty = new_qty
+        else:
+            if held_qty <= 1e-12:
+                continue
+            held_qty = max(0.0, held_qty - qty)
+            if held_qty <= 1e-12:
+                avg_entry = 0.0
+                opened_at = None
+
+    if held_qty <= 1e-12 or avg_entry <= 0:
+        return None, None, "missing_trade_history"
+
+    mismatch = abs(held_qty - current_qty)
+    source = "binance_trade_history"
+    if mismatch > max(1e-6, current_qty * 0.05):
+        source = "binance_trade_history_partial"
+
+    return avg_entry, opened_at, source
+
+
+def _resolve_live_position_baseline(
+    db: Session,
+    symbol: str,
+    quantity: float,
+    current_price: float,
+    *,
+    binance_client: Any,
+) -> Dict[str, Any]:
+    """Znajdź lub odtwórz baseline LIVE i uzupełnij lokalną pozycję, jeśli to możliwe."""
+    now = utc_now_naive()
+    existing = (
+        db.query(Position)
+        .filter(Position.symbol == symbol, Position.mode == "live")
+        .order_by(desc(Position.updated_at), desc(Position.opened_at))
+        .first()
+    )
+
+    if existing and _as_float(existing.entry_price) > 0:
+        entry_price = _as_float(existing.entry_price)
+        unrealized_pnl = (current_price - entry_price) * quantity
+        dirty = False
+
+        if abs(_as_float(existing.quantity) - quantity) > max(1e-8, quantity * 1e-6):
+            existing.quantity = quantity
+            dirty = True
+        if abs(_as_float(existing.current_price) - current_price) > max(1e-8, current_price * 1e-6):
+            existing.current_price = current_price
+            dirty = True
+        if abs(_as_float(existing.unrealized_pnl) - unrealized_pnl) > 1e-8:
+            existing.unrealized_pnl = unrealized_pnl
+            existing.gross_pnl = unrealized_pnl
+            existing.net_pnl = unrealized_pnl
+            dirty = True
+        if dirty:
+            existing.updated_at = now
+
+        return {
+            "entry_price": entry_price,
+            "opened_at": existing.opened_at,
+            "updated_at": existing.updated_at,
+            "unrealized_pnl": unrealized_pnl,
+            "pnl_percent": ((unrealized_pnl / (entry_price * quantity)) * 100) if entry_price > 0 and quantity > 0 else None,
+            "source": "local_live_position",
+            "dirty": dirty,
+        }
+
+    entry_price: Optional[float] = None
+    opened_at: Optional[datetime] = None
+    source = "missing_trade_history"
+    try:
+        trades = binance_client.get_my_trades(symbol, limit=500) or []
+        entry_price, opened_at, source = _estimate_live_entry_from_trades(trades, quantity)
+    except Exception:
+        trades = []
+
+    if entry_price is None:
+        return {
+            "entry_price": None,
+            "opened_at": None,
+            "updated_at": existing.updated_at if existing else None,
+            "unrealized_pnl": None,
+            "pnl_percent": None,
+            "source": source,
+            "dirty": False,
+        }
+
+    unrealized_pnl = (current_price - entry_price) * quantity
+    if existing:
+        existing.entry_price = entry_price
+        existing.quantity = quantity
+        existing.current_price = current_price
+        existing.unrealized_pnl = unrealized_pnl
+        existing.gross_pnl = unrealized_pnl
+        existing.net_pnl = unrealized_pnl
+        existing.updated_at = now
+        existing.opened_at = opened_at or existing.opened_at or now
+        existing.entry_reason_code = "synced_from_binance"
+    else:
+        existing = Position(
+            symbol=symbol,
+            side="LONG",
+            entry_price=entry_price,
+            quantity=quantity,
+            current_price=current_price,
+            unrealized_pnl=unrealized_pnl,
+            gross_pnl=unrealized_pnl,
+            net_pnl=unrealized_pnl,
+            total_cost=0.0,
+            fee_cost=0.0,
+            slippage_cost=0.0,
+            spread_cost=0.0,
+            mode="live",
+            opened_at=opened_at or now,
+            updated_at=now,
+            entry_reason_code="synced_from_binance",
+        )
+        db.add(existing)
+        # Flush natychmiast — zapobiegamy duplikatom przy równoległych wywołaniach
+        # w tej samej sesji i usprawniamy widoczność dla kolejnych zapytań
+        try:
+            db.flush()
+        except Exception:
+            db.rollback()
+            raise
+
+    return {
+        "entry_price": entry_price,
+        "opened_at": existing.opened_at,
+        "updated_at": existing.updated_at,
+        "unrealized_pnl": unrealized_pnl,
+        "pnl_percent": ((unrealized_pnl / (entry_price * quantity)) * 100) if entry_price > 0 and quantity > 0 else None,
+        "source": source,
+        "dirty": True,
+    }
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Helper: Buduj listę LIVE spot positions z Binance (źródło prawdy dla LIVE)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -30,22 +206,57 @@ def _get_live_spot_positions(db: Session) -> List[Dict[str, Any]]:
     Reużywa _build_live_spot_portfolio z portfolio router.
     """
     from backend.routers.portfolio import _build_live_spot_portfolio
+
+    binance_client = get_binance_client()
     live_data = _build_live_spot_portfolio(db)
     if live_data.get("error"):
         return []
     result = []
+    dirty = False
+    from backend.runtime_settings import get_runtime_config as _get_rt_cfg
+    _min_notional = float(_get_rt_cfg(db).get("min_order_notional", 25.0))
     for p in live_data["spot_positions"]:
         asset = p["asset"]
         # Pomijaj stablecoiny jako "pozycje" — one to gotówka
         if asset in ("EUR", "USDT", "USDC", "BUSD"):
             continue
         symbol = f"{asset}EUR"
+        qty = _as_float(p.get("total"))
+        current_price = _as_float(p.get("price_eur"))
+        value_eur = qty * current_price
+        # Pomijaj pył — wartość < min_order_notional nie blokuje wejść i nie zasługuje na zapis w DB
+        if value_eur < _min_notional:
+            # Usuń ewentualny stary DB-rekord jeśli istnieje (cleanup po bootstrapie)
+            _dust_pos = db.query(Position).filter(
+                Position.symbol == symbol, Position.mode == "live"
+            ).first()
+            if _dust_pos:
+                db.delete(_dust_pos)
+                dirty = True
+            result.append({
+                "id": None, "symbol": symbol, "asset": asset, "side": "LONG",
+                "entry_price": None, "current_price": current_price,
+                "quantity": qty, "free": p.get("free"), "locked": p.get("locked"),
+                "value_eur": value_eur, "price_source": p.get("price_source"),
+                "source": "binance_spot_dust", "entry_price_source": "dust",
+                "unrealized_pnl": None, "pnl_percent": None,
+                "opened_at": None, "updated_at": None,
+            })
+            continue
+        baseline = _resolve_live_position_baseline(
+            db,
+            symbol,
+            qty,
+            current_price,
+            binance_client=binance_client,
+        )
+        dirty = dirty or bool(baseline.get("dirty"))
         result.append({
             "id": None,
             "symbol": symbol,
             "asset": asset,
             "side": "LONG",
-            "entry_price": None,  # brak kosztu wejścia z Binance
+            "entry_price": baseline.get("entry_price"),
             "current_price": p["price_eur"],
             "quantity": p["total"],
             "free": p["free"],
@@ -53,11 +264,14 @@ def _get_live_spot_positions(db: Session) -> List[Dict[str, Any]]:
             "value_eur": p["value_eur"],
             "price_source": p["price_source"],
             "source": "binance_spot",
-            "unrealized_pnl": None,
-            "pnl_percent": None,
-            "opened_at": None,
-            "updated_at": None,
+            "entry_price_source": baseline.get("source"),
+            "unrealized_pnl": baseline.get("unrealized_pnl"),
+            "pnl_percent": baseline.get("pnl_percent"),
+            "opened_at": baseline.get("opened_at").isoformat() if baseline.get("opened_at") else None,
+            "updated_at": baseline.get("updated_at").isoformat() if baseline.get("updated_at") else None,
         })
+    if dirty:
+        db.commit()
     return result
 
 
@@ -569,13 +783,17 @@ def _analyze_position(pos: Position, db: Session, tier_map: Dict[str, Any]) -> D
 def _analyze_spot_position(spot: Dict[str, Any], db: Session, tier_map: Dict[str, Any]) -> Dict[str, Any]:
     """
     Buduje kartę analizy dla pozycji LIVE spot (z Binance).
-    Nie ma entry_price — PnL = null, decyzja oparta na wskaźnikach technicznych.
+    Jeśli da się odtworzyć baseline wejścia, pokazuje koszt i PnL.
     """
     sym = spot["symbol"]
     asset = spot.get("asset", sym.replace("EUR", ""))
     qty = float(spot.get("quantity", 0))
     current = float(spot.get("current_price", 0))
     value = float(spot.get("value_eur", current * qty))
+    entry_price = float(spot["entry_price"]) if spot.get("entry_price") is not None else None
+    cost_eur = round(entry_price * qty, 4) if entry_price is not None and qty > 0 else None
+    pnl_eur = round(value - cost_eur, 4) if cost_eur is not None else None
+    pnl_pct = round((pnl_eur / cost_eur) * 100, 2) if pnl_eur is not None and cost_eur and cost_eur > 0 else None
     tier_info = tier_map.get(sym, {})
     is_hold = tier_info.get("hold_mode", False)
 
@@ -610,7 +828,8 @@ def _analyze_spot_position(spot: Dict[str, Any], db: Session, tier_map: Dict[str
             elif trend == "SPADKOWY":
                 reasons.append("Trend spadkowy, ale tryb HOLD — trzymaj i czekaj na odbicie")
     else:
-        # Brak entry price → ocena wyłącznie z trendów
+        if entry_price is None:
+            reasons.append("Brak potwierdzonej ceny wejścia w historii Binance — PnL może być niepełny")
         if trend == "SPADKOWY":
             if rsi is not None and rsi < 30:
                 decision = "TRZYMAJ"
@@ -641,12 +860,12 @@ def _analyze_spot_position(spot: Dict[str, Any], db: Session, tier_map: Dict[str
         "asset": asset,
         "side": "LONG",
         "quantity": qty,
-        "entry_price": None,
+        "entry_price": entry_price,
         "current_price": current,
         "position_value_eur": round(value, decimals),
-        "cost_eur": None,
-        "pnl_eur": None,
-        "pnl_pct": None,
+        "cost_eur": cost_eur,
+        "pnl_eur": pnl_eur,
+        "pnl_pct": pnl_pct,
         "trend": trend,
         "rsi": round(rsi, 1) if rsi is not None else None,
         "ema_20": round(ema_20, 6) if ema_20 is not None else None,
@@ -664,6 +883,7 @@ def _analyze_spot_position(spot: Dict[str, Any], db: Session, tier_map: Dict[str
         "updated_at": None,
         "source": "binance_spot",
         "price_source": spot.get("price_source"),
+        "entry_price_source": spot.get("entry_price_source"),
     }
 
     if is_hold:
@@ -1822,6 +2042,19 @@ def sync_positions_from_binance(
                 continue
             current_price = float(ticker["price"])
 
+            # Pomiń pył (wartość < min_order_notional z config, domyślnie 25 EUR)
+            from backend.runtime_settings import get_runtime_config
+            _rt_cfg = get_runtime_config(db)
+            _min_notional_sync = float(_rt_cfg.get("min_order_notional", 25.0))
+            position_value = total_qty * current_price
+            if position_value < _min_notional_sync:
+                skipped.append({
+                    "symbol": symbol,
+                    "reason": f"Pył — wartość {position_value:.4f} EUR < min {_min_notional_sync:.0f} EUR",
+                    "qty": round(total_qty, 8),
+                })
+                continue
+
             existing = db.query(Position).filter(
                 Position.symbol == symbol,
                 Position.mode == mode,
@@ -1836,22 +2069,23 @@ def sync_positions_from_binance(
                 })
                 continue
 
-            entry_price = current_price
-            opened_at = now
-            try:
-                my_trades = binance.get_my_trades(symbol, limit=100)
-                if my_trades:
-                    buy_trades = [t for t in my_trades if t.get("isBuyer")]
-                    if buy_trades:
-                        total_cost = sum(float(t["price"]) * float(t["qty"]) for t in buy_trades)
-                        total_q = sum(float(t["qty"]) for t in buy_trades)
-                        if total_q > 0:
-                            entry_price = total_cost / total_q
-                        oldest_ts = min(int(t.get("time", 0)) for t in buy_trades)
-                        if oldest_ts > 0:
-                            opened_at = datetime.utcfromtimestamp(oldest_ts / 1000)
-            except Exception:
-                pass
+            baseline = _resolve_live_position_baseline(
+                db,
+                symbol,
+                total_qty,
+                current_price,
+                binance_client=binance,
+            )
+
+            entry_price = baseline.get("entry_price")
+            opened_at = baseline.get("opened_at") or now
+            if entry_price is None:
+                skipped.append({
+                    "symbol": symbol,
+                    "reason": "Brak historii transakcji do wyliczenia ceny wejścia",
+                    "qty": round(total_qty, 8),
+                })
+                continue
 
             unrealized_pnl = (current_price - entry_price) * total_qty
 

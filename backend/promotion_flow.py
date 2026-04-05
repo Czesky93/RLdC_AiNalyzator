@@ -64,17 +64,31 @@ def _latest_approved_review(db: Session, recommendation_id: int) -> Recommendati
     )
 
 
-def _snapshot_to_updates(snapshot: Dict[str, Any]) -> Dict[str, Any]:
+def _snapshot_to_updates(snapshot: Dict[str, Any], source_snapshot: Dict[str, Any] | None = None) -> Dict[str, Any]:
     payload = snapshot.get("payload") or {}
     sections = payload.get("sections") or {}
-    updates: Dict[str, Any] = {}
+    target_updates: Dict[str, Any] = {}
     for section_values in sections.values():
         if isinstance(section_values, dict):
-            updates.update(section_values)
+            target_updates.update(section_values)
     watchlist = payload.get("watchlist")
     if isinstance(watchlist, list):
-        updates["watchlist"] = watchlist
-    return updates
+        target_updates["watchlist"] = watchlist
+
+    if source_snapshot is None:
+        return target_updates
+
+    source_payload = source_snapshot.get("payload") or {}
+    source_sections = source_payload.get("sections") or {}
+    source_updates: Dict[str, Any] = {}
+    for section_values in source_sections.values():
+        if isinstance(section_values, dict):
+            source_updates.update(section_values)
+    source_watchlist = source_payload.get("watchlist")
+    if isinstance(source_watchlist, list):
+        source_updates["watchlist"] = source_watchlist
+
+    return {k: v for k, v in target_updates.items() if source_updates.get(k) != v}
 
 
 def _active_position_count(db: Session) -> int:
@@ -163,7 +177,7 @@ def promote_recommendation(
     db.add(promotion)
     db.flush()
 
-    updates = _snapshot_to_updates(ctx["target_snapshot"])
+    updates = _snapshot_to_updates(ctx["target_snapshot"], ctx["source_snapshot"])
     try:
         apply_result = apply_runtime_updates(
             db,

@@ -6,8 +6,15 @@ from sqlalchemy.orm import Session
 from sqlalchemy import desc
 
 from backend.database import (
-    get_db, Position, Order, AccountSnapshot, ExitQuality,
-    MarketData, PendingOrder, utc_now_naive
+    get_db,
+    Position,
+    Order,
+    AccountSnapshot,
+    ExitQuality,
+    MarketData,
+    PendingOrder,
+    utc_now_naive,
+    SystemLog,
 )
 
 router = APIRouter()
@@ -274,5 +281,39 @@ async def get_last_exits(
             "data": items,
         }
 
+    except Exception as exc:
+        return {"success": False, "error": str(exc)}
+
+
+@router.get("/logs")
+async def get_debug_logs(
+    limit: int = Query(50, ge=1, le=200, description="Ile wpisow zwrocic"),
+    level: str | None = Query(None, description="Filtr poziomu: INFO/WARNING/ERROR"),
+    module: str | None = Query(None, description="Filtr modulu"),
+    db: Session = Depends(get_db),
+):
+    """
+    Endpoint kompatybilnosci dla /api/debug/logs.
+    """
+    try:
+        query = db.query(SystemLog)
+        if level:
+            query = query.filter(SystemLog.level == level.upper())
+        if module:
+            query = query.filter(SystemLog.module == module)
+
+        logs = query.order_by(desc(SystemLog.timestamp)).limit(limit).all()
+        data = [
+            {
+                "id": row.id,
+                "level": row.level,
+                "module": row.module,
+                "message": row.message,
+                "exception": row.exception,
+                "timestamp": row.timestamp.isoformat() if row.timestamp else None,
+            }
+            for row in logs
+        ]
+        return {"success": True, "count": len(data), "data": data}
     except Exception as exc:
         return {"success": False, "error": str(exc)}

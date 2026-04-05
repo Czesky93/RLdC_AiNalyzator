@@ -32,6 +32,7 @@ stop_pid_file() {
 
 stop_pid_file "$LOG_DIR/backend.pid"  "Backend"
 stop_pid_file "$LOG_DIR/frontend.pid" "Frontend"
+stop_pid_file "$LOG_DIR/telegram.pid" "Telegram"
 
 # Fallback: zabij po nazwie procesu gdyby PID file nie istniał
 echo ""
@@ -47,6 +48,13 @@ if ss -tlnp | grep -q ':3000'; then
     fuser -k 3000/tcp 2>/dev/null && echo "[STOP] Port 3000 zwolniony." || true
 else
     echo "[OK] Port 3000 już wolny."
+fi
+
+if pgrep -f "telegram_bot.bot" >/dev/null 2>&1; then
+    pkill -f "telegram_bot.bot" 2>/dev/null || true
+    echo "[STOP] Telegram bot zatrzymany."
+else
+    echo "[OK] Telegram bot już zatrzymany."
 fi
 
 echo ""

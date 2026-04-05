@@ -101,7 +101,7 @@ from backend.trading_effectiveness import (
 )
 from backend.tuning_insights import generate_tuning_candidates, tuning_summary
 from backend.candidate_validation import generate_experiment_feed, experiment_feed_summary
-from backend.runtime_settings import RuntimeSettingsError
+from backend.runtime_settings import RuntimeSettingsError, build_runtime_state, get_runtime_config
 
 router = APIRouter()
 
@@ -177,6 +177,51 @@ class IncidentTransitionRequest(BaseModel):
     new_status: str
     operator: Optional[str] = None
     notes: Optional[str] = None
+
+
+@router.get("/runtime-settings")
+def get_runtime_settings_alias(db: Session = Depends(get_db)):
+    """
+    Alias kompatybilnosci dla starszych klientow: /api/account/runtime-settings.
+    """
+    try:
+        data = get_runtime_config(db)
+        return {"success": True, "data": data}
+    except RuntimeSettingsError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Error getting runtime settings: {str(exc)}") from exc
+
+
+@router.get("/runtime-config")
+def get_runtime_config_alias(db: Session = Depends(get_db)):
+    """
+    Alias kompatybilnosci dla starszych klientow: /api/account/runtime-config.
+    """
+    try:
+        data = build_runtime_state(db)
+        return {"success": True, "data": data}
+    except RuntimeSettingsError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Error getting runtime config: {str(exc)}") from exc
+
+
+@router.get("/config")
+def get_account_config_alias(db: Session = Depends(get_db)):
+    """
+    Alias kompatybilnosci dla starszych klientow: /api/account/config.
+    """
+    try:
+        data = {
+            "runtime": get_runtime_config(db),
+            "state": build_runtime_state(db),
+        }
+        return {"success": True, "data": data}
+    except RuntimeSettingsError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Error getting account config: {str(exc)}") from exc
 
 
 def _sanitize_openai_message(msg: str) -> str:

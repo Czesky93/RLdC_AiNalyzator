@@ -24,6 +24,17 @@ else
     echo "  ❌ Frontend :3000 — ZATRZYMANY"
 fi
 
+if pgrep -f "telegram_bot.bot" >/dev/null 2>&1; then
+    echo "  ✅ Telegram bot — DZIAŁA"
+else
+    echo "  ❌ Telegram bot — ZATRZYMANY"
+fi
+
+telegram_count=$(pgrep -fc "telegram_bot.bot" || true)
+if [[ "${telegram_count:-0}" -gt 1 ]]; then
+    echo "  ⚠️  Wykryto ${telegram_count} procesy Telegram bota (możliwy konflikt komend)"
+fi
+
 # HTTP health-check
 echo ""
 echo "[HTTP]"

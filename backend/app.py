@@ -71,11 +71,16 @@ app = FastAPI(
 )
 
 # CORS middleware - pozwala na łączenie z frontendem
+_CORS_ORIGINS = [
+    o.strip() for o in
+    os.getenv("CORS_ALLOW_ORIGINS", "http://localhost:3000,http://192.168.0.109:3000").split(",")
+    if o.strip()
+]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=_CORS_ORIGINS,
     allow_credentials=True,
-    allow_methods=["*"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
     allow_headers=["*"],
 )
 

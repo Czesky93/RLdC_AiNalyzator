@@ -24,6 +24,7 @@ export default function Topbar({ activeView, setActiveView, tradingMode, setTrad
       { label: 'Strategie', view: 'strategies' },
       { label: 'AI Sygnały', view: 'ai-signals' },
       { label: 'Ryzyko', view: 'risk' },
+      { label: 'Operator', view: 'operator-console' },
     ],
     []
   )

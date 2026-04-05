@@ -2,6 +2,7 @@
 
 import { useState } from 'react'
 import MainContent from './MainContent'
+import MobileNav from './MobileNav'
 import Sidebar from './Sidebar'
 import Topbar from './Topbar'
 
@@ -29,6 +30,7 @@ export default function Dashboard() {
           tradingMode={tradingMode}
         />
       </div>
+      <MobileNav activeView={activeView} setActiveView={setActiveView} />
     </div>
   )
 }

@@ -1,8 +1,8 @@
 # PROJECT_AUDIT_MASTER.md — RLdC Trading BOT
 
-**Data audytu:** 2 kwietnia 2026 (aktualizacja: sesja 2)
+**Data audytu:** 5 kwietnia 2026 (aktualizacja: sesja 10)
 **Wersja:** v0.7 beta
-**Testy:** 181/181 PASSED
+**Testy:** 182 PASSED / 0 FAILED / 0 SKIPPED (`tests/test_smoke.py`, sesja 10)
 **TypeScript:** 0 błędów
 **Tryb:** TRADING_MODE=live, ALLOW_LIVE_TRADING=true, AI_PROVIDER=heuristic
 
@@ -23,7 +23,7 @@ Wszystkie 4 piony (A-D) są w znacznym stopniu domknięte.
 - Equity, free cash, realized/unrealized PnL
 - Decision trace z 20+ reason_codes (po polsku)
 - WWW — 18 widoków, wszystkie endpointy OK
-- Telegram — alerty entry+exit, portfolio, pozycje, sygnały
+- Telegram — **20 komend** (incl. `/ip`, `/ai`), alerty entry+exit, portfolio, pozycje, sygnały
 - _learn_from_history z persistencją do RuntimeSetting
 - LIVE place_order → Binance API (MARKET)
 - Daily drawdown gate (DEMO + LIVE)
@@ -69,15 +69,15 @@ Wszystkie 4 piony (A-D) są w znacznym stopniu domknięte.
 
 | Plik | Endpointy | Stan | Linie |
 |------|-----------|------|-------|
-| `account.py` | ~90 EP: account summary, governance, analytics, AI status | ✅ DZIAŁA | 2064 |
-| `signals.py` | Sygnały, analiza, execution-trace, decision trace | ✅ DZIAŁA | 1808 |
+| `account.py` | ~90 EP: account summary, governance, analytics, AI status, aliasy runtime-config | ✅ DZIAŁA | 2064+ |
+| `signals.py` | Sygnały, analiza, execution-trace, decision trace + root alias `/api/signals/` | ✅ DZIAŁA | 1808+ |
 | `positions.py` | Pozycje, analiza pozycji | ✅ DZIAŁA | 1910 |
 | `orders.py` | Zlecenia DEMO+LIVE, create_order, pending | ✅ DZIAŁA | 633 |
 | `market.py` | Dane rynkowe, Klines, kontekst | ✅ DZIAŁA | 817 |
 | `portfolio.py` | Portfel, wealth, forecast, equity | ✅ DZIAŁA | 569 |
-| `control.py` | Sterowanie: demo ON/OFF, WS, watchlist | ✅ DZIAŁA | 185 |
+| `control.py` | Sterowanie: demo ON/OFF, WS, watchlist + alias `/operator-queue` | ✅ DZIAŁA | 185+ |
 | `blog.py` | Blog AI insights | ✅ DZIAŁA | 67 |
-| `debug.py` | Diagnostyka dev | ✅ DZIAŁA | 278 |
+| `debug.py` | Diagnostyka dev + alias `/logs` | ✅ DZIAŁA | 278+ |
 | `telegram_intel.py` | Intel Telegram | ✅ DZIAŁA | 145 |
 
 ### Frontend (`web_portal/`)
@@ -101,7 +101,7 @@ Wszystkie 4 piony (A-D) są w znacznym stopniu domknięte.
 
 | Plik | Testy | Stan |
 |------|-------|------|
-| `test_smoke.py` | 181 testów (175 smoke + 6 akceptacyjnych v0.7) | ✅ WSZYSTKIE PRZECHODZĄ |
+| `test_smoke.py` | 182 testy (176 smoke + 6 akceptacyjnych v0.7) | ✅ WSZYSTKIE PRZECHODZĄ |
 
 ### Inne
 
@@ -245,3 +245,125 @@ Wszystkie 4 piony (A-D) są w znacznym stopniu domknięte.
 - DEBT-5: LIMIT orders w LIVE (LOW)
 - DEBT-6: AccountSummary widget cleanup (LOW)
 - Żadnych blokerów krytycznych ani ważnych
+
+---
+
+## 12. Ostatnia sesja — 4 kwietnia 2026 (sesja 4)
+
+### Co zmieniono
+- Dodano aliasy kompatybilnosci endpointow eliminujace obserwowane 404 z runtime:
+	- `GET /api/account/runtime-settings`
+	- `GET /api/account/runtime-config`
+	- `GET /api/account/config`
+	- `GET /api/control/operator-queue`
+	- `GET /api/debug/logs`
+	- `GET /api/signals/`
+- Wykonano pelny reset srodowiska: `./scripts/stop_dev.sh` -> `./scripts/start_dev.sh`.
+- Potwierdzono status uslug: backend/frontend/telegram dzialaja.
+
+### Co przetestowano
+- Sanity endpointow po restarcie: wszystkie ww. endpointy zwracaja `200`.
+- `./scripts/status_dev.sh`: wszystkie uslugi zdrowe, API krytyczne `200`.
+- `pytest tests/test_smoke.py -q`: 161 passed, 19 failed, 1 skipped.
+
+### Co zostalo
+- Do naprawy pozostaja testy governance/promotion/rollback (19 fail), niezwiazane bezposrednio z aliasami endpointow.
+
+---
+
+## 13. Ostatnia sesja — 4 kwietnia 2026 (sesja 5)
+
+### Co zmieniono
+- `backend/collector.py`: stabilizacja odswiezania watchlisty.
+	- Fallback do `WATCHLIST` z `.env` jest uzywany tylko przy bootstrapie (gdy brak aktywnej listy).
+	- Przy okresowym refreshu, gdy lista juz istnieje, tymczasowy timeout Binance nie przelacza watchlisty na fallback.
+- `backend/collector.py`: throttling powtarzalnych alertow `Niezgodność pozycji DB↔Binance`.
+	- Identyczne mismatch'e sa logowane maksymalnie raz na `BINANCE_MISMATCH_LOG_COOLDOWN_SECONDS` (domyslnie 1800s).
+- Wykonano restart runtime po zmianie (`stop_dev` -> `start_dev`) i potwierdzono zdrowie uslug (`status_dev`).
+
+### Co przetestowano
+- Walidacja skladni: `python -m py_compile backend/collector.py`.
+- Status uslug po restarcie: backend/frontend/telegram aktywne, endpointy health `200`.
+
+---
+
+## 14. Ostatnia sesja — 4 kwietnia 2026 (sesja 6)
+
+### Co zmieniono
+- `backend/routers/positions.py`: LIVE spot positions przestaly zwracac sztuczne `entry_price=None` dla wszystkich aktywow.
+	- Priorytet 1: jesli istnieje lokalna pozycja LIVE z poprawnym baseline, router uzywa jej jako zrodla kosztu wejscia.
+	- Priorytet 2: jesli baseline w DB nie istnieje, router odtwarza sredni koszt aktualnie trzymanej pozycji z historii `Binance myTrades`.
+	- Jesli baseline da sie policzyc wiarygodnie, brakujaca pozycja LIVE jest dopisywana / odswiezana w lokalnej tabeli `Position` z `entry_reason_code=synced_from_binance`.
+- `backend/routers/positions.py`: `/api/positions?mode=live` i `/api/positions/analysis?mode=live` zwracaja teraz `entry_price`, `cost_eur`, `pnl_eur`, `pnl_pct` wszedzie tam, gdzie historia Binance na to pozwala.
+- `tests/test_smoke.py`: dodano test regresyjny potwierdzajacy odbudowe baseline LIVE i zapis synchronizowanej pozycji do DB.
+
+### Wplyw
+- WWW przestaje pokazywac `brak danych` dla kosztu wejscia i PnL w pozycjach LIVE, gdy Binance ma historie transakcji dla symbolu.
+- Zmniejsza sie niespojnosc Binance ↔ DB dla pozycji, ktore dotad istnialy tylko jako saldo spot bez lokalnego baseline.
+- Operator dostaje realny punkt odniesienia do decyzji zamkniecia / trzymania pozycji LIVE zamiast samej wartosci rynkowej.
+
+### Co przetestowano
+- Celowany smoke: `pytest tests/test_smoke.py -q -k 'live_positions_analysis_restores_entry_baseline or acceptance_live_positions_returns_source_field or acceptance_demo_positions_from_local_db'` -> `3 passed`.
+- Pelny smoke: `pytest tests/test_smoke.py -q` -> `162 passed, 19 failed, 1 skipped`.
+- Potwierdzenie: liczba faili nie wzrosla; otwarte porazki pozostaja w obszarze governance/promotion/rollback.
+
+### Co zostalo
+- Dla aktywow nabytych poza para `ASSET/EUR` lub bez historii `myTrades`, baseline moze pozostac nieznany — wtedy UI nadal uczciwie pokazuje brak kosztu wejscia.
+
+---
+
+## 15. Ostatnia sesja — 4 kwietnia 2026 (sesja 7)
+
+### Co zmieniono
+- `backend/runtime_settings.py`: `apply_runtime_updates(...)` zwraca teraz zawsze pole `snapshot` rowniez w sciezce no-op (brak realnej zmiany), co stabilizuje przeplyw eksperyment -> rekomendacja -> promocja.
+- `backend/promotion_flow.py`: promocja aplikuje tylko roznice miedzy snapshotem zrodlowym i docelowym zamiast calego payloadu snapshotu.
+- `backend/rollback_flow.py`: rollback aplikuje tylko roznice miedzy `from_snapshot` i `rollback_snapshot`, analogicznie do promocji.
+
+### Wplyw
+- Usunieto krytyczny powod porazek governance/promotion/rollback: reaplikacja calych snapshotow wymuszala walidacje niezmienianych legacy kluczy (np. `pending_order_cooldown_seconds`).
+- Pipeline promocji i rollbacku stal sie deterministyczny: dotyka tylko faktycznie promowanych/rollbackowanych parametrow.
+
+### Co przetestowano
+- Celowany smoke (promotion + rollback decision): `5 passed`.
+- Celowany smoke (rollback_flow + post_rollback_monitoring): `9 passed, 1 failed` przy uruchomieniu niepelnego podzbioru (fail wynikajacy z braku fixture chain), bez regresji funkcjonalnej.
+- Pelny smoke: `pytest tests/test_smoke.py -q` -> `182 passed`.
+
+### Co zostalo
+- Brak otwartych faili smoke.
+
+---
+
+## 16. Sesja 10 — 5 kwietnia 2026
+
+### Co zmieniono
+
+**T-16 — `backend/collector.py` `_load_watchlist`:**
+- Przed naprawą: `WATCHLIST` z `.env` był używany TYLKO jako fallback gdy saldo Binance nie zwróciło żadnych symboli. Ponieważ konto ma AVAX/ARB/EGLD/PEPE (dust), `resolved` był non-empty → env WATCHLIST był całkowicie ignorowany → ETH/SOL/WLFI/SHIB EUR nigdy nie trafiały do watchlisty.
+- Po naprawie: env WATCHLIST jest ZAWSZE scalany z balance-derived. Wyjątek: `allow_env_fallback=False` AND `resolved=[]` (tymczasowy timeout Binance) → zwraca [] → refresh code zachowuje starą watchlistę.
+- Nowa watchlista: ARBEUR, AVAXEUR, BNBEUR, BTCEUR, EGLDEUR, ETHEUR, PEPEEUR, SHIBEUR, SOLEUR, WLFIEUR
+
+**T-17 — `backend/collector.py` `_load_trading_config` range_map supplement:**
+- Przed naprawą: heurystyka ATR była generowana TYLKO gdy `not range_map or ai_ranges_stale`. Nowe symbole (ETH/SOL/SHIB/WLFI) dodane do watchlisty nie miały zakresów → ciche `if not r: continue` w `_screen_entry_candidates` bez logu.
+- Po naprawie: heurystyka uzupełnia BRAKUJĄCE symbole watchlisty (`missing_in_range`) nawet gdy range_map ma już wpisy dla innych symboli. Log: „Heurystyczne zakresy ATR uzupełnione dla: ETHEUR, SHIBEUR, SOLEUR, WLFIEUR."
+
+### Wynik weryfikacji
+
+Collector decisions po naprawie:
+- ETHEUR(live): SKIP → sell_blocked_no_position ✅ (SELL bez pozycji — poprawne na SPOT)
+- SOLEUR(live): SKIP → sell_blocked_no_position ✅
+- SHIBEUR(live): SKIP → sell_blocked_no_position ✅
+- WLFIEUR(live): SKIP → sell_blocked_no_position ✅
+- BNBEUR(live): SKIP → signal_confidence_too_low (learned=0.56 > heuristic=0.55, delta 0.01 — learning poprawne)
+- BTCEUR(live): SKIP → entry_score_below_min (ma już pozycję 157 EUR)
+- ARB/AVAX/EGLD/PEPE EUR: SKIP → symbol_not_in_any_tier (dust balance artifacts, nie w tier config)
+
+### Co przetestowano
+- `pytest tests/test_smoke.py -q` → **182 passed** ✅
+- Logi collectora potwierdzają poprawne flow dla ETHEUR/SOLEUR/SHIBEUR/WLFIEUR
+- Wszystkie current decisions mają ekonomicznie poprawne uzasadnienie
+
+### Co zostało
+- Bot będzie automatycznie próbował wejść do pozycji gdy:
+  - ETHEUR, SOLEUR, SHIBEUR lub WLFIEUR wygenerują BUY signal z conf >= learned_threshold
+  - BNBEUR wygeneruje BUY signal z conf >= 0.56 (jeden tick powyżej aktualnego 0.55)
+- Brak otwartych blokerów

@@ -90,6 +90,9 @@ def execute_rollback(
     target_snapshot = get_config_snapshot(db, row.rollback_snapshot_id)
     if target_snapshot is None:
         raise ValueError(f"Rollback target snapshot not found: {row.rollback_snapshot_id}")
+    source_snapshot = get_config_snapshot(db, row.from_snapshot_id)
+    if source_snapshot is None:
+        raise ValueError(f"Rollback source snapshot not found: {row.from_snapshot_id}")
 
     current_snapshot_id = _current_runtime_snapshot_id(db)
     validation_summary = {
@@ -109,7 +112,7 @@ def execute_rollback(
         db.refresh(row)
         raise ValueError(row.failure_reason)
 
-    updates = _snapshot_to_updates(target_snapshot)
+    updates = _snapshot_to_updates(target_snapshot, source_snapshot)
     try:
         apply_result = apply_runtime_updates(
             db,

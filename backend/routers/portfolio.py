@@ -327,25 +327,53 @@ def get_portfolio_wealth(
             if live_data.get("error"):
                 _info = live_data["error"]
             else:
+                # Pobierz lokalne pozycje live (entry_price z historii Binance)
+                local_positions: Dict[str, Position] = {}
+                for lp in db.query(Position).filter(Position.mode == "live").all():
+                    local_positions[lp.symbol] = lp
+
                 # Zastąp items[] pełnymi danymi Binance spot
                 items = []
+                total_pnl_live = 0.0
                 for p in live_data["spot_positions"]:
+                    asset = p["asset"]
+                    is_stable = asset in ("EUR", "USDT", "USDC", "BUSD")
+                    symbol = f"{asset}EUR" if not is_stable else asset
+                    qty = float(p["total"])
+                    current_price = float(p["price_eur"])
+                    value_eur = float(p["value_eur"])
+
+                    # Użyj prawdziwej ceny wejścia z lokalnej DB (jeśli dostępna)
+                    local_pos = local_positions.get(symbol)
+                    if local_pos and local_pos.entry_price and float(local_pos.entry_price) > 0 and not is_stable:
+                        entry_price = float(local_pos.entry_price)
+                        cost_eur = round(entry_price * qty, 4)
+                        pnl_eur = round(value_eur - cost_eur, 4)
+                        pnl_pct = round((pnl_eur / cost_eur * 100) if cost_eur > 0 else 0, 2)
+                        opened_at = local_pos.opened_at.isoformat() if local_pos.opened_at else None
+                    else:
+                        entry_price = current_price
+                        cost_eur = value_eur
+                        pnl_eur = 0.0
+                        pnl_pct = 0.0
+                        opened_at = None
+
                     items.append({
-                        "symbol": f"{p['asset']}EUR" if p["asset"] not in ("EUR", "USDT", "USDC", "BUSD") else p["asset"],
-                        "asset": p["asset"],
+                        "symbol": symbol,
+                        "asset": asset,
                         "side": "HOLD",
-                        "quantity": p["total"],
+                        "quantity": qty,
                         "free": p["free"],
                         "locked": p["locked"],
-                        "entry_price": p["price_eur"],
-                        "current_price": p["price_eur"],
-                        "value_eur": p["value_eur"],
-                        "cost_eur": p["value_eur"],
-                        "pnl_eur": 0.0,
-                        "pnl_pct": 0.0,
+                        "entry_price": entry_price,
+                        "current_price": current_price,
+                        "value_eur": value_eur,
+                        "cost_eur": cost_eur,
+                        "pnl_eur": pnl_eur,
+                        "pnl_pct": pnl_pct,
                         "weight_pct": p["weight_pct"],
                         "price_source": p["price_source"],
-                        "opened_at": None,
+                        "opened_at": opened_at,
                     })
                 total_equity = live_data["total_equity_eur"]
                 free_cash = live_data["free_cash_eur"]

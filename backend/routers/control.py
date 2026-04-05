@@ -14,6 +14,7 @@ from backend.accounting import get_demo_quote_ccy
 from backend.auth import require_admin
 from backend.database import MarketData, Position, get_db
 from backend.runtime_settings import RuntimeSettingsError, apply_runtime_updates, build_runtime_state, build_symbol_tier_map, get_runtime_config
+from backend.governance import get_operator_queue
 
 
 router = APIRouter()
@@ -182,4 +183,16 @@ def get_hold_status(db: Session = Depends(get_db)):
         return {"success": True, "data": items}
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Error getting hold status: {str(exc)}") from exc
+
+
+@router.get("/operator-queue")
+def get_operator_queue_alias(db: Session = Depends(get_db)):
+    """
+    Alias kompatybilnosci: /api/control/operator-queue.
+    Docelowy endpoint nadal pozostaje pod /api/account/analytics/operator-queue.
+    """
+    try:
+        return {"success": True, "data": get_operator_queue(db)}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Error getting operator queue: {str(exc)}") from exc
 

@@ -32,6 +32,7 @@ const menuItems = [
   { id: 'dashboard', label: 'Panel główny', icon: LayoutDashboard },
   { id: 'position-analysis', label: 'Decyzje', icon: BrainCircuit },
   { id: 'execution-trace', label: 'Diagnostyka', icon: SearchX },
+  { id: 'operator-console', label: 'Panel operatora', icon: Shield },
   { id: 'telegram-intel', label: 'Telegram AI', icon: MessageSquare },
   { id: 'trade-desk', label: 'Zlecenia', icon: Target },
   { id: 'exit-diagnostics', label: 'Diagnostyka wyjść', icon: TrendingDown },

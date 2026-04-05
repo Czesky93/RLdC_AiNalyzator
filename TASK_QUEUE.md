@@ -8,7 +8,7 @@
 
 ### HIGH
 
-*Brak otwartych zadań o wysokim priorytecie.*
+*Brak otwartych zadań wysokiego priorytetu.*
 
 ### MEDIUM
 
@@ -16,24 +16,72 @@
 
 ### LOW
 
-| ID | Zadanie | Plik/Moduł | Wpływ | Status |
-|----|---------|------------|-------|--------|
-| T-05 | CORS allow_origins=["*"] → domeny produkcyjne | `app.py` | Bezpieczeństwo, OWASP | DO ZROBIENIA |
-| T-07 | Usunięcie nieużywanego widgetu AccountSummary | `widgets/AccountSummary.tsx` | Czystość kodu | DO ZROBIENIA |
+*Brak otwartych zadań niskiego priorytetu.*
 
-### DONE (zamknięte w sesji 2)
+### DONE (zamknięte w sesji 12)
 
-| ID | Zadanie | Zamknięte | Commit |
-|----|---------|----------|--------|
-| T-01 | LIVE CostLedger actual Binance fees | 02.04 sesja 1 | 9ac10b0 |
-| T-02 | Periodyczny sync DB↔Binance | 02.04 sesja 1 | 9ac10b0 |
-| T-03 | Telegram /confirm /reject | — | Już było zaimplementowane (false positive) |
-| T-04 | Qty sizing: prowizja w alokacji | 02.04 sesja 2 | bieżący |
-| T-06 | Telegram governance stubs | — | Już było zaimplementowane (false positive) |
+| ID | Zadanie | Plik/Moduł | Status |
+|----|---------|------------|--------|
+| T-19 | `entry-readiness open_positions=0` mimo BTCEUR w DB → zmieniono licznik na `len(open_positions)` | `signals.py` | DONE |
+| T-20 | SELL entry ENTRY_ALLOWED bez otwartej pozycji → `ENTRY_BLOCKED_SELL_NO_POSITION` | `signals.py` | DONE |
+| T-21 | AVAX/EGLD/PEPE/ARB jako `ENTRY_ALLOWED` mimo `symbol_not_in_any_tier` w collectorze → tier-gate + fix źródła `symbol_tiers` (`runtime_ctx` zamiast pustego `config`) | `signals.py` | DONE |
+| T-22 | `start_dev.sh` zawsze startował `next dev` mimo istnienia buildu prod → auto-wykrycie `.next/BUILD_ID` | `scripts/start_dev.sh` | DONE |
 
+### DONE (zamknięte w sesji 11)
+
+| ID | Zadanie | Plik/Moduł | Status |
+|----|---------|------------|--------|
+| T-18 | Spam logów heurystyki ATR co 60s → throttle 600s + detekcja zmian zestawu symboli | `collector.py` | DONE (sesja 11) |
+
+### DONE (zamknięte w sesji 10)
+
+| ID | Zadanie | Plik/Moduł | Status |
+|----|---------|------------|--------|
+| T-16 | `_load_watchlist` ignorowała ENV WATCHLIST gdy Binance balances non-empty → ETH/SOL/SHIB/WLFI poza watchlistą | `collector.py` | DONE (sesja 10) |
+| T-17 | `range_map` nie uzupełniał brakujących symboli po zmianie watchlisty → ciche pomijanie ETH/SOL/SHIB/WLFI | `collector.py` | DONE (sesja 10) |
+
+### DONE (zamknięte w sesji 9)
+
+| ID | Zadanie | Plik/Moduł | Status |
+|----|---------|------------|--------|
+| T-15 | Bot nie otworzył żadnej pozycji LIVE — fix dust-positions blokujących wejścia | `signals.py`, `positions.py`, `collector.py` | DONE (sesja 9) |
+| T-05 | CORS allow_origins=["*"] → domeny produkcyjne | `app.py` | DONE (sesja 9) |
+| T-07 | Usunięcie nieużywanego widgetu AccountSummary | `widgets/AccountSummary.tsx` | DONE (sesja 9) |
+
+### DONE (zamknięte w sesjach 1-8)
+
+| ID | Zadanie | Zamknięte |
+|----|---------|----------|
+| T-01 | LIVE CostLedger actual Binance fees | sesja 1 |
+| T-02 | Periodyczny sync DB↔Binance | sesja 1 |
+| T-03 | Telegram /confirm /reject | (już było) |
+| T-04 | Qty sizing: prowizja w alokacji | sesja 2 |
+| T-06 | Telegram governance stubs | (już było) |
+| T-08 | Telegram /ip komenda (Cloudflare) | sesja 3 |
+| T-09 | Telegram /ai komenda (OpenAI status) | sesja 3 |
+| T-11 | Aliasy kompatybilności endpointów (404 → 200) + reset środowiska | sesja 4 |
+| T-12 | Stabilizacja collectora: brak flappingu watchlisty + cooldown mismatch | sesja 5 |
+| T-13 | LIVE baseline pozycji: entry_price/PnL z DB lub Binance myTrades | sesja 6 |
+| T-10 | Naprawa 19 faili smoke (governance/promotion/rollback) | sesja 7 |
+| T-14 | Fix critical collector bugs: fake LIVE SELL orders, entry_readiness open_count, _error check | sesja 8 |
 ---
 
 ## HISTORIA CHECKPOINTÓW
+
+### CHECKPOINT (sesja 8 — poprawki collector + entry readiness)
+
+**4 krytyczne bugi naprawione w collector.py i signals.py:**
+- **Bug C** (`_execute_confirmed_pending_orders`): sprawdzenie `result.get("_error")` — Binance NOTIONAL reject był fałszywie traktowany jako sukces (truthy dict omijał `if not result:`)
+- **Bug B** (`_load_trading_config` live mode): exit engine zarządza TYLKO pozycjami z bot-otwartymi BUY orders — pre-existing Binance holdings pominięte
+- **Bug D** (`entry_readiness` open_count): live mode liczy tylko bot-otwarte (0 BUY = 0 open_count vs max 3) — wcześniej 5 synced > 3 max = blokada wszystkich wejść
+- **Bug D2** (`entry_readiness` cash): live mode używa `_build_live_spot_portfolio` (171.30 EUR realne) — wcześniej zawsze 10000 EUR z demo state
+- **DB cleanup**: 27 fake live SELL pending_orders + 27 fake live SELL orders usunięte; SL/TP z 5 synced positions live wyczyszczone
+
+**Weryfikacja:**
+- `entry-readiness?mode=live`: can_enter=True, open=0/3, cash=171.3 EUR ✅
+- `positions/analysis?mode=live`: 5 pozycji, total_pnl=0.35 EUR ✅
+- Pętla SL ARBEUR zatrzymana: 0 fake SELLs w ostatnich 5 min ✅
+
 
 ### CHECKPOINT (1 kwietnia 2026, iteracja 4)
 

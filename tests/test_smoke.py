@@ -49,6 +49,8 @@ from backend.runtime_settings import apply_runtime_updates, build_runtime_state
 
 
 import pytest
+from backend.routers import positions as positions_router
+from backend.routers import portfolio as portfolio_router
 
 
 @pytest.fixture(scope="module")
@@ -4030,9 +4032,9 @@ def test_acceptance_live_positions_returns_source_field(client):
     # Jeśli Binance niedostępne w testach, data zwraca pustą listę
     assert "data" in data
     assert isinstance(data["data"], list)
-    # Gdy mamy dane, każdy element ma source
+    # Gdy mamy dane, każdy element ma source (binance_spot lub binance_spot_dust dla pyłu)
     for item in data["data"]:
-        assert item.get("source") == "binance_spot"
+        assert item.get("source") in ("binance_spot", "binance_spot_dust")
 
 
 def test_acceptance_demo_positions_from_local_db(client):
@@ -4048,6 +4050,65 @@ def test_acceptance_demo_positions_from_local_db(client):
     # Demo NIE zawiera source=binance_spot
     for item in data["data"]:
         assert item.get("source") != "binance_spot"
+
+
+def test_acceptance_live_positions_analysis_restores_entry_baseline(client, monkeypatch):
+    class _FakeBinance:
+        def get_my_trades(self, symbol: str, limit: int = 500):
+            assert symbol == "BTCEUR"
+            return [
+                {"isBuyer": True, "qty": "0.2", "price": "80", "time": 1_700_000_000_000},
+                {"isBuyer": True, "qty": "0.3", "price": "120", "time": 1_700_000_100_000},
+            ]
+
+    def _fake_live_spot_portfolio(_db):
+        return {
+            "spot_positions": [
+                {
+                    "asset": "BTC",
+                    "price_eur": 100.0,
+                    "total": 0.5,
+                    "free": 0.5,
+                    "locked": 0.0,
+                    "value_eur": 50.0,
+                    "price_source": "direct",
+                }
+            ]
+        }
+
+    monkeypatch.setattr(positions_router, "get_binance_client", lambda: _FakeBinance())
+    monkeypatch.setattr(portfolio_router, "_build_live_spot_portfolio", _fake_live_spot_portfolio)
+
+    db = SessionLocal()
+    try:
+        existing = db.query(Position).filter(Position.symbol == "BTCEUR", Position.mode == "live").all()
+        for item in existing:
+            db.delete(item)
+        db.commit()
+
+        resp = client.get("/api/positions/analysis?mode=live")
+        assert resp.status_code == 200
+        payload = resp.json()
+        assert payload.get("success") is True
+        card = next((item for item in payload.get("data", []) if item.get("symbol") == "BTCEUR"), None)
+        assert card is not None
+        assert round(float(card.get("entry_price") or 0), 4) == 104.0
+        assert round(float(card.get("cost_eur") or 0), 4) == 52.0
+        assert round(float(card.get("pnl_eur") or 0), 4) == -2.0
+        assert round(float(card.get("pnl_pct") or 0), 2) == round((-2.0 / 52.0) * 100, 2)
+        assert card.get("entry_price_source") == "binance_trade_history"
+
+        synced = db.query(Position).filter(Position.symbol == "BTCEUR", Position.mode == "live").first()
+        assert synced is not None
+        assert round(float(synced.entry_price or 0), 4) == 104.0
+        assert round(float(synced.quantity or 0), 4) == 0.5
+        assert synced.entry_reason_code == "synced_from_binance"
+    finally:
+        cleanup = db.query(Position).filter(Position.symbol == "BTCEUR", Position.mode == "live").all()
+        for item in cleanup:
+            db.delete(item)
+        db.commit()
+        db.close()
 
 
 def test_acceptance_best_opportunity_has_gate_fields(client):

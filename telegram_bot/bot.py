@@ -56,7 +56,10 @@ async def _send_reply(update: Update, text: str, command: Optional[str] = None):
 async def _check_auth(update: Update) -> bool:
     """Zwraca True jeśli autoryzowany, False + odpowiedź jeśli nie."""
     if not _is_authorized(update):
-        await update.message.reply_text("⛔ Brak dostępu.")
+        chat_id = str(update.effective_chat.id) if update.effective_chat else "unknown"
+        await update.message.reply_text(
+            f"⛔ Brak dostępu. Ten chat_id={chat_id}, oczekiwany TELEGRAM_CHAT_ID={TELEGRAM_CHAT_ID or 'brak konfiguracji'}"
+        )
         return False
     return True
 
@@ -69,9 +72,21 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Potwierdzanie transakcji:\n"
         "/confirm <ID>  /reject <ID>\n"
         "Governance:\n"
-        "/governance /freeze /incidents"
+        "/governance /freeze /incidents\n"
+        "Diagnostyka:\n"
+        "/chatid /ip /ai"
     )
     await _send_reply(update, text, "/start")
+
+
+async def chatid_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = str(update.effective_chat.id) if update.effective_chat else "unknown"
+    text = (
+        "🧭 Diagnostyka Telegram\n"
+        f"Twoj chat_id: {chat_id}\n"
+        f"Skonfigurowany TELEGRAM_CHAT_ID: {TELEGRAM_CHAT_ID or 'brak'}"
+    )
+    await _send_reply(update, text, "/chatid")
 
 
 async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -544,13 +559,94 @@ async def incidents_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await _send_reply(update, text, "/incidents")
 
 
+async def ip_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Wyświetla IP publiczne bota (pobrane z Cloudflare DNS API)."""
+    if not await _check_auth(update):
+        return
+    try:
+        # Używamy Cloudflare DNS API do pobrania IP publicznego
+        resp = requests.get("https://1.1.1.1/dns-query?name=whoami.cloudflare&type=TXT", 
+                           headers={"accept": "application/dns-json"},
+                           timeout=5)
+        if resp.status_code == 200:
+            data = resp.json()
+            ip = None
+            if "Answer" in data:
+                for answer in data["Answer"]:
+                    if answer.get("type") == 16:  # TXT record
+                        txt = answer.get("data", "")
+                        if txt.startswith('"') and txt.endswith('"'):
+                            ip = txt[1:-1]
+                        else:
+                            ip = txt
+                        break
+            if ip:
+                text = f"🌍 IP publiczne bota:\n{ip}"
+            else:
+                text = "⚠️ Nie udało się wyodrębnić IP z odpowiedzi DNS"
+        else:
+            text = "❌ Błąd Cloudflare DNS API"
+    except requests.Timeout:
+        text = "⏱️ Timeout: Cloudflare nie odpowiadał w ciągu 5 sekund"
+    except Exception as exc:
+        text = f"❌ Błąd pobrania IP: {exc}"
+    await _send_reply(update, text, "/ip")
+
+
+async def ai_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Wyświetla status systemu AI (OpenAI status i AI provider)."""
+    if not await _check_auth(update):
+        return
+    try:
+        resp = requests.get(f"{API_BASE_URL}/api/account/openai-status", timeout=10)
+        if resp.status_code == 200:
+            result = resp.json()
+            data = result.get("data", {})
+            status = data.get("status", "unknown")
+            msg = data.get("message", "")
+            code = data.get("code")
+            model = data.get("model", "unknown")
+            key_fp = data.get("key_fingerprint", "none")
+            
+            if status == "ok":
+                icon = "✅"
+                text = f"{icon} AI System: OK\n"
+                text += f"Model: {model}\n"
+                text += f"Status: {msg}\n"
+                text += f"Key fingerprint: {key_fp}"
+            elif status == "error":
+                icon = "⚠️"
+                text = f"{icon} AI System: ERROR\n"
+                text += f"Code: {code}\n"
+                text += f"Message: {msg}"
+            elif status == "missing":
+                icon = "❌"
+                text = f"{icon} AI System: MISSING\n"
+                text += f"Brak OPENAI_API_KEY w .env"
+            else:
+                text = f"❓ AI System: {status}\n{msg}"
+        else:
+            text = f"❌ Błąd API: status {resp.status_code}"
+    except requests.Timeout:
+        text = "⏱️ Timeout: Backend nie odpowiadał"
+    except Exception as exc:
+        text = f"❌ Błąd: {exc}"
+    await _send_reply(update, text, "/ai")
+
+
 def main():
     if not TELEGRAM_BOT_TOKEN:
         raise RuntimeError("Brak TELEGRAM_BOT_TOKEN w .env")
 
     app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 
+    print(
+        "[telegram_bot] start: polling aktywny, "
+        f"configured_chat_id={TELEGRAM_CHAT_ID or 'brak'}, mode={TRADING_MODE}, api_base={API_BASE_URL}"
+    )
+
     app.add_handler(CommandHandler("start", start_command))
+    app.add_handler(CommandHandler("chatid", chatid_command))
     app.add_handler(CommandHandler("status", status_command))
     app.add_handler(CommandHandler("stop", stop_command))
     app.add_handler(CommandHandler("risk", risk_command))
@@ -568,6 +664,8 @@ def main():
     app.add_handler(CommandHandler("governance", governance_command))
     app.add_handler(CommandHandler("freeze", freeze_command))
     app.add_handler(CommandHandler("incidents", incidents_command))
+    app.add_handler(CommandHandler("ip", ip_command))
+    app.add_handler(CommandHandler("ai", ai_command))
 
     app.run_polling()
 

@@ -33,12 +33,20 @@ _sqlite_connect_args: dict = {}
 if "sqlite" in DATABASE_URL:
     _sqlite_connect_args = {"check_same_thread": False, "timeout": 30}
 
-engine = create_engine(
-    DATABASE_URL,
-    connect_args=_sqlite_connect_args,
-    echo=False,
-    pool_pre_ping=True,
-)
+# SQLite: używamy NullPool aby każde żądanie dostawało świeże połączenie.
+# QueuePool (domyślny) powoduje problemy z izolacją WAL — sesje z puli widują
+# stare snapshoty zanim nastąpi checkpoint, co skutkuje zwrotem null dla entry_price.
+_engine_kwargs: dict = {
+    "connect_args": _sqlite_connect_args,
+    "echo": False,
+}
+if "sqlite" in DATABASE_URL:
+    from sqlalchemy.pool import NullPool as _NullPool
+    _engine_kwargs["poolclass"] = _NullPool
+else:
+    _engine_kwargs["pool_pre_ping"] = True
+
+engine = create_engine(DATABASE_URL, **_engine_kwargs)
 
 # WAL mode — pozwala na równoczesny odczyt i zapis (SQLite)
 if "sqlite" in DATABASE_URL:

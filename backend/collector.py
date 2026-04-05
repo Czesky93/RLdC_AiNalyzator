@@ -2,46 +2,54 @@
 Data Collector - zbiera dane z Binance i zapisuje do bazy
 Uruchamiany jako osobny proces w tle
 """
-import os
-import time
-import json
+
 import asyncio
+import json
+import logging
+import os
 import threading
+import time
 import warnings
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
-from dotenv import load_dotenv
-import logging
-import websockets
-from sqlalchemy.orm import Session
-from sqlalchemy import desc, text
 
+import requests
+import websockets
+from dotenv import load_dotenv
+from sqlalchemy import desc, text
+from sqlalchemy.orm import Session
+
+from backend.accounting import compute_demo_account_state, get_demo_quote_ccy
+from backend.analysis import get_live_context, maybe_generate_insights_and_blog
+from backend.binance_client import get_binance_client
 from backend.database import (
-    SessionLocal,
-    MarketData,
-    Kline,
-    Order,
-    Position,
-    Alert,
-    Signal,
-    PendingOrder,
     AccountSnapshot,
+    Alert,
+    DecisionTrace,
     ExitQuality,
     ForecastRecord,
+    Kline,
+    MarketData,
+    Order,
+    PendingOrder,
+    Position,
+    SessionLocal,
+    Signal,
     SystemLog,
-    DecisionTrace,
     attach_costs_to_order,
     save_cost_entry,
     save_decision_trace,
-    utc_now_naive
+    utc_now_naive,
 )
-from backend.binance_client import get_binance_client
-from backend.system_logger import log_to_db, log_exception
-from backend.analysis import maybe_generate_insights_and_blog, get_live_context
-from backend.accounting import compute_demo_account_state, get_demo_quote_ccy
 from backend.risk import build_risk_context, evaluate_risk
-from backend.runtime_settings import build_runtime_state, build_symbol_tier_map, effective_bool, get_runtime_config, watchlist_override
-import requests
+from backend.runtime_settings import (
+    build_runtime_state,
+    build_symbol_tier_map,
+    effective_bool,
+    get_runtime_config,
+    watchlist_override,
+)
+from backend.system_logger import log_exception, log_to_db
 
 _ENV_PATH = os.path.join(os.path.dirname(__file__), "..", ".env")
 load_dotenv(dotenv_path=_ENV_PATH, override=False)
@@ -55,7 +63,9 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("rldc.collector")
 if not logger.handlers:
     _handler = logging.StreamHandler()
-    _handler.setFormatter(logging.Formatter("%(asctime)s [collector] %(levelname)s: %(message)s"))
+    _handler.setFormatter(
+        logging.Formatter("%(asctime)s [collector] %(levelname)s: %(message)s")
+    )
     logger.addHandler(_handler)
 logger.setLevel(logging.INFO)
 logger.propagate = False
@@ -63,12 +73,28 @@ logger.propagate = False
 
 class DataCollector:
     """Kolektor danych rynkowych z Binance"""
-    
+
     def __init__(self):
         """Inicjalizacja kolektora"""
         self.binance = get_binance_client()
-        self.watchlist = self._load_watchlist()
-        self.watchlist_refresh_seconds = int(os.getenv("WATCHLIST_REFRESH_SECONDS", "900"))
+        self.watchlist = self._load_watchlist(allow_env_fallback=True)
+
+        # Fallback: jeśli watchlist jest pusty, użyj stałej listy z .env
+        if not self.watchlist:
+            logger.warning("⚠️  Watchlist pusta — fallback do WATCHLIST z .env")
+            raw_watchlist = os.getenv("WATCHLIST", "BTC/EUR,ETH/EUR")
+            items = [s.strip() for s in raw_watchlist.split(",") if s.strip()]
+            for item in items:
+                resolved = self.binance.resolve_symbol(item)
+                if not resolved:
+                    resolved = item.replace("/", "").strip().upper()
+                if resolved and resolved not in self.watchlist:
+                    self.watchlist.append(resolved)
+            self.watchlist = sorted(self.watchlist) if self.watchlist else []
+
+        self.watchlist_refresh_seconds = int(
+            os.getenv("WATCHLIST_REFRESH_SECONDS", "900")
+        )
         self.last_watchlist_refresh_ts: Optional[datetime] = None
         self.last_no_watchlist_log_ts: Optional[datetime] = None
         self.interval = int(os.getenv("COLLECTION_INTERVAL_SECONDS", 60))
@@ -83,6 +109,8 @@ class DataCollector:
         self.last_report_ts: Optional[datetime] = None
         self.last_openai_missing_log_ts: Optional[datetime] = None
         self.last_stale_ai_log_ts: Optional[datetime] = None
+        self._last_heuristic_suppl_log_ts: Optional[datetime] = None
+        self._last_heuristic_suppl_syms: list = []
         self._last_idle_alert_ts: Optional[datetime] = None
         self.learning_days = int(os.getenv("LEARNING_DAYS", "180"))
         self.last_learning_ts: Optional[datetime] = None
@@ -90,7 +118,12 @@ class DataCollector:
         self._load_persisted_symbol_params()
         self.last_snapshot_ts: Optional[datetime] = None
         self._last_binance_sync_ts: Optional[datetime] = None
-        
+        self._last_binance_mismatch_signature: Optional[str] = None
+        self._last_binance_mismatch_log_ts: Optional[datetime] = None
+        self.binance_mismatch_log_cooldown_seconds = int(
+            os.getenv("BINANCE_MISMATCH_LOG_COOLDOWN_SECONDS", "1800")
+        )
+
         logger.info(f"📊 DataCollector initialized")
         logger.info(f"   Watchlist: {', '.join(self.watchlist)}")
         logger.info(f"   Interval: {self.interval}s")
@@ -100,15 +133,24 @@ class DataCollector:
         """Wczytaj symbol_params zapisane przez _learn_from_history z poprzedniej sesji."""
         try:
             import json as _json
-            from backend.database import SessionLocal as _SL, RuntimeSetting
+
+            from backend.database import RuntimeSetting
+            from backend.database import SessionLocal as _SL
+
             _db = _SL()
             try:
-                row = _db.query(RuntimeSetting).filter(RuntimeSetting.key == "learning_symbol_params").first()
+                row = (
+                    _db.query(RuntimeSetting)
+                    .filter(RuntimeSetting.key == "learning_symbol_params")
+                    .first()
+                )
                 if row and row.value:
                     loaded = _json.loads(row.value)
                     if isinstance(loaded, dict):
                         self.symbol_params = loaded
-                        logger.info(f"📚 Wczytano symbol_params z DB ({len(loaded)} symboli)")
+                        logger.info(
+                            f"📚 Wczytano symbol_params z DB ({len(loaded)} symboli)"
+                        )
             finally:
                 _db.close()
         except Exception as exc:
@@ -116,7 +158,11 @@ class DataCollector:
 
     def _runtime_context(self, db: Session) -> dict[str, Any]:
         active_position_count = int(db.query(Position).count())
-        state = build_runtime_state(db, collector_watchlist=self.watchlist, active_position_count=active_position_count)
+        state = build_runtime_state(
+            db,
+            collector_watchlist=self.watchlist,
+            active_position_count=active_position_count,
+        )
         config = get_runtime_config(db)
         return {
             "state": state,
@@ -144,7 +190,7 @@ class DataCollector:
         strategy_name: Optional[str] = "default",
         level: str = "INFO",
     ) -> None:
-        mode = getattr(self, '_active_mode', None) or mode or 'demo'
+        mode = getattr(self, "_active_mode", None) or mode or "demo"
         payload = details or {}
         save_decision_trace(
             db,
@@ -179,10 +225,14 @@ class DataCollector:
             ),
             db=db,
         )
-    
-    def _load_watchlist(self) -> List[str]:
+
+    def _load_watchlist(self, allow_env_fallback: bool = True) -> List[str]:
         """Wczytaj listę symboli do śledzenia"""
-        quotes = [q.strip().upper() for q in os.getenv("PORTFOLIO_QUOTES", "EUR,USDC").split(",") if q.strip()]
+        quotes = [
+            q.strip().upper()
+            for q in os.getenv("PORTFOLIO_QUOTES", "EUR,USDC").split(",")
+            if q.strip()
+        ]
         balances = self.binance.get_balances()
         assets = [b.get("asset") for b in balances if (b.get("total") or 0) > 0]
 
@@ -229,23 +279,26 @@ class DataCollector:
                 logger.warning(f"⚠️ Nie można sprawdzić dozwolonych symboli SPOT: {exc}")
         # ─────────────────────────────────────────────────────────────────────
 
-        if resolved:
-            return sorted(resolved)
+        # ── Scalaj z env WATCHLIST (skonfigurowane cele handlowe) ────────────
+        # Env WATCHLIST zawiera pary przeznaczone do handlu (np. BTC/ETH/SOL/BNB EUR).
+        # NIE jest tylko fallbackiem — te symbole muszą być w watchliście zawsze wtedy,
+        # gdy mamy jakiekolwiek symbole z salda (resolved non-empty) LUB gdy jest to
+        # pierwsze załadowanie (allow_env_fallback=True).
+        # Wyjątek: podczas odświeżania przy awarii Binance (resolved empty + fallback=False)
+        # zwracamy [] → _refresh_watchlist_if_due zachowuje starą listę.
+        if resolved or allow_env_fallback:
+            raw_watchlist = os.getenv("WATCHLIST", "")
+            if raw_watchlist.strip():
+                items = [s.strip() for s in raw_watchlist.split(",") if s.strip()]
+                for item in items:
+                    resolved_symbol = self.binance.resolve_symbol(item)
+                    if not resolved_symbol:
+                        resolved_symbol = item.replace("/", "").strip().upper()
+                    if resolved_symbol and resolved_symbol not in resolved:
+                        resolved.append(resolved_symbol)
+        # ─────────────────────────────────────────────────────────────────────
 
-        # Fallback: stała watchlista z `.env` (działa nawet bez kluczy Binance).
-        raw_watchlist = os.getenv("WATCHLIST", "")
-        if not raw_watchlist.strip():
-            return []
-
-        items = [s.strip() for s in raw_watchlist.split(",") if s.strip()]
-        fallback: List[str] = []
-        for item in items:
-            resolved_symbol = self.binance.resolve_symbol(item)
-            if not resolved_symbol:
-                resolved_symbol = item.replace("/", "").strip().upper()
-            if resolved_symbol and resolved_symbol not in fallback:
-                fallback.append(resolved_symbol)
-        return sorted(fallback)
+        return sorted(resolved) if resolved else []
 
     def _has_openai_key(self) -> bool:
         return os.getenv("OPENAI_API_KEY", "").strip() != ""
@@ -261,7 +314,10 @@ class DataCollector:
 
     def _log_openai_missing(self):
         now = utc_now_naive()
-        if self.last_openai_missing_log_ts and (now - self.last_openai_missing_log_ts).total_seconds() < 300:
+        if (
+            self.last_openai_missing_log_ts
+            and (now - self.last_openai_missing_log_ts).total_seconds() < 300
+        ):
             return
         self.last_openai_missing_log_ts = now
         msg = "Brak klucza AI (Gemini/Groq/OpenAI) — używam heurystyki ATR/Bollinger."
@@ -270,7 +326,10 @@ class DataCollector:
 
     def _log_no_watchlist(self, db: Session, hint: Optional[str] = None):
         now = utc_now_naive()
-        if self.last_no_watchlist_log_ts and (now - self.last_no_watchlist_log_ts).total_seconds() < 300:
+        if (
+            self.last_no_watchlist_log_ts
+            and (now - self.last_no_watchlist_log_ts).total_seconds() < 300
+        ):
             return
         self.last_no_watchlist_log_ts = now
         msg = "Brak symboli z portfela Binance (Spot) — pomijam cykl i ponowię próbę."
@@ -282,12 +341,16 @@ class DataCollector:
     def _refresh_watchlist_if_due(self, db: Session, force: bool = False) -> bool:
         now = utc_now_naive()
         if not force and self.last_watchlist_refresh_ts:
-            if (now - self.last_watchlist_refresh_ts).total_seconds() < float(self.watchlist_refresh_seconds):
+            if (now - self.last_watchlist_refresh_ts).total_seconds() < float(
+                self.watchlist_refresh_seconds
+            ):
                 return False
 
         self.last_watchlist_refresh_ts = now
         try:
-            new_list = self._load_watchlist()
+            # Jeśli watchlista już istnieje, nie używaj fallbacku z .env przy chwilowych
+            # problemach z saldami Binance - zostaw poprzednią listę i unikaj flappingu.
+            new_list = self._load_watchlist(allow_env_fallback=not bool(self.watchlist))
         except Exception as exc:
             log_exception("collector", "Błąd odświeżania watchlisty", exc, db=db)
             return False
@@ -295,11 +358,19 @@ class DataCollector:
         if not new_list:
             # Jeśli mieliśmy watchlistę wcześniej, nie zeruj jej przez chwilową awarię.
             if self.watchlist:
-                self._log_no_watchlist(db, hint="Zostawiam poprzednią watchlistę (tymczasowy problem z odczytem sald).")
+                self._log_no_watchlist(
+                    db,
+                    hint="Zostawiam poprzednią watchlistę (tymczasowy problem z odczytem sald).",
+                )
             else:
                 # Diagnostyka: brak kluczy lub brak sald
-                if not getattr(self.binance, "api_key", "") or not getattr(self.binance, "api_secret", ""):
-                    self._log_no_watchlist(db, hint="Sprawdź BINANCE_API_KEY/BINANCE_API_SECRET i uprawnienia read-only.")
+                if not getattr(self.binance, "api_key", "") or not getattr(
+                    self.binance, "api_secret", ""
+                ):
+                    self._log_no_watchlist(
+                        db,
+                        hint="Sprawdź BINANCE_API_KEY/BINANCE_API_SECRET i uprawnienia read-only.",
+                    )
                 else:
                     self._log_no_watchlist(db)
             return False
@@ -340,7 +411,7 @@ class DataCollector:
         config_snapshot_id: Optional[str] = None,
         strategy_name: Optional[str] = None,
     ) -> int:
-        mode = getattr(self, '_active_mode', None) or mode or 'demo'
+        mode = getattr(self, "_active_mode", None) or mode or "demo"
         # Auto-potwierdź w obu trybach (live_auto_confirm=true domyślnie)
         auto_confirm = True
         pending = PendingOrder(
@@ -371,11 +442,19 @@ class DataCollector:
             return
         if not force_send and not risk_alerts and title in {"Limit strat", "Drawdown"}:
             return
-        if not force_send and error_only and title not in {"Błąd", "Error", "Critical", "Limit strat", "Drawdown"}:
+        if (
+            not force_send
+            and error_only
+            and title not in {"Błąd", "Error", "Critical", "Limit strat", "Drawdown"}
+        ):
             return
         try:
             url = f"https://api.telegram.org/bot{token}/sendMessage"
-            requests.post(url, json={"chat_id": chat_id, "text": f"⚠️ {title}\n{message}"}, timeout=5)
+            requests.post(
+                url,
+                json={"chat_id": chat_id, "text": f"⚠️ {title}\n{message}"},
+                timeout=5,
+            )
         except Exception as exc:
             log_exception("collector", "Błąd wysyłki alertu Telegram", exc)
 
@@ -412,30 +491,53 @@ class DataCollector:
                         order_type="MARKET",
                         quantity=qty,
                     )
-                    if not result:
-                        log_to_db("ERROR", "live_trading",
-                                  f"Binance place_order zwrócił None dla {pending.symbol} {pending.side} qty={qty}",
-                                  db=db)
+                    if not result or result.get("_error"):
+                        err_msg = (
+                            result.get("error_message", "") if result else ""
+                        ) or "brak odpowiedzi"
+                        log_to_db(
+                            "ERROR",
+                            "live_trading",
+                            f"Binance place_order REJECTED dla {pending.symbol} {pending.side} qty={qty}: {err_msg}",
+                            db=db,
+                        )
                         pending.status = "REJECTED"
                         pending.confirmed_at = utc_now_naive()
+                        db.commit()
                         continue
                     # Parsuj odpowiedź Binance
                     fills = result.get("fills", [])
                     if fills:
                         total_qty_filled = sum(float(f.get("qty", 0)) for f in fills)
-                        total_cost_filled = sum(float(f.get("price", 0)) * float(f.get("qty", 0)) for f in fills)
-                        exec_price = total_cost_filled / total_qty_filled if total_qty_filled > 0 else float(pending.price)
+                        total_cost_filled = sum(
+                            float(f.get("price", 0)) * float(f.get("qty", 0))
+                            for f in fills
+                        )
+                        exec_price = (
+                            total_cost_filled / total_qty_filled
+                            if total_qty_filled > 0
+                            else float(pending.price)
+                        )
                         qty = total_qty_filled if total_qty_filled > 0 else qty
                     else:
-                        exec_price = float(result.get("price", 0)) or float(pending.price)
+                        exec_price = float(result.get("price", 0)) or float(
+                            pending.price
+                        )
                     # Prowizja rzeczywista z fills Binance
                     _live_actual_fee = sum(float(f.get("commission", 0)) for f in fills)
-                    _live_fee_asset = fills[0].get("commissionAsset", "") if fills else ""
+                    _live_fee_asset = (
+                        fills[0].get("commissionAsset", "") if fills else ""
+                    )
                     binance_status = result.get("status", "FILLED")
-                    logger.info(f"✅ LIVE ORDER EXECUTED: {pending.side} {pending.symbol} qty={qty} @ {exec_price} fee={_live_actual_fee} {_live_fee_asset} status={binance_status}")
-                    log_to_db("INFO", "live_trading",
-                              f"LIVE {pending.side} {pending.symbol} qty={qty:.8g} @ {exec_price:.6f} fee={_live_actual_fee:.8g} {_live_fee_asset}",
-                              db=db)
+                    logger.info(
+                        f"✅ LIVE ORDER EXECUTED: {pending.side} {pending.symbol} qty={qty} @ {exec_price} fee={_live_actual_fee} {_live_fee_asset} status={binance_status}"
+                    )
+                    log_to_db(
+                        "INFO",
+                        "live_trading",
+                        f"LIVE {pending.side} {pending.symbol} qty={qty:.8g} @ {exec_price:.6f} fee={_live_actual_fee:.8g} {_live_fee_asset}",
+                        db=db,
+                    )
                 else:
                     _live_actual_fee = 0.0
                     _live_fee_asset = ""
@@ -455,9 +557,16 @@ class DataCollector:
                     mode=p_mode,
                     executed_price=exec_price,
                     executed_quantity=qty,
-                    config_snapshot_id=pending.config_snapshot_id or runtime_ctx.get("snapshot_id"),
-                    entry_reason_code="pending_confirmed_execution" if pending.side == "BUY" else None,
-                    exit_reason_code="pending_confirmed_execution" if pending.side == "SELL" else None,
+                    config_snapshot_id=pending.config_snapshot_id
+                    or runtime_ctx.get("snapshot_id"),
+                    entry_reason_code=(
+                        "pending_confirmed_execution" if pending.side == "BUY" else None
+                    ),
+                    exit_reason_code=(
+                        "pending_confirmed_execution"
+                        if pending.side == "SELL"
+                        else None
+                    ),
                     timestamp=utc_now_naive(),
                 )
                 db.add(order)
@@ -527,7 +636,9 @@ class DataCollector:
                     _planned_tp = None
                     _planned_sl = None
                     try:
-                        _ctx = get_live_context(db, pending.symbol, timeframe="1h", limit=120)
+                        _ctx = get_live_context(
+                            db, pending.symbol, timeframe="1h", limit=120
+                        )
                         if _ctx and _ctx.get("atr") and float(_ctx["atr"]) > 0:
                             _atr = float(_ctx["atr"])
                             _atr_take = float(config.get("atr_take_mult", 3.5))
@@ -567,30 +678,61 @@ class DataCollector:
                         total_qty = float(position.quantity) + qty
                         if total_qty > 0:
                             position.entry_price = (
-                                (float(position.entry_price) * float(position.quantity)) + (exec_price * qty)
+                                (float(position.entry_price) * float(position.quantity))
+                                + (exec_price * qty)
                             ) / total_qty
                         position.quantity = total_qty
                         position.current_price = exec_price
-                        position.total_cost = float(position.total_cost or 0.0) + fee_cost + slippage_cost + spread_cost
+                        position.total_cost = (
+                            float(position.total_cost or 0.0)
+                            + fee_cost
+                            + slippage_cost
+                            + spread_cost
+                        )
                         position.fee_cost = float(position.fee_cost or 0.0) + fee_cost
-                        position.slippage_cost = float(position.slippage_cost or 0.0) + slippage_cost
-                        position.spread_cost = float(position.spread_cost or 0.0) + spread_cost
-                        position.net_pnl = float(position.net_pnl or 0.0) - (fee_cost + slippage_cost + spread_cost)
-                        position.config_snapshot_id = order.config_snapshot_id or position.config_snapshot_id
+                        position.slippage_cost = (
+                            float(position.slippage_cost or 0.0) + slippage_cost
+                        )
+                        position.spread_cost = (
+                            float(position.spread_cost or 0.0) + spread_cost
+                        )
+                        position.net_pnl = float(position.net_pnl or 0.0) - (
+                            fee_cost + slippage_cost + spread_cost
+                        )
+                        position.config_snapshot_id = (
+                            order.config_snapshot_id or position.config_snapshot_id
+                        )
                 elif pending.side == "SELL":
                     gross_pnl = 0.0
                     if position and float(position.quantity) > 0:
                         sell_qty = min(float(position.quantity), qty)
-                        gross_pnl = (exec_price - float(position.entry_price)) * sell_qty
+                        gross_pnl = (
+                            exec_price - float(position.entry_price)
+                        ) * sell_qty
                         position.quantity = float(position.quantity) - sell_qty
                         position.current_price = exec_price
-                        position.unrealized_pnl = (exec_price - float(position.entry_price)) * float(position.quantity)
-                        position.gross_pnl = float(position.gross_pnl or 0.0) + gross_pnl
-                        position.total_cost = float(position.total_cost or 0.0) + fee_cost + slippage_cost + spread_cost
+                        position.unrealized_pnl = (
+                            exec_price - float(position.entry_price)
+                        ) * float(position.quantity)
+                        position.gross_pnl = (
+                            float(position.gross_pnl or 0.0) + gross_pnl
+                        )
+                        position.total_cost = (
+                            float(position.total_cost or 0.0)
+                            + fee_cost
+                            + slippage_cost
+                            + spread_cost
+                        )
                         position.fee_cost = float(position.fee_cost or 0.0) + fee_cost
-                        position.slippage_cost = float(position.slippage_cost or 0.0) + slippage_cost
-                        position.spread_cost = float(position.spread_cost or 0.0) + spread_cost
-                        position.net_pnl = float(position.gross_pnl or 0.0) - float(position.total_cost or 0.0)
+                        position.slippage_cost = (
+                            float(position.slippage_cost or 0.0) + slippage_cost
+                        )
+                        position.spread_cost = (
+                            float(position.spread_cost or 0.0) + spread_cost
+                        )
+                        position.net_pnl = float(position.gross_pnl or 0.0) - float(
+                            position.total_cost or 0.0
+                        )
                         position.exit_reason_code = "pending_confirmed_execution"
                         if float(position.quantity) <= 0:
                             # --- Exit Quality snapshot ---
@@ -598,11 +740,15 @@ class DataCollector:
                             db.delete(position)
                         else:
                             # Częściowe zamknięcie — inkrementuj licznik i aktywuj trailing
-                            position.partial_take_count = int(position.partial_take_count or 0) + 1
+                            position.partial_take_count = (
+                                int(position.partial_take_count or 0) + 1
+                            )
                     else:
                         # Brak pozycji — zapisujemy zlecenie, ale bez zmian pozycji.
                         pass
-                    expected_edge = float(pending.price or exec_price) * float(config.get("min_edge_multiplier", 2.5))
+                    expected_edge = float(pending.price or exec_price) * float(
+                        config.get("min_edge_multiplier", 2.5)
+                    )
                     attach_costs_to_order(
                         db,
                         order=order,
@@ -616,7 +762,8 @@ class DataCollector:
                         db,
                         order=order,
                         gross_pnl=0.0,
-                        expected_edge=float(pending.price or exec_price) * float(config.get("min_edge_multiplier", 2.5)),
+                        expected_edge=float(pending.price or exec_price)
+                        * float(config.get("min_edge_multiplier", 2.5)),
                         config_snapshot_id=order.config_snapshot_id,
                         entry_reason_code="pending_confirmed_execution",
                     )
@@ -643,15 +790,29 @@ class DataCollector:
                     reason_code="pending_confirmed_execution",
                     runtime_ctx=runtime_ctx,
                     mode=p_mode,
-                    execution_check={"eligible": True, "pending_id": pending.id, "quantity": qty, "exec_price": exec_price},
-                    details={"side": pending.side, "reason": pending.reason, "order_id": order.id},
+                    execution_check={
+                        "eligible": True,
+                        "pending_id": pending.id,
+                        "quantity": qty,
+                        "exec_price": exec_price,
+                    },
+                    details={
+                        "side": pending.side,
+                        "reason": pending.reason,
+                        "order_id": order.id,
+                    },
                     order_id=order.id,
                     position_id=position.id if position else None,
                 )
 
                 executed_count += 1
             except Exception as exc:
-                log_exception("demo_trading", f"Błąd wykonania pending order {pending.id}", exc, db=db)
+                log_exception(
+                    "demo_trading",
+                    f"Błąd wykonania pending order {pending.id}",
+                    exc,
+                    db=db,
+                )
                 try:
                     pending.status = "REJECTED"
                     pending.confirmed_at = utc_now_naive()
@@ -673,17 +834,25 @@ class DataCollector:
             db.commit()
         except Exception as exc:
             db.rollback()
-            log_exception("demo_trading", "Błąd commit wykonania pending orders", exc, db=db)
+            log_exception(
+                "demo_trading", "Błąd commit wykonania pending orders", exc, db=db
+            )
             return
 
         if executed_count:
             logger.info(f"✅ Wykonano potwierdzone transakcje: {executed_count}")
 
-    def _save_exit_quality(self, db: Session, position, exit_price: float, config: dict) -> None:
+    def _save_exit_quality(
+        self, db: Session, position, exit_price: float, config: dict
+    ) -> None:
         """Zapisz ExitQuality snapshot przy zamknięciu pozycji."""
         try:
             entry = float(position.entry_price or 0)
-            qty = float(position.quantity or 0) if float(position.quantity or 0) > 0 else float(getattr(position, "_orig_qty", 0) or 0)
+            qty = (
+                float(position.quantity or 0)
+                if float(position.quantity or 0) > 0
+                else float(getattr(position, "_orig_qty", 0) or 0)
+            )
             # qty może być 0 bo już odjęto — weźmy z gross_pnl / move
             move = exit_price - entry
             if qty <= 0 and move != 0 and position.gross_pnl:
@@ -733,7 +902,9 @@ class DataCollector:
             # Czas trwania
             duration_seconds = None
             if position.opened_at:
-                duration_seconds = (utc_now_naive() - position.opened_at).total_seconds()
+                duration_seconds = (
+                    utc_now_naive() - position.opened_at
+                ).total_seconds()
 
             eq = ExitQuality(
                 symbol=position.symbol,
@@ -816,9 +987,24 @@ class DataCollector:
 
         if mismatches:
             msg = "Niezgodność pozycji DB↔Binance: " + " | ".join(mismatches[:10])
+
+            now = utc_now_naive()
+            signature = "|".join(mismatches[:10])
+            if (
+                signature == self._last_binance_mismatch_signature
+                and self._last_binance_mismatch_log_ts
+                and (now - self._last_binance_mismatch_log_ts).total_seconds()
+                < float(self.binance_mismatch_log_cooldown_seconds)
+            ):
+                return
+
+            self._last_binance_mismatch_signature = signature
+            self._last_binance_mismatch_log_ts = now
             log_to_db("WARNING", "binance_sync", msg, db=db)
             logger.warning(f"⚠️ {msg}")
             self._send_telegram_alert("SYNC: Niezgodność", msg)
+        else:
+            self._last_binance_mismatch_signature = None
 
     def _mark_to_market_positions(self, db: Session, mode: str = "demo") -> None:
         """
@@ -953,8 +1139,12 @@ class DataCollector:
             if not bool(config.get("allow_live_trading")):
                 return
             if not bool(config.get("kill_switch_enabled", True)):
-                log_to_db("WARNING", "live_trading",
-                          "kill_switch_enabled=false — LIVE trading wyłączony", db=db)
+                log_to_db(
+                    "WARNING",
+                    "live_trading",
+                    "kill_switch_enabled=false — LIVE trading wyłączony",
+                    db=db,
+                )
                 return
         else:
             return
@@ -967,9 +1157,12 @@ class DataCollector:
         # 0) Sprawdź enabled_strategies — kill switch
         enabled_strats = tc.get("enabled_strategies", ["default"])
         if not enabled_strats or "default" not in enabled_strats:
-            log_to_db("WARNING", "demo_trading",
-                      f"Strategia 'default' wyłączona w enabled_strategies={enabled_strats} — pomijam cykl demo.",
-                      db=db)
+            log_to_db(
+                "WARNING",
+                "demo_trading",
+                f"Strategia 'default' wyłączona w enabled_strategies={enabled_strats} — pomijam cykl demo.",
+                db=db,
+            )
             return
 
         # 1) Exit management — TP/SL/trailing
@@ -996,7 +1189,10 @@ class DataCollector:
         # 2b) Telegram idle alert — co 30 min gdy brak nowych wejść
         if entries == 0:
             idle_interval = 1800  # 30 min
-            if not self._last_idle_alert_ts or (now - self._last_idle_alert_ts).total_seconds() > idle_interval:
+            if (
+                not self._last_idle_alert_ts
+                or (now - self._last_idle_alert_ts).total_seconds() > idle_interval
+            ):
                 self._last_idle_alert_ts = now
                 aggressiveness = tc.get("aggressiveness", "balanced")
                 pos_count = len(tc.get("positions", []))
@@ -1004,7 +1200,9 @@ class DataCollector:
                 # Zbierz powody blokad z ostatnich decyzji
                 recent_skips = (
                     db.query(DecisionTrace.symbol, DecisionTrace.reason_code)
-                    .filter(DecisionTrace.mode == mode, DecisionTrace.action_type == "skip")
+                    .filter(
+                        DecisionTrace.mode == mode, DecisionTrace.action_type == "skip"
+                    )
                     .order_by(DecisionTrace.timestamp.desc())
                     .limit(20)
                     .all()
@@ -1047,7 +1245,9 @@ class DataCollector:
     # Etap 0: ładowanie konfiguracji tradingowej
     # ------------------------------------------------------------------
 
-    def _load_trading_config(self, db: Session, config: dict, runtime_ctx: dict, now, mode: str = "demo") -> dict | None:
+    def _load_trading_config(
+        self, db: Session, config: dict, runtime_ctx: dict, now, mode: str = "demo"
+    ) -> dict | None:
         """Zwraca spłaszczony dict z parametrami do tradingu, lub None jeśli brak danych."""
         demo_quote_ccy = get_demo_quote_ccy()
 
@@ -1056,7 +1256,9 @@ class DataCollector:
             balances = self.binance.get_balances() or []
             cash = 0.0
             for b in balances:
-                if (b.get("asset") or "").upper() == demo_quote_ccy.replace("EUR", "EUR").replace("USDC", "USDC"):
+                if (b.get("asset") or "").upper() == demo_quote_ccy.replace(
+                    "EUR", "EUR"
+                ).replace("USDC", "USDC"):
                     # asset = "EUR" or "USDC"
                     cash = float(b.get("free", 0) or 0)
                     break
@@ -1065,7 +1267,9 @@ class DataCollector:
             positions_value = 0.0
             for p in live_positions_db:
                 try:
-                    positions_value += float(p.current_price or p.entry_price or 0) * float(p.quantity or 0)
+                    positions_value += float(
+                        p.current_price or p.entry_price or 0
+                    ) * float(p.quantity or 0)
                 except Exception:
                     pass
             equity = cash + positions_value
@@ -1074,12 +1278,19 @@ class DataCollector:
                 "initial_balance": initial_balance,
                 "cash": cash,
                 "equity": equity,
-                "unrealized_pnl": sum(float(p.unrealized_pnl or 0) for p in live_positions_db),
+                "unrealized_pnl": sum(
+                    float(p.unrealized_pnl or 0) for p in live_positions_db
+                ),
                 "realized_pnl_24h": 0.0,
             }
         else:
-            account_state = compute_demo_account_state(db, quote_ccy=demo_quote_ccy, now=now)
-            initial_balance = float(account_state.get("initial_balance") or float(os.getenv("DEMO_INITIAL_BALANCE", "10000")))
+            account_state = compute_demo_account_state(
+                db, quote_ccy=demo_quote_ccy, now=now
+            )
+            initial_balance = float(
+                account_state.get("initial_balance")
+                or float(os.getenv("DEMO_INITIAL_BALANCE", "10000"))
+            )
             cash = float(account_state.get("cash") or initial_balance)
             equity = float(account_state.get("equity") or cash)
         reserved_cash = 0.0
@@ -1109,16 +1320,25 @@ class DataCollector:
 
         # Profil agresywności — nadpisuje domyślne progi
         from backend.runtime_settings import AGGRESSIVENESS_PROFILES
+
         aggressiveness = str(config.get("trading_aggressiveness", "balanced")).lower()
-        aggr_profile = AGGRESSIVENESS_PROFILES.get(aggressiveness, AGGRESSIVENESS_PROFILES["balanced"])
+        aggr_profile = AGGRESSIVENESS_PROFILES.get(
+            aggressiveness, AGGRESSIVENESS_PROFILES["balanced"]
+        )
 
         # Runtime-controlled settings (profil agresywności dostarcza domyślne wartości)
         max_daily_loss_pct = float(config.get("max_daily_drawdown", 0.03)) * 100.0
         max_drawdown_pct = float(config.get("max_weekly_drawdown", 0.07)) * 100.0
-        base_risk_per_trade = float(config.get("risk_per_trade", aggr_profile["risk_per_trade"]))
+        base_risk_per_trade = float(
+            config.get("risk_per_trade", aggr_profile["risk_per_trade"])
+        )
         max_trades_per_day = int(config.get("max_trades_per_day", 20))
-        max_open_positions = int(config.get("max_open_positions", aggr_profile["max_open_positions"]))
-        base_cooldown = int(float(config.get("cooldown_after_loss_streak_minutes", 60)) * 60)
+        max_open_positions = int(
+            config.get("max_open_positions", aggr_profile["max_open_positions"])
+        )
+        base_cooldown = int(
+            float(config.get("cooldown_after_loss_streak_minutes", 60)) * 60
+        )
         maker_fee_rate = float(config.get("maker_fee_rate", 0.001))
         taker_fee_rate = float(config.get("taker_fee_rate", 0.001))
         slippage_bps = float(config.get("slippage_bps", 5.0))
@@ -1130,7 +1350,11 @@ class DataCollector:
 
         # Trading-core settings (migrated from env)
         base_qty = float(config.get("demo_order_qty", 0.01))
-        base_min_confidence = float(config.get("demo_min_signal_confidence", aggr_profile["demo_min_signal_confidence"]))
+        base_min_confidence = float(
+            config.get(
+                "demo_min_signal_confidence", aggr_profile["demo_min_signal_confidence"]
+            )
+        )
         max_signal_age = int(config.get("demo_max_signal_age_seconds", 3600))
         min_klines = int(os.getenv("DEMO_MIN_KLINES", "60"))
 
@@ -1150,9 +1374,18 @@ class DataCollector:
         min_qty = float(config.get("demo_min_position_qty", 0.001))
 
         # Nowe flagi DEMO (profil agresywności dostarcza domyślne wartości)
-        demo_require_manual_confirm = bool(config.get("demo_require_manual_confirm", False))
-        demo_allow_soft_buy_entries = bool(config.get("demo_allow_soft_buy_entries", aggr_profile["demo_allow_soft_buy_entries"]))
-        demo_min_entry_score = float(config.get("demo_min_entry_score", aggr_profile["demo_min_entry_score"]))
+        demo_require_manual_confirm = bool(
+            config.get("demo_require_manual_confirm", False)
+        )
+        demo_allow_soft_buy_entries = bool(
+            config.get(
+                "demo_allow_soft_buy_entries",
+                aggr_profile["demo_allow_soft_buy_entries"],
+            )
+        )
+        demo_min_entry_score = float(
+            config.get("demo_min_entry_score", aggr_profile["demo_min_entry_score"])
+        )
 
         # Maksymalna pewność = mniej transakcji, wyższe progi, dłuższy cooldown.
         if max_certainty_mode:
@@ -1163,30 +1396,48 @@ class DataCollector:
             max_trades_per_day = min(max_trades_per_day, 1)
             base_cooldown = max(base_cooldown, 3600)
             base_risk_per_trade = min(base_risk_per_trade, 0.002)
-            demo_require_manual_confirm = True  # max_certainty zawsze wymaga potwierdzenia
+            demo_require_manual_confirm = (
+                True  # max_certainty zawsze wymaga potwierdzenia
+            )
 
-        pending_cooldown_seconds = int(config.get("pending_order_cooldown_seconds", aggr_profile["pending_order_cooldown_seconds"]))
+        pending_cooldown_seconds = int(
+            config.get(
+                "pending_order_cooldown_seconds",
+                aggr_profile["pending_order_cooldown_seconds"],
+            )
+        )
 
         # Zakresy z bloga (OpenAI/heurystyka)
         range_map: dict[str, dict] = {}
         max_ai_age_seconds = int(config.get("max_ai_insights_age_seconds", 7200))
-        use_heuristic_fallback = bool(config.get("demo_use_heuristic_ranges_fallback", True))
+        use_heuristic_fallback = bool(
+            config.get("demo_use_heuristic_ranges_fallback", True)
+        )
         ai_ranges_stale = False
         try:
             from backend.database import BlogPost
 
-            latest_blog = db.query(BlogPost).order_by(BlogPost.created_at.desc()).first()
+            latest_blog = (
+                db.query(BlogPost).order_by(BlogPost.created_at.desc()).first()
+            )
             if latest_blog and latest_blog.created_at:
                 age_s = (now - latest_blog.created_at).total_seconds()
                 if age_s > max_ai_age_seconds:
                     ai_ranges_stale = True
-                    if not self.last_stale_ai_log_ts or (now - self.last_stale_ai_log_ts).total_seconds() > 300:
+                    if (
+                        not self.last_stale_ai_log_ts
+                        or (now - self.last_stale_ai_log_ts).total_seconds() > 300
+                    ):
                         self.last_stale_ai_log_ts = now
                         log_to_db(
                             "WARNING",
                             "demo_trading",
                             f"Zakresy AI są nieaktualne ({int(age_s)}s temu) — "
-                            + ("używam heurystyki ATR jako fallback." if use_heuristic_fallback else "zatrzymuję DEMO."),
+                            + (
+                                "używam heurystyki ATR jako fallback."
+                                if use_heuristic_fallback
+                                else "zatrzymuję DEMO."
+                            ),
                             db=db,
                         )
                     if not use_heuristic_fallback:
@@ -1197,31 +1448,70 @@ class DataCollector:
                     if ins.get("range") and ins.get("symbol"):
                         range_map[str(ins.get("symbol"))] = ins.get("range")
         except Exception as exc:
-            log_exception("demo_trading", "Błąd odczytu zakresów OpenAI z bloga", exc, db=db)
+            log_exception(
+                "demo_trading", "Błąd odczytu zakresów OpenAI z bloga", exc, db=db
+            )
             ai_ranges_stale = True
 
-        # Fallback: heurystyczne zakresy ATR dla symboli bez zakresów AI
-        if not range_map or ai_ranges_stale:
-            if use_heuristic_fallback:
-                try:
-                    from backend.analysis import generate_market_insights, _heuristic_ranges
-                    insights_fallback = generate_market_insights(db, self.watchlist, timeframe="1h")
-                    heuristic_list = _heuristic_ranges(insights_fallback)
-                    # _heuristic_ranges zwraca List[Dict] — konwertuj na dict symbol→range
-                    for item in heuristic_list:
-                        sym = item.get("symbol")
-                        if sym and sym not in range_map:
-                            range_map[sym] = item
-                    if range_map and not ai_ranges_stale:
-                        pass  # loguj tylko raz
-                    elif range_map:
-                        log_to_db("INFO", "demo_trading",
-                                  f"Heurystyczne zakresy ATR dla {len(range_map)} symboli (fallback AI).", db=db)
-                except Exception as exc2:
-                    log_exception("demo_trading", "Błąd generowania heurystycznych zakresów", exc2, db=db)
+        # Fallback/supplement: heurystyczne zakresy ATR
+        # Uruchamiaj gdy: range_map pusty LUB blog nieaktualny LUB są symbole watchlisty bez zakresu.
+        # Dzięki temu nowe symbole dodane do watchlisty (np. po WATCHLIST merge) zawsze dostaną zakres.
+        missing_in_range = [s for s in self.watchlist if s not in range_map]
+        if (
+            not range_map or ai_ranges_stale or missing_in_range
+        ) and use_heuristic_fallback:
+            try:
+                from backend.analysis import _heuristic_ranges, generate_market_insights
+
+                # Generuj tylko dla brakujących symboli (lub wszystkich gdy blog stale/empty)
+                syms_for_heuristic = (
+                    missing_in_range
+                    if (range_map and not ai_ranges_stale)
+                    else self.watchlist
+                )
+                insights_fallback = generate_market_insights(
+                    db, syms_for_heuristic, timeframe="1h"
+                )
+                heuristic_list = _heuristic_ranges(insights_fallback)
+                # _heuristic_ranges zwraca List[Dict] — konwertuj na dict symbol→range
+                added = []
+                for item in heuristic_list:
+                    sym = item.get("symbol")
+                    if sym and sym not in range_map:
+                        range_map[sym] = item
+                        added.append(sym)
+                if added:
+                    added_sorted = sorted(added)
+                    changed = added_sorted != self._last_heuristic_suppl_syms
+                    elapsed = (
+                        (now - self._last_heuristic_suppl_log_ts).total_seconds()
+                        if self._last_heuristic_suppl_log_ts
+                        else 9999
+                    )
+                    if changed or elapsed > 600:
+                        self._last_heuristic_suppl_log_ts = now
+                        self._last_heuristic_suppl_syms = added_sorted
+                        log_to_db(
+                            "INFO",
+                            "demo_trading",
+                            f"Heurystyczne zakresy ATR uzupełnione dla: {', '.join(added_sorted)}.",
+                            db=db,
+                        )
+            except Exception as exc2:
+                log_exception(
+                    "demo_trading",
+                    "Błąd generowania heurystycznych zakresów",
+                    exc2,
+                    db=db,
+                )
 
         if not range_map:
-            log_to_db("ERROR", "demo_trading", "Brak jakichkolwiek zakresów (AI i heurystyka) — pomijam decyzje DEMO", db=db)
+            log_to_db(
+                "ERROR",
+                "demo_trading",
+                "Brak jakichkolwiek zakresów (AI i heurystyka) — pomijam decyzje DEMO",
+                db=db,
+            )
             return None
 
         # Ryzyko (dzienny limit + drawdown)
@@ -1231,11 +1521,40 @@ class DataCollector:
         daily_loss_triggered = (realized_pnl_24h + unrealized_pnl) <= daily_loss_limit
 
         positions_all = db.query(Position).filter(Position.mode == mode).all()
-        positions = [
-            p
-            for p in positions_all
-            if (p.symbol or "").strip().upper().replace("/", "").replace("-", "").endswith(demo_quote_ccy)
-        ]
+        if mode == "live":
+            # LIVE: zarządzaj exit engine TYLKO dla pozycji otwartych przez bota (ma BUY Order)
+            # Pre-existing Binance holdings (bez własnych BUY orders) są pominięte
+            from backend.database import Order as _BotOrd
+
+            _bot_bought = {
+                r[0]
+                for r in db.query(_BotOrd.symbol)
+                .filter(_BotOrd.mode == "live", _BotOrd.side == "BUY")
+                .distinct()
+                .all()
+            }
+            positions = [
+                p
+                for p in positions_all
+                if p.symbol in _bot_bought
+                and (p.symbol or "")
+                .strip()
+                .upper()
+                .replace("/", "")
+                .replace("-", "")
+                .endswith(demo_quote_ccy)
+            ]
+        else:
+            positions = [
+                p
+                for p in positions_all
+                if (p.symbol or "")
+                .strip()
+                .upper()
+                .replace("/", "")
+                .replace("-", "")
+                .endswith(demo_quote_ccy)
+            ]
 
         # Helpers for pending order checks
         def _has_active_pending(sym: str) -> bool:
@@ -1259,7 +1578,9 @@ class DataCollector:
             )
             if not last or not last.created_at:
                 return False
-            return (now - last.created_at).total_seconds() < float(pending_cooldown_seconds)
+            return (now - last.created_at).total_seconds() < float(
+                pending_cooldown_seconds
+            )
 
         return {
             "now": now,
@@ -1350,12 +1671,21 @@ class DataCollector:
 
         _mode_label = str(tc.get("mode") or "demo").upper()
 
-        def _exit_message(reason_code: str, sym: str, price: float, tp: float, sl: float,
-                          qty: float = 0, partial: bool = False,
-                          entry_price: float = 0) -> str:
+        def _exit_message(
+            reason_code: str,
+            sym: str,
+            price: float,
+            tp: float,
+            sl: float,
+            qty: float = 0,
+            partial: bool = False,
+            entry_price: float = 0,
+        ) -> str:
             base = _reason_pl.get(reason_code, f"Wyjście ({reason_code})")
             # PnL
-            pnl_pct = ((price - entry_price) / entry_price * 100) if entry_price > 0 else 0
+            pnl_pct = (
+                ((price - entry_price) / entry_price * 100) if entry_price > 0 else 0
+            )
             pnl_emoji = "📈" if pnl_pct >= 0 else "📉"
             pnl_str = f"{pnl_emoji} PnL: {pnl_pct:+.2f}%"
 
@@ -1432,8 +1762,16 @@ class DataCollector:
             partial_count = int(pos.partial_take_count or 0)
 
             # TP/SL: używamy planned_tp/sl z momentu wejścia, fallback do ATR
-            stop_loss = float(pos.planned_sl) if pos.planned_sl else (entry - atr * atr_stop_mult)
-            take_profit = float(pos.planned_tp) if pos.planned_tp else (entry + atr * atr_take_mult)
+            stop_loss = (
+                float(pos.planned_sl)
+                if pos.planned_sl
+                else (entry - atr * atr_stop_mult)
+            )
+            take_profit = (
+                float(pos.planned_tp)
+                if pos.planned_tp
+                else (entry + atr * atr_take_mult)
+            )
 
             # Aktualizuj highest_price_seen (MFE tracking)
             prev_high = float(pos.highest_price_seen or entry)
@@ -1462,12 +1800,15 @@ class DataCollector:
                 _latest_fc is not None
                 and _latest_fc.direction == "WZROST"
                 and _latest_fc.forecast_price is not None
-                and float(_latest_fc.forecast_price) > price * 1.005  # prognoza >0.5% powyżej ceny
+                and float(_latest_fc.forecast_price)
+                > price * 1.005  # prognoza >0.5% powyżej ceny
             )
 
             # Trailing stop — aktualizuj poziom jeśli aktywny
             trailing_active = bool(pos.trailing_active)
-            trailing_stop = float(pos.trailing_stop_price) if pos.trailing_stop_price else None
+            trailing_stop = (
+                float(pos.trailing_stop_price) if pos.trailing_stop_price else None
+            )
             if trailing_active:
                 new_trail = price - atr * trail_mult
                 if trailing_stop is None or new_trail > trailing_stop:
@@ -1477,50 +1818,132 @@ class DataCollector:
             # ━━━ WARSTWA 1: HARD EXIT — Stop Loss ━━━━━━━━━━━━━━━━━━━━━━━━━
             if price <= stop_loss:
                 reason_code = "stop_loss_hit"
-                msg = _exit_message(reason_code, sym, price, take_profit, stop_loss, qty, entry_price=entry)
+                msg = _exit_message(
+                    reason_code,
+                    sym,
+                    price,
+                    take_profit,
+                    stop_loss,
+                    qty,
+                    entry_price=entry,
+                )
                 self._trace_decision(
-                    db, symbol=sym, action="CREATE_PENDING_EXIT", reason_code=reason_code,
-                    runtime_ctx=runtime_ctx, mode="demo",
-                    signal_summary={"source": "exit_engine", "layer": "hard_exit", "atr": atr, "entry": entry, "price": price},
+                    db,
+                    symbol=sym,
+                    action="CREATE_PENDING_EXIT",
+                    reason_code=reason_code,
+                    runtime_ctx=runtime_ctx,
+                    mode="demo",
+                    signal_summary={
+                        "source": "exit_engine",
+                        "layer": "hard_exit",
+                        "atr": atr,
+                        "entry": entry,
+                        "price": price,
+                    },
                     risk_check={"daily_loss_triggered": daily_loss_triggered},
-                    cost_check={"eligible": True}, execution_check={"eligible": True},
-                    details={"stop_loss": stop_loss, "take_profit": take_profit, "quantity": qty},
+                    cost_check={"eligible": True},
+                    execution_check={"eligible": True},
+                    details={
+                        "stop_loss": stop_loss,
+                        "take_profit": take_profit,
+                        "quantity": qty,
+                    },
                 )
                 pending_id = self._create_pending_order(
-                    db=db, symbol=sym, side="SELL", price=price, qty=qty, mode="demo",
+                    db=db,
+                    symbol=sym,
+                    side="SELL",
+                    price=price,
+                    qty=qty,
+                    mode="demo",
                     reason=f"[SL] Stop Loss @ {price:.6f} (SL={stop_loss:.6f})",
-                    config_snapshot_id=runtime_ctx.get("snapshot_id"), strategy_name="demo_collector",
+                    config_snapshot_id=runtime_ctx.get("snapshot_id"),
+                    strategy_name="demo_collector",
                 )
                 # Eskalacja cooldown po SL — zapobiega natychmiastowemu re-entry
-                sl_state = self.demo_state.get(sym, {"loss_streak": 0, "cooldown": base_cooldown})
-                sl_state["loss_streak"] = min(sl_state.get("loss_streak", 0) + 1, loss_streak_limit)
-                sl_state["cooldown"] = min(base_cooldown * (1 + sl_state["loss_streak"]), 7200)
+                sl_state = self.demo_state.get(
+                    sym, {"loss_streak": 0, "cooldown": base_cooldown}
+                )
+                sl_state["loss_streak"] = min(
+                    sl_state.get("loss_streak", 0) + 1, loss_streak_limit
+                )
+                sl_state["cooldown"] = min(
+                    base_cooldown * (1 + sl_state["loss_streak"]), 7200
+                )
                 sl_state["win_streak"] = 0
                 self.demo_state[sym] = sl_state
-                self._send_telegram_alert(f"{_mode_label}: Stop Loss", msg, force_send=True)
-                db.add(Alert(alert_type="RISK", severity="WARNING", title=f"SL {sym}",
-                             message=msg, symbol=sym, is_sent=True, timestamp=now))
+                self._send_telegram_alert(
+                    f"{_mode_label}: Stop Loss", msg, force_send=True
+                )
+                db.add(
+                    Alert(
+                        alert_type="RISK",
+                        severity="WARNING",
+                        title=f"SL {sym}",
+                        message=msg,
+                        symbol=sym,
+                        is_sent=True,
+                        timestamp=now,
+                    )
+                )
                 continue
 
             # ━━━ WARSTWA 2: TRAILING STOP ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
             if trailing_active and trailing_stop and price <= trailing_stop:
                 reason_code = "trailing_lock_profit"
-                msg = _exit_message(reason_code, sym, price, take_profit, trailing_stop, qty, entry_price=entry)
+                msg = _exit_message(
+                    reason_code,
+                    sym,
+                    price,
+                    take_profit,
+                    trailing_stop,
+                    qty,
+                    entry_price=entry,
+                )
                 self._trace_decision(
-                    db, symbol=sym, action="CREATE_PENDING_EXIT", reason_code=reason_code,
-                    runtime_ctx=runtime_ctx, mode="demo",
-                    signal_summary={"source": "exit_engine", "layer": "trailing", "price": price, "trailing_stop": trailing_stop},
-                    risk_check={}, cost_check={"eligible": True}, execution_check={"eligible": True},
+                    db,
+                    symbol=sym,
+                    action="CREATE_PENDING_EXIT",
+                    reason_code=reason_code,
+                    runtime_ctx=runtime_ctx,
+                    mode="demo",
+                    signal_summary={
+                        "source": "exit_engine",
+                        "layer": "trailing",
+                        "price": price,
+                        "trailing_stop": trailing_stop,
+                    },
+                    risk_check={},
+                    cost_check={"eligible": True},
+                    execution_check={"eligible": True},
                     details={"trailing_stop": trailing_stop, "quantity": qty},
                 )
                 pending_id = self._create_pending_order(
-                    db=db, symbol=sym, side="SELL", price=price, qty=qty, mode="demo",
+                    db=db,
+                    symbol=sym,
+                    side="SELL",
+                    price=price,
+                    qty=qty,
+                    mode="demo",
                     reason=f"[TRAIL] Trailing stop @ {price:.6f} (trail={trailing_stop:.6f})",
-                    config_snapshot_id=runtime_ctx.get("snapshot_id"), strategy_name="demo_collector",
+                    config_snapshot_id=runtime_ctx.get("snapshot_id"),
+                    strategy_name="demo_collector",
                 )
-                self._send_telegram_alert(f"{_mode_label}: Trailing Stop", msg, force_send=True)
-                db.add(Alert(alert_type="SIGNAL", severity="INFO", title=f"TRAIL {sym}",
-                             message=msg, symbol=sym, is_sent=True, timestamp=now))
+                self._send_telegram_alert(
+                    f"{_mode_label}: Trailing Stop", msg, force_send=True
+                )
+                db.add(
+                    Alert(
+                        alert_type="SIGNAL",
+                        severity="INFO",
+                        title=f"TRAIL {sym}",
+                        message=msg,
+                        symbol=sym,
+                        is_sent=True,
+                        timestamp=now,
+                    )
+                )
                 continue
 
             # ━━━ WARSTWA 3: TAKE PROFIT (częściowy lub pełny) ━━━━━━━━━━━━━
@@ -1528,95 +1951,230 @@ class DataCollector:
                 # Oceń siłę trendu — czy kontynuować czy zamknąć
                 # forecast_bullish działa jako dodatkowy sygnał utrzymania pozycji
                 trend_strong = (
-                    (
-                        ema_20 is not None and ema_50 is not None
-                        and float(ema_20) > float(ema_50)
-                        and 40.0 < rsi < 75.0
-                    )
-                    or forecast_bullish  # AI prognoza wzrostu → trzymaj pozycję
-                )
+                    ema_20 is not None
+                    and ema_50 is not None
+                    and float(ema_20) > float(ema_50)
+                    and 40.0 < rsi < 75.0
+                ) or forecast_bullish  # AI prognoza wzrostu → trzymaj pozycję
                 partial_qty = round(qty * 0.25, 8)
-                can_partial = (partial_count < 2) and (partial_qty > 0) and (partial_qty < qty * 0.95)
+                can_partial = (
+                    (partial_count < 2)
+                    and (partial_qty > 0)
+                    and (partial_qty < qty * 0.95)
+                )
 
                 if can_partial and trend_strong:
                     # Częściowe zamknięcie 25% + aktywuj trailing + podnieś SL
                     reason_code = "tp_partial_keep_trend"
-                    msg = _exit_message(reason_code, sym, price, take_profit, stop_loss, partial_qty, partial=True, entry_price=entry)
+                    msg = _exit_message(
+                        reason_code,
+                        sym,
+                        price,
+                        take_profit,
+                        stop_loss,
+                        partial_qty,
+                        partial=True,
+                        entry_price=entry,
+                    )
                     self._trace_decision(
-                        db, symbol=sym, action="CREATE_PENDING_EXIT", reason_code=reason_code,
-                        runtime_ctx=runtime_ctx, mode="demo",
-                        signal_summary={"source": "exit_engine", "layer": "tp_soft", "price": price,
-                                        "tp": take_profit, "rsi": rsi, "ema_trend": "up",
-                                        "forecast_bullish": forecast_bullish},
-                        risk_check={}, cost_check={"eligible": True}, execution_check={"eligible": True},
-                        details={"partial_qty": partial_qty, "full_qty": qty, "partial_count": partial_count},
+                        db,
+                        symbol=sym,
+                        action="CREATE_PENDING_EXIT",
+                        reason_code=reason_code,
+                        runtime_ctx=runtime_ctx,
+                        mode="demo",
+                        signal_summary={
+                            "source": "exit_engine",
+                            "layer": "tp_soft",
+                            "price": price,
+                            "tp": take_profit,
+                            "rsi": rsi,
+                            "ema_trend": "up",
+                            "forecast_bullish": forecast_bullish,
+                        },
+                        risk_check={},
+                        cost_check={"eligible": True},
+                        execution_check={"eligible": True},
+                        details={
+                            "partial_qty": partial_qty,
+                            "full_qty": qty,
+                            "partial_count": partial_count,
+                        },
                     )
                     pending_id = self._create_pending_order(
-                        db=db, symbol=sym, side="SELL", price=price, qty=partial_qty, mode="demo",
+                        db=db,
+                        symbol=sym,
+                        side="SELL",
+                        price=price,
+                        qty=partial_qty,
+                        mode="demo",
                         reason=f"[TP-PARTIAL] Trend trwa — zamykamy 25% @ {price:.6f} (TP={take_profit:.6f})",
-                        config_snapshot_id=runtime_ctx.get("snapshot_id"), strategy_name="demo_collector",
+                        config_snapshot_id=runtime_ctx.get("snapshot_id"),
+                        strategy_name="demo_collector",
                     )
                     # Podnieś SL do break-even lub wyżej
                     pos.planned_sl = max(stop_loss, entry)
                     # Aktywuj trailing
                     pos.trailing_active = True
                     new_trail = price - atr * trail_mult
-                    if not pos.trailing_stop_price or new_trail > float(pos.trailing_stop_price):
+                    if not pos.trailing_stop_price or new_trail > float(
+                        pos.trailing_stop_price
+                    ):
                         pos.trailing_stop_price = new_trail
-                    self._send_telegram_alert(f"{_mode_label}: Częściowe TP", msg, force_send=True)
-                    db.add(Alert(alert_type="SIGNAL", severity="INFO", title=f"TP-PARTIAL {sym}",
-                                 message=msg, symbol=sym, is_sent=True, timestamp=now))
+                    self._send_telegram_alert(
+                        f"{_mode_label}: Częściowe TP", msg, force_send=True
+                    )
+                    db.add(
+                        Alert(
+                            alert_type="SIGNAL",
+                            severity="INFO",
+                            title=f"TP-PARTIAL {sym}",
+                            message=msg,
+                            symbol=sym,
+                            is_sent=True,
+                            timestamp=now,
+                        )
+                    )
                 else:
                     # Pełne zamknięcie
-                    reason_code = "tp_full_reversal" if (not trend_strong) else "weak_trend_after_tp"
-                    msg = _exit_message(reason_code, sym, price, take_profit, stop_loss, qty, entry_price=entry)
+                    reason_code = (
+                        "tp_full_reversal"
+                        if (not trend_strong)
+                        else "weak_trend_after_tp"
+                    )
+                    msg = _exit_message(
+                        reason_code,
+                        sym,
+                        price,
+                        take_profit,
+                        stop_loss,
+                        qty,
+                        entry_price=entry,
+                    )
                     self._trace_decision(
-                        db, symbol=sym, action="CREATE_PENDING_EXIT", reason_code=reason_code,
-                        runtime_ctx=runtime_ctx, mode="demo",
-                        signal_summary={"source": "exit_engine", "layer": "tp_full", "price": price,
-                                        "tp": take_profit, "rsi": rsi, "trend_strong": trend_strong,
-                                        "forecast_bullish": forecast_bullish},
-                        risk_check={}, cost_check={"eligible": True}, execution_check={"eligible": True},
-                        details={"quantity": qty, "trend_strong": trend_strong, "partial_count": partial_count},
+                        db,
+                        symbol=sym,
+                        action="CREATE_PENDING_EXIT",
+                        reason_code=reason_code,
+                        runtime_ctx=runtime_ctx,
+                        mode="demo",
+                        signal_summary={
+                            "source": "exit_engine",
+                            "layer": "tp_full",
+                            "price": price,
+                            "tp": take_profit,
+                            "rsi": rsi,
+                            "trend_strong": trend_strong,
+                            "forecast_bullish": forecast_bullish,
+                        },
+                        risk_check={},
+                        cost_check={"eligible": True},
+                        execution_check={"eligible": True},
+                        details={
+                            "quantity": qty,
+                            "trend_strong": trend_strong,
+                            "partial_count": partial_count,
+                        },
                     )
                     pending_id = self._create_pending_order(
-                        db=db, symbol=sym, side="SELL", price=price, qty=qty, mode="demo",
+                        db=db,
+                        symbol=sym,
+                        side="SELL",
+                        price=price,
+                        qty=qty,
+                        mode="demo",
                         reason=f"[TP-FULL] {_reason_pl.get(reason_code, reason_code)} @ {price:.6f}",
-                        config_snapshot_id=runtime_ctx.get("snapshot_id"), strategy_name="demo_collector",
+                        config_snapshot_id=runtime_ctx.get("snapshot_id"),
+                        strategy_name="demo_collector",
                     )
                     # Sukces — zeruj loss_streak, zwiększ win_streak
-                    tp_state = self.demo_state.get(sym, {"loss_streak": 0, "win_streak": 0, "cooldown": base_cooldown})
+                    tp_state = self.demo_state.get(
+                        sym,
+                        {"loss_streak": 0, "win_streak": 0, "cooldown": base_cooldown},
+                    )
                     tp_state["loss_streak"] = 0
                     tp_state["win_streak"] = tp_state.get("win_streak", 0) + 1
                     tp_state["cooldown"] = base_cooldown
                     self.demo_state[sym] = tp_state
-                    self._send_telegram_alert(f"{_mode_label}: EXIT TP", msg, force_send=True)
-                    db.add(Alert(alert_type="SIGNAL", severity="INFO", title=f"TP {sym}",
-                                 message=msg, symbol=sym, is_sent=True, timestamp=now))
+                    self._send_telegram_alert(
+                        f"{_mode_label}: EXIT TP", msg, force_send=True
+                    )
+                    db.add(
+                        Alert(
+                            alert_type="SIGNAL",
+                            severity="INFO",
+                            title=f"TP {sym}",
+                            message=msg,
+                            symbol=sym,
+                            is_sent=True,
+                            timestamp=now,
+                        )
+                    )
                 continue
 
             # ━━━ WARSTWA 4: REVERSAL CHECK (dla pozycji po TP lub z trailing) ━━━
-            if (trailing_active or partial_count > 0) and ema_20 is not None and ema_50 is not None:
+            if (
+                (trailing_active or partial_count > 0)
+                and ema_20 is not None
+                and ema_50 is not None
+            ):
                 pnl_pct = (price - entry) / entry * 100 if entry > 0 else 0
                 if pnl_pct > 2.0 and float(ema_20) < float(ema_50) and rsi > 65.0:
                     reason_code = "tp_full_reversal"
-                    msg = _exit_message(reason_code, sym, price, take_profit, stop_loss, qty, entry_price=entry)
+                    msg = _exit_message(
+                        reason_code,
+                        sym,
+                        price,
+                        take_profit,
+                        stop_loss,
+                        qty,
+                        entry_price=entry,
+                    )
                     self._trace_decision(
-                        db, symbol=sym, action="CREATE_PENDING_EXIT", reason_code=reason_code,
-                        runtime_ctx=runtime_ctx, mode="demo",
-                        signal_summary={"source": "exit_engine", "layer": "reversal", "price": price,
-                                        "rsi": rsi, "ema_20": float(ema_20), "ema_50": float(ema_50)},
-                        risk_check={}, cost_check={"eligible": True}, execution_check={"eligible": True},
+                        db,
+                        symbol=sym,
+                        action="CREATE_PENDING_EXIT",
+                        reason_code=reason_code,
+                        runtime_ctx=runtime_ctx,
+                        mode="demo",
+                        signal_summary={
+                            "source": "exit_engine",
+                            "layer": "reversal",
+                            "price": price,
+                            "rsi": rsi,
+                            "ema_20": float(ema_20),
+                            "ema_50": float(ema_50),
+                        },
+                        risk_check={},
+                        cost_check={"eligible": True},
+                        execution_check={"eligible": True},
                         details={"pnl_pct": pnl_pct, "quantity": qty},
                     )
                     pending_id = self._create_pending_order(
-                        db=db, symbol=sym, side="SELL", price=price, qty=qty, mode="demo",
+                        db=db,
+                        symbol=sym,
+                        side="SELL",
+                        price=price,
+                        qty=qty,
+                        mode="demo",
                         reason=f"[REVERSAL] Odwrócenie trendu — zysk +{pnl_pct:.1f}% @ {price:.6f}",
-                        config_snapshot_id=runtime_ctx.get("snapshot_id"), strategy_name="demo_collector",
+                        config_snapshot_id=runtime_ctx.get("snapshot_id"),
+                        strategy_name="demo_collector",
                     )
-                    self._send_telegram_alert(f"{_mode_label}: EXIT Reversal", msg, force_send=True)
-                    db.add(Alert(alert_type="SIGNAL", severity="INFO", title=f"REVERSAL {sym}",
-                                 message=msg, symbol=sym, is_sent=True, timestamp=now))
+                    self._send_telegram_alert(
+                        f"{_mode_label}: EXIT Reversal", msg, force_send=True
+                    )
+                    db.add(
+                        Alert(
+                            alert_type="SIGNAL",
+                            severity="INFO",
+                            title=f"REVERSAL {sym}",
+                            message=msg,
+                            symbol=sym,
+                            is_sent=True,
+                            timestamp=now,
+                        )
+                    )
                     continue
 
         # Drawdown alerts
@@ -1630,11 +2188,16 @@ class DataCollector:
             if p.entry_price and p.current_price and p.entry_price > 0:
                 drawdown_pct = ((p.current_price - p.entry_price) / p.entry_price) * 100
                 if drawdown_pct <= -max_drawdown_pct:
-                    if not self.last_risk_alert_ts or (now - self.last_risk_alert_ts).total_seconds() > 900:
+                    if (
+                        not self.last_risk_alert_ts
+                        or (now - self.last_risk_alert_ts).total_seconds() > 900
+                    ):
                         self.last_risk_alert_ts = now
                         msg = f"🔴 Pozycja {p.symbol} traci za dużo ({drawdown_pct:.1f}%, limit: {max_drawdown_pct}%).\nSystem ograniczył ryzyko na tym symbolu.\nCo zrobić: rozważ zamknięcie pozycji."
                         log_to_db("WARNING", "demo_trading", msg, db=db)
-                        self._send_telegram_alert("RISK: Drawdown", msg, force_send=True)
+                        self._send_telegram_alert(
+                            "RISK: Drawdown", msg, force_send=True
+                        )
                         db.add(
                             Alert(
                                 alert_type="RISK",
@@ -1646,9 +2209,15 @@ class DataCollector:
                                 timestamp=now,
                             )
                         )
-                        state = self.demo_state.get(p.symbol, {"loss_streak": 0, "cooldown": base_cooldown})
-                        state["loss_streak"] = min(state.get("loss_streak", 0) + 1, loss_streak_limit)
-                        state["cooldown"] = min(base_cooldown * (1 + state["loss_streak"]), 3600)
+                        state = self.demo_state.get(
+                            p.symbol, {"loss_streak": 0, "cooldown": base_cooldown}
+                        )
+                        state["loss_streak"] = min(
+                            state.get("loss_streak", 0) + 1, loss_streak_limit
+                        )
+                        state["cooldown"] = min(
+                            base_cooldown * (1 + state["loss_streak"]), 3600
+                        )
                         self.demo_state[p.symbol] = state
 
     # ------------------------------------------------------------------
@@ -1679,7 +2248,12 @@ class DataCollector:
             # Pobierz aktualną cenę
             price = float(pos.current_price or 0)
             if price <= 0:
-                md = db.query(MarketData).filter(MarketData.symbol == sym).order_by(MarketData.timestamp.desc()).first()
+                md = (
+                    db.query(MarketData)
+                    .filter(MarketData.symbol == sym)
+                    .order_by(MarketData.timestamp.desc())
+                    .first()
+                )
                 if md:
                     price = float(md.price or 0)
             if price <= 0:
@@ -1732,12 +2306,17 @@ class DataCollector:
                 )
                 logger.info(
                     "[HOLD] %s osiągnął target %.2f EUR (cel %.0f EUR) → pending SELL %s",
-                    sym, position_value, target_eur, pending_id,
+                    sym,
+                    position_value,
+                    target_eur,
+                    pending_id,
                 )
             else:
                 logger.debug(
                     "[HOLD] %s wartość %.2f EUR < cel %.0f EUR — trzymamy",
-                    sym, position_value, target_eur,
+                    sym,
+                    position_value,
+                    target_eur,
                 )
 
     # ------------------------------------------------------------------
@@ -1781,9 +2360,13 @@ class DataCollector:
             closeable.append(pos)
 
         if not closeable:
-            log_to_db("WARNING", "capital_rotation",
-                      f"Brak wolnych środków ({available_cash:.2f}) — wszystkie pozycje w HOLD lub pending. "
-                      "Nie można dokonać rotacji kapitału.", db=db)
+            log_to_db(
+                "WARNING",
+                "capital_rotation",
+                f"Brak wolnych środków ({available_cash:.2f}) — wszystkie pozycje w HOLD lub pending. "
+                "Nie można dokonać rotacji kapitału.",
+                db=db,
+            )
             return False
 
         # Najgorsza pozycja = najniższy unrealized_pnl (stop bleeding)
@@ -1794,17 +2377,23 @@ class DataCollector:
         # Oblicz PnL% jeszcze przed pobraniem ceny, na podstawie entry + current_price
         _entry_pre = float(worst.entry_price or 0)
         _cur_pre = float(worst.current_price or worst.entry_price or 0)
-        _pnl_pct_pre = (_cur_pre - _entry_pre) / _entry_pre * 100 if _entry_pre > 0 else 0.0
+        _pnl_pct_pre = (
+            (_cur_pre - _entry_pre) / _entry_pre * 100 if _entry_pre > 0 else 0.0
+        )
 
         # GUARD: nie rotuj jeśli najgorsza pozycja jest na plusie — nie zamykamy zysków tylko dla nowego wejścia
         if _pnl_pct_pre >= 0:
-            log_to_db("INFO", "capital_rotation",
-                      f"Rotacja kapitału pominięta: {sym} PnL={_pnl_pct_pre:+.1f}% — "
-                      f"wszystkie pozycje na plusie. Nie zamykamy zyskownych pozycji.",
-                      db=db)
+            log_to_db(
+                "INFO",
+                "capital_rotation",
+                f"Rotacja kapitału pominięta: {sym} PnL={_pnl_pct_pre:+.1f}% — "
+                f"wszystkie pozycje na plusie. Nie zamykamy zyskownych pozycji.",
+                db=db,
+            )
             logger.info(
                 "[CAPITAL_ROTATION] SKIP — %s PnL=%+.1f%% (all profitable, no rotation)",
-                sym, _pnl_pct_pre,
+                sym,
+                _pnl_pct_pre,
             )
             _mode_label_skip = mode.upper()
             _pos_summary = ", ".join(
@@ -1844,18 +2433,25 @@ class DataCollector:
         pnl_emoji = "📉" if pnl < 0 else "📈"
 
         pending_id = self._create_pending_order(
-            db=db, symbol=sym, side="SELL", price=price, qty=qty,
+            db=db,
+            symbol=sym,
+            side="SELL",
+            price=price,
+            qty=qty,
             mode=mode,
             reason=f"Rotacja kapitału: brak wolnych środków ({available_cash:.2f} < {min_order_notional:.0f}). "
-                   f"Zamykam najgorszą pozycję {sym} PnL={pnl_pct:+.1f}%.",
+            f"Zamykam najgorszą pozycję {sym} PnL={pnl_pct:+.1f}%.",
             strategy_name="capital_rotation",
         )
 
-        log_to_db("WARNING", "capital_rotation",
-                  f"Rotacja kapitału: {sym} SELL qty={qty:.6g} @ {price:.6f} | "
-                  f"PnL={pnl_pct:+.1f}% | wolne środki={available_cash:.2f} < min={min_order_notional:.0f} | "
-                  f"pending_id={pending_id}",
-                  db=db)
+        log_to_db(
+            "WARNING",
+            "capital_rotation",
+            f"Rotacja kapitału: {sym} SELL qty={qty:.6g} @ {price:.6f} | "
+            f"PnL={pnl_pct:+.1f}% | wolne środki={available_cash:.2f} < min={min_order_notional:.0f} | "
+            f"pending_id={pending_id}",
+            db=db,
+        )
 
         _mode_label = mode.upper()
         msg = (
@@ -1870,13 +2466,17 @@ class DataCollector:
             f"━━━━━━━━━━━━━━━━━━━━\n"
             f"Kapitał zostanie uwolniony na lepszą okazję."
         )
-        self._send_telegram_alert(f"{_mode_label}: ROTACJA KAPITAŁU", msg, force_send=True)
+        self._send_telegram_alert(
+            f"{_mode_label}: ROTACJA KAPITAŁU", msg, force_send=True
+        )
 
         # Wykonaj sprzedaż natychmiast (pending jest już CONFIRMED z _create_pending_order)
         try:
             self._execute_confirmed_pending_orders(db)
         except Exception as exc:
-            log_exception("capital_rotation", "Błąd wykonania rotacji kapitału", exc, db=db)
+            log_exception(
+                "capital_rotation", "Błąd wykonania rotacji kapitału", exc, db=db
+            )
 
         return True
 
@@ -1927,7 +2527,8 @@ class DataCollector:
                     ema50_4h = htf_ctx.get("ema_50")
                     rsi_4h = float(htf_ctx.get("rsi") or 50)
                     if (
-                        ema20_4h and ema50_4h
+                        ema20_4h
+                        and ema50_4h
                         and float(ema20_4h) > float(ema50_4h)
                         and rsi_4h > 55
                     ):
@@ -1942,14 +2543,19 @@ class DataCollector:
 
             set_count += 1
             log_to_db(
-                "INFO", "auto_goals",
+                "INFO",
+                "auto_goals",
                 f"Auto-cele: {sym} tp={pos.planned_tp:.6f} sl={pos.planned_sl:.6f} "
                 f"(entry={entry:.6f} ATR={atr:.6f} tp×{tp_mult:.1f} sl×{atr_stop_mult:.1f})",
                 db=db,
             )
             logger.info(
                 "[AUTO_GOALS] %s: tp=%.6f sl=%.6f (entry=%.6f ATR×%.1f)",
-                sym, pos.planned_tp, pos.planned_sl, entry, tp_mult,
+                sym,
+                pos.planned_tp,
+                pos.planned_sl,
+                entry,
+                tp_mult,
             )
 
         if set_count:
@@ -2006,7 +2612,8 @@ class DataCollector:
         # Diagnostyka: ostrzeż gdy brak gotówki na nowe pozycje (rotacja kapitału nie pomogła)
         if available_cash < min_order_notional:
             log_to_db(
-                "WARNING", "screen_candidates",
+                "WARNING",
+                "screen_candidates",
                 f"[{_mode_label}] Brak gotówki ({available_cash:.2f} EUR < min {min_order_notional:.0f} EUR) "
                 f"— pomijam screening. Jeśli LIVE: uzupełnij saldo Binance; jeśli DEMO: sprawdź reset balansu.",
                 db=db,
@@ -2047,10 +2654,20 @@ class DataCollector:
                 continue
 
             # Tier overrides (addytywne do bazowych)
-            tier_conf_add = float(sym_tier.get("min_confidence_add", 0.0)) if sym_tier else 0.0
-            tier_edge_add = float(sym_tier.get("min_edge_multiplier_add", 0.0)) if sym_tier else 0.0
-            tier_risk_scale = float(sym_tier.get("risk_scale", 1.0)) if sym_tier else 1.0
-            tier_max_trades = int(sym_tier.get("max_trades_per_day_per_symbol", 99)) if sym_tier else 99
+            tier_conf_add = (
+                float(sym_tier.get("min_confidence_add", 0.0)) if sym_tier else 0.0
+            )
+            tier_edge_add = (
+                float(sym_tier.get("min_edge_multiplier_add", 0.0)) if sym_tier else 0.0
+            )
+            tier_risk_scale = (
+                float(sym_tier.get("risk_scale", 1.0)) if sym_tier else 1.0
+            )
+            tier_max_trades = (
+                int(sym_tier.get("max_trades_per_day_per_symbol", 99))
+                if sym_tier
+                else 99
+            )
             tier_name = sym_tier.get("tier", "UNKNOWN") if sym_tier else "UNKNOWN"
 
             # Limit dziennych transakcji na symbol (z tieru)
@@ -2072,7 +2689,11 @@ class DataCollector:
                     action="SKIP",
                     reason_code="tier_daily_trade_limit",
                     runtime_ctx=runtime_ctx,
-                    risk_check={"tier": tier_name, "trades_today": sym_trades_today, "limit": tier_max_trades},
+                    risk_check={
+                        "tier": tier_name,
+                        "trades_today": sym_trades_today,
+                        "limit": tier_max_trades,
+                    },
                 )
                 continue
             if _has_active_pending(symbol):
@@ -2094,7 +2715,10 @@ class DataCollector:
                     reason_code="pending_cooldown_active",
                     runtime_ctx=runtime_ctx,
                     mode="demo",
-                    risk_check={"cooldown_active": True, "pending_cooldown_seconds": pending_cooldown_seconds},
+                    risk_check={
+                        "cooldown_active": True,
+                        "pending_cooldown_seconds": pending_cooldown_seconds,
+                    },
                 )
                 continue
 
@@ -2114,20 +2738,38 @@ class DataCollector:
 
             position = (
                 db.query(Position)
-                .filter(Position.symbol == symbol, Position.mode == "demo")
+                .filter(Position.symbol == symbol, Position.mode == _current_mode)
                 .first()
             )
+            # Dla LIVE: jeśli brak rekordu w DB, sprawdź Binance spot (tylko wartość >= min_notional, pył nie blokuje)
+            if position is None and _current_mode == "live":
+                try:
+                    from backend.routers.positions import _get_live_spot_positions
+
+                    for _sp in _get_live_spot_positions(db):
+                        if (
+                            _sp["symbol"] == symbol
+                            and float(_sp.get("value_eur") or 0) >= min_order_notional
+                        ):
+                            position = object()  # sentinel: blokuje BUY
+                            break
+                except Exception:
+                    pass
 
             # Cooldown po ostatniej wykonanej transakcji
             last_order = (
                 db.query(Order)
-                .filter(Order.symbol == symbol, Order.mode == "demo")
+                .filter(Order.symbol == symbol, Order.mode == _current_mode)
                 .order_by(Order.timestamp.desc())
                 .first()
             )
-            state = self.demo_state.get(symbol, {"loss_streak": 0, "win_streak": 0, "cooldown": base_cooldown})
+            state = self.demo_state.get(
+                symbol, {"loss_streak": 0, "win_streak": 0, "cooldown": base_cooldown}
+            )
             cooldown = int(state.get("cooldown", base_cooldown))
-            if last_order and (now - last_order.timestamp).total_seconds() < float(cooldown):
+            if last_order and (now - last_order.timestamp).total_seconds() < float(
+                cooldown
+            ):
                 self._trace_decision(
                     db,
                     symbol=symbol,
@@ -2156,20 +2798,32 @@ class DataCollector:
             params = self.symbol_params.get(symbol, {})
             learned_conf = float(params.get("min_confidence", base_min_confidence))
             # Learned params mogą podnieść próg max o 0.10 powyżej base — nie blokuj trading
-            min_confidence = min(base_min_confidence + 0.10, max(base_min_confidence, learned_conf))
+            min_confidence = min(
+                base_min_confidence + 0.10, max(base_min_confidence, learned_conf)
+            )
             # Tier override: podniesienie min_confidence
             min_confidence = min(1.0, min_confidence + tier_conf_add)
             if float(sig.confidence) < float(min_confidence):
                 self._trace_decision(
-                    db, symbol=symbol, action="SKIP", reason_code="signal_confidence_too_low",
-                    runtime_ctx=runtime_ctx, mode="demo", signal_summary=signal_summary,
+                    db,
+                    symbol=symbol,
+                    action="SKIP",
+                    reason_code="signal_confidence_too_low",
+                    runtime_ctx=runtime_ctx,
+                    mode="demo",
+                    signal_summary=signal_summary,
                     risk_check={"min_confidence": min_confidence, "tier": tier_name},
                 )
                 continue
             if (now - sig.timestamp).total_seconds() > float(max_signal_age):
                 self._trace_decision(
-                    db, symbol=symbol, action="SKIP", reason_code="signal_too_old",
-                    runtime_ctx=runtime_ctx, mode="demo", signal_summary=signal_summary,
+                    db,
+                    symbol=symbol,
+                    action="SKIP",
+                    reason_code="signal_too_old",
+                    runtime_ctx=runtime_ctx,
+                    mode="demo",
+                    signal_summary=signal_summary,
                     risk_check={"max_signal_age_seconds": max_signal_age},
                 )
                 continue
@@ -2182,9 +2836,14 @@ class DataCollector:
             if crash:
                 if float(sig.confidence) < extreme_min_conf:
                     continue
-                state["cooldown"] = max(int(state.get("cooldown", base_cooldown)), crash_cooldown_seconds)
+                state["cooldown"] = max(
+                    int(state.get("cooldown", base_cooldown)), crash_cooldown_seconds
+                )
                 self.demo_state[symbol] = state
-                if not self.last_crash_alert_ts or (now - self.last_crash_alert_ts).total_seconds() > 1800:
+                if (
+                    not self.last_crash_alert_ts
+                    or (now - self.last_crash_alert_ts).total_seconds() > 1800
+                ):
                     self.last_crash_alert_ts = now
                     msg = (
                         f"🔴 Gwałtowny spadek: {symbol}\n"
@@ -2195,7 +2854,9 @@ class DataCollector:
                     log_to_db("WARNING", "demo_trading", msg, db=db)
                     self._send_telegram_alert("RISK: Crash mode", msg, force_send=True)
 
-            ctx = get_live_context(db, symbol, timeframe="1h", limit=max(min_klines, 120))
+            ctx = get_live_context(
+                db, symbol, timeframe="1h", limit=max(min_klines, 120)
+            )
             if not ctx:
                 continue
             ema20 = ctx.get("ema_20")
@@ -2225,79 +2886,149 @@ class DataCollector:
             else:
                 rsi_sell_gate = min(rsi_sell_gate, 35.0)
 
-            if sig.signal_type == "BUY" and r.get("buy_low") is not None and r.get("buy_high") is not None:
+            if (
+                sig.signal_type == "BUY"
+                and r.get("buy_low") is not None
+                and r.get("buy_high") is not None
+            ):
                 buy_low_tol = float(r.get("buy_low")) * (1 - price_tolerance)
                 buy_high_tol = float(r.get("buy_high")) * (1 + price_tolerance)
                 in_range = buy_low_tol <= price <= buy_high_tol
-                trend_up = ema20 is not None and ema50 is not None and float(ema20) > float(ema50)
+                trend_up = (
+                    ema20 is not None
+                    and ema50 is not None
+                    and float(ema20) > float(ema50)
+                )
                 rsi_ok = rsi is not None and float(rsi) <= rsi_buy_gate
                 if in_range and trend_up and rsi_ok:
                     side = "BUY"
-                    reasons = ["Trend wzrostowy (EMA20>EMA50)", "RSI potwierdza", "Cena w zakresie BUY (AI)"]
+                    reasons = [
+                        "Trend wzrostowy (EMA20>EMA50)",
+                        "RSI potwierdza",
+                        "Cena w zakresie BUY (AI)",
+                    ]
                 elif demo_allow_soft_buy and trend_up and rsi_ok and not in_range:
                     # Soft entry: trend + RSI spełnione, cena poza zakresem AI
                     # Dodatkowy filtr: RSI < 55 — nie kupuj na overextension
                     rsi_val = float(rsi) if rsi is not None else 50.0
                     if rsi_val < 55.0:
                         side = "BUY"
-                        reasons = ["Trend wzrostowy (EMA20>EMA50)", "RSI potwierdza (bez overextension)", "Wejście miękkie — cena poza zakresem AI, ale trend OK"]
+                        reasons = [
+                            "Trend wzrostowy (EMA20>EMA50)",
+                            "RSI potwierdza (bez overextension)",
+                            "Wejście miękkie — cena poza zakresem AI, ale trend OK",
+                        ]
                     # else: RSI za wysoki dla soft entry — filtr zapobiega kupowaniu na szczycie
-            elif sig.signal_type == "SELL" and r.get("sell_low") is not None and r.get("sell_high") is not None:
+            elif (
+                sig.signal_type == "SELL"
+                and r.get("sell_low") is not None
+                and r.get("sell_high") is not None
+            ):
                 sell_low_tol = float(r.get("sell_low")) * (1 - price_tolerance)
                 sell_high_tol = float(r.get("sell_high")) * (1 + price_tolerance)
                 if (
                     sell_low_tol <= price <= sell_high_tol
-                    and ema20 is not None and ema50 is not None and float(ema20) < float(ema50)
-                    and rsi is not None and float(rsi) >= rsi_sell_gate
+                    and ema20 is not None
+                    and ema50 is not None
+                    and float(ema20) < float(ema50)
+                    and rsi is not None
+                    and float(rsi) >= rsi_sell_gate
                 ):
                     side = "SELL"
-                    reasons = ["Trend spadkowy (EMA20<EMA50)", "RSI (wysoki) potwierdza", "Cena w zakresie SELL (AI)"]
+                    reasons = [
+                        "Trend spadkowy (EMA20<EMA50)",
+                        "RSI (wysoki) potwierdza",
+                        "Cena w zakresie SELL (AI)",
+                    ]
 
             if side is None:
                 # Diagnostyka: które konkretnie filtry zawiodły
                 _filter_fails: list[str] = []
                 if sig.signal_type == "BUY":
-                    bl = r.get("buy_low"); bh = r.get("buy_high")
+                    bl = r.get("buy_low")
+                    bh = r.get("buy_high")
                     if bl is not None and bh is not None:
                         buy_low_tol = float(bl) * (1 - price_tolerance)
                         buy_high_tol = float(bh) * (1 + price_tolerance)
                         if not (buy_low_tol <= price <= buy_high_tol):
-                            _filter_fails.append(f"cena {round(price,4)} poza strefą BUY [{round(buy_low_tol,4)}–{round(buy_high_tol,4)}]")
-                    if ema20 is not None and ema50 is not None and float(ema20) <= float(ema50):
-                        _filter_fails.append(f"trend: EMA20({round(float(ema20),2)}) ≤ EMA50({round(float(ema50),2)}) — trend spadkowy")
+                            _filter_fails.append(
+                                f"cena {round(price,4)} poza strefą BUY [{round(buy_low_tol,4)}–{round(buy_high_tol,4)}]"
+                            )
+                    if (
+                        ema20 is not None
+                        and ema50 is not None
+                        and float(ema20) <= float(ema50)
+                    ):
+                        _filter_fails.append(
+                            f"trend: EMA20({round(float(ema20),2)}) ≤ EMA50({round(float(ema50),2)}) — trend spadkowy"
+                        )
                     if rsi is not None and float(rsi) > rsi_buy_gate:
-                        _filter_fails.append(f"RSI({round(float(rsi),1)}) > próg kupna {round(rsi_buy_gate,1)}")
+                        _filter_fails.append(
+                            f"RSI({round(float(rsi),1)}) > próg kupna {round(rsi_buy_gate,1)}"
+                        )
                 elif sig.signal_type == "SELL":
-                    sl = r.get("sell_low"); sh = r.get("sell_high")
+                    sl = r.get("sell_low")
+                    sh = r.get("sell_high")
                     if sl is not None and sh is not None:
                         sell_low_tol = float(sl) * (1 - price_tolerance)
                         sell_high_tol = float(sh) * (1 + price_tolerance)
                         if not (sell_low_tol <= price <= sell_high_tol):
-                            _filter_fails.append(f"cena {round(price,4)} poza strefą SELL [{round(sell_low_tol,4)}–{round(sell_high_tol,4)}]")
-                    if ema20 is not None and ema50 is not None and float(ema20) >= float(ema50):
-                        _filter_fails.append(f"trend: EMA20({round(float(ema20),2)}) ≥ EMA50({round(float(ema50),2)}) — trend wzrostowy")
+                            _filter_fails.append(
+                                f"cena {round(price,4)} poza strefą SELL [{round(sell_low_tol,4)}–{round(sell_high_tol,4)}]"
+                            )
+                    if (
+                        ema20 is not None
+                        and ema50 is not None
+                        and float(ema20) >= float(ema50)
+                    ):
+                        _filter_fails.append(
+                            f"trend: EMA20({round(float(ema20),2)}) ≥ EMA50({round(float(ema50),2)}) — trend wzrostowy"
+                        )
                     if rsi is not None and float(rsi) < rsi_sell_gate:
-                        _filter_fails.append(f"RSI({round(float(rsi),1)}) < próg sprzedaży {round(rsi_sell_gate,1)}")
+                        _filter_fails.append(
+                            f"RSI({round(float(rsi),1)}) < próg sprzedaży {round(rsi_sell_gate,1)}"
+                        )
                 self._trace_decision(
-                    db, symbol=symbol, action="SKIP", reason_code="signal_filters_not_met",
-                    runtime_ctx=runtime_ctx, mode="demo", signal_summary=signal_summary,
-                    risk_check={"ema20": ema20, "ema50": ema50, "rsi": rsi,
-                                "rsi_buy_gate": rsi_buy_gate, "rsi_sell_gate": rsi_sell_gate,
-                                "current_price": price, "signal_type": sig.signal_type},
+                    db,
+                    symbol=symbol,
+                    action="SKIP",
+                    reason_code="signal_filters_not_met",
+                    runtime_ctx=runtime_ctx,
+                    mode="demo",
+                    signal_summary=signal_summary,
+                    risk_check={
+                        "ema20": ema20,
+                        "ema50": ema50,
+                        "rsi": rsi,
+                        "rsi_buy_gate": rsi_buy_gate,
+                        "rsi_sell_gate": rsi_sell_gate,
+                        "current_price": price,
+                        "signal_type": sig.signal_type,
+                    },
                     details={"range": r, "filter_fails": _filter_fails},
                 )
                 continue
 
             if side == "BUY" and position is not None:
                 self._trace_decision(
-                    db, symbol=symbol, action="SKIP", reason_code="buy_blocked_existing_position",
-                    runtime_ctx=runtime_ctx, mode="demo", signal_summary=signal_summary,
+                    db,
+                    symbol=symbol,
+                    action="SKIP",
+                    reason_code="buy_blocked_existing_position",
+                    runtime_ctx=runtime_ctx,
+                    mode="demo",
+                    signal_summary=signal_summary,
                 )
                 continue
             if side == "SELL" and position is None:
                 self._trace_decision(
-                    db, symbol=symbol, action="SKIP", reason_code="sell_blocked_no_position",
-                    runtime_ctx=runtime_ctx, mode="demo", signal_summary=signal_summary,
+                    db,
+                    symbol=symbol,
+                    action="SKIP",
+                    reason_code="sell_blocked_no_position",
+                    runtime_ctx=runtime_ctx,
+                    mode="demo",
+                    signal_summary=signal_summary,
                 )
                 continue
 
@@ -2311,7 +3042,11 @@ class DataCollector:
             stop_distance = float(atr) * atr_stop_mult
             atr_qty = risk_amount / stop_distance if stop_distance > 0 else base_qty
             qty = max(min_qty, min(max_qty, atr_qty))
-            qty = qty * max(0.2, 1 - (loss_streak * 0.15)) * (1 + min(win_streak * 0.05, 0.2))
+            qty = (
+                qty
+                * max(0.2, 1 - (loss_streak * 0.15))
+                * (1 + min(win_streak * 0.05, 0.2))
+            )
             if crash:
                 qty = max(base_qty * 0.1, qty * 0.25)
             if side == "SELL" and position is not None:
@@ -2321,7 +3056,9 @@ class DataCollector:
                     # Ogranicz do max_cash_pct_per_trade (domyślnie 1/max_open_positions)
                     # Zapobiega wydaniu całej gotówki na jeden trade
                     max_open = tc.get("max_open_positions", 3)
-                    max_cash_pct = float(config.get("max_cash_pct_per_trade", 1.0 / max(max_open, 1)))
+                    max_cash_pct = float(
+                        config.get("max_cash_pct_per_trade", 1.0 / max(max_open, 1))
+                    )
                     max_cash_for_trade = available_cash * max_cash_pct
                     # Odlicz prowizję od dostępnych środków (entry + exit fee)
                     _taker = float(config.get("taker_fee_rate", 0.001))
@@ -2330,13 +3067,25 @@ class DataCollector:
                     qty = min(qty, max_affordable)
                     # Podnieś do min_order_notional gdy ATR-sizing daje za małą kwotę
                     # (np. BTC: ryzyko 10 EUR / ATR 1000 EUR = 0.01 BTC = poniżej min)
-                    if qty * price < min_order_notional and max_affordable * price >= min_order_notional:
+                    if (
+                        qty * price < min_order_notional
+                        and max_affordable * price >= min_order_notional
+                    ):
                         qty = min_order_notional / float(price)
                 if qty < min_qty:
                     self._trace_decision(
-                        db, symbol=symbol, action="SKIP", reason_code="insufficient_cash_or_qty_below_min",
-                        runtime_ctx=runtime_ctx, mode="demo", signal_summary=signal_summary,
-                        execution_check={"eligible": False, "available_cash": available_cash, "min_qty": min_qty},
+                        db,
+                        symbol=symbol,
+                        action="SKIP",
+                        reason_code="insufficient_cash_or_qty_below_min",
+                        runtime_ctx=runtime_ctx,
+                        mode="demo",
+                        signal_summary=signal_summary,
+                        execution_check={
+                            "eligible": False,
+                            "available_cash": available_cash,
+                            "min_qty": min_qty,
+                        },
                     )
                     continue
 
@@ -2347,10 +3096,14 @@ class DataCollector:
             if float(sig.confidence) >= 0.85:
                 rating += 1
             if ema20 is not None and ema50 is not None:
-                if (side == "BUY" and float(ema20) > float(ema50)) or (side == "SELL" and float(ema20) < float(ema50)):
+                if (side == "BUY" and float(ema20) > float(ema50)) or (
+                    side == "SELL" and float(ema20) < float(ema50)
+                ):
                     rating += 1
             if rsi is not None:
-                if (side == "BUY" and float(rsi) <= float(rsi_buy or 50)) or (side == "SELL" and float(rsi) >= float(rsi_sell or 50)):
+                if (side == "BUY" and float(rsi) <= float(rsi_buy or 50)) or (
+                    side == "SELL" and float(rsi) >= float(rsi_sell or 50)
+                ):
                     rating += 1
             rating = min(rating, 5)
 
@@ -2363,7 +3116,9 @@ class DataCollector:
                 sell_low_v = float(r.get("sell_low"))
                 sell_high_v = float(r.get("sell_high"))
                 buy_edge = buy_low_v + (buy_high_v - buy_low_v) * extreme_margin_pct
-                sell_edge = sell_high_v - (sell_high_v - sell_low_v) * extreme_margin_pct
+                sell_edge = (
+                    sell_high_v - (sell_high_v - sell_low_v) * extreme_margin_pct
+                )
                 if side == "BUY" and price <= buy_edge:
                     is_extreme = True
                 if side == "SELL" and price >= sell_edge:
@@ -2376,18 +3131,35 @@ class DataCollector:
             # Bramka jakości wejścia — odrzuć słabe sygnały (rating < demo_min_entry_score)
             if rating < demo_min_entry_score:
                 self._trace_decision(
-                    db, symbol=symbol, action="SKIP", reason_code="entry_score_below_min",
-                    runtime_ctx=runtime_ctx, mode="demo", signal_summary=signal_summary,
-                    risk_check={"rating": rating, "min_entry_score": demo_min_entry_score},
+                    db,
+                    symbol=symbol,
+                    action="SKIP",
+                    reason_code="entry_score_below_min",
+                    runtime_ctx=runtime_ctx,
+                    mode="demo",
+                    signal_summary=signal_summary,
+                    risk_check={
+                        "rating": rating,
+                        "min_entry_score": demo_min_entry_score,
+                    },
                 )
                 continue
 
-            expected_move_ratio = (float(atr) * atr_take_mult) / float(price) if price > 0 else 0.0
-            total_cost_ratio = (2 * taker_fee_rate) + (2 * slippage_bps / 10000.0) + (2 * spread_buffer_bps / 10000.0)
+            expected_move_ratio = (
+                (float(atr) * atr_take_mult) / float(price) if price > 0 else 0.0
+            )
+            total_cost_ratio = (
+                (2 * taker_fee_rate)
+                + (2 * slippage_bps / 10000.0)
+                + (2 * spread_buffer_bps / 10000.0)
+            )
             # Tier override: wyższy min_edge_multiplier
             effective_edge_mult = min_edge_multiplier + tier_edge_add
             required_move_ratio = total_cost_ratio * effective_edge_mult
-            cost_gate_pass = expected_move_ratio >= required_move_ratio and atr_take_mult / max(atr_stop_mult, 1e-9) >= min_expected_rr
+            cost_gate_pass = (
+                expected_move_ratio >= required_move_ratio
+                and atr_take_mult / max(atr_stop_mult, 1e-9) >= min_expected_rr
+            )
             notional = float(price) * float(qty)
 
             cost_check = {
@@ -2408,8 +3180,12 @@ class DataCollector:
                 "min_order_notional": min_order_notional,
             }
             risk_context = build_risk_context(
-                db, symbol=symbol, side=side, notional=notional,
-                strategy_name="demo_collector", mode="demo",
+                db,
+                symbol=symbol,
+                side=side,
+                notional=notional,
+                strategy_name="demo_collector",
+                mode="demo",
                 runtime_config=config,
                 config_snapshot_id=runtime_ctx.get("snapshot_id"),
                 signal_summary=signal_summary,
@@ -2419,10 +3195,14 @@ class DataCollector:
 
             if not risk_decision.allowed:
                 self._trace_decision(
-                    db, symbol=symbol, action="SKIP",
+                    db,
+                    symbol=symbol,
+                    action="SKIP",
                     reason_code=risk_decision.reason_codes[0],
-                    runtime_ctx=runtime_ctx, mode="demo",
-                    signal_summary=signal_summary, risk_check=risk_check,
+                    runtime_ctx=runtime_ctx,
+                    mode="demo",
+                    signal_summary=signal_summary,
+                    risk_check=risk_check,
                 )
                 continue
 
@@ -2433,35 +3213,64 @@ class DataCollector:
 
             if not cost_gate_pass:
                 self._trace_decision(
-                    db, symbol=symbol, action="SKIP", reason_code="cost_gate_failed",
-                    runtime_ctx=runtime_ctx, mode="demo", signal_summary=signal_summary,
-                    risk_check=risk_check, cost_check=cost_check, execution_check=execution_check,
+                    db,
+                    symbol=symbol,
+                    action="SKIP",
+                    reason_code="cost_gate_failed",
+                    runtime_ctx=runtime_ctx,
+                    mode="demo",
+                    signal_summary=signal_summary,
+                    risk_check=risk_check,
+                    cost_check=cost_check,
+                    execution_check=execution_check,
                 )
                 continue
 
             if not execution_check["eligible"]:
                 self._trace_decision(
-                    db, symbol=symbol, action="SKIP", reason_code="min_notional_guard",
-                    runtime_ctx=runtime_ctx, mode="demo", signal_summary=signal_summary,
-                    risk_check=risk_check, cost_check=cost_check, execution_check=execution_check,
+                    db,
+                    symbol=symbol,
+                    action="SKIP",
+                    reason_code="min_notional_guard",
+                    runtime_ctx=runtime_ctx,
+                    mode="demo",
+                    signal_summary=signal_summary,
+                    risk_check=risk_check,
+                    cost_check=cost_check,
+                    execution_check=execution_check,
                 )
                 continue
 
             # Zbierz kandydata — pending i Telegram po sortowaniu
             tp = price + float(atr) * atr_take_mult
             sl = price - float(atr) * atr_stop_mult
-            why = ", ".join(reasons) if reasons else "Sygnał + zakresy OpenAI + filtry ryzyka"
+            why = (
+                ", ".join(reasons)
+                if reasons
+                else "Sygnał + zakresy OpenAI + filtry ryzyka"
+            )
             edge_net_score = expected_move_ratio - total_cost_ratio
-            candidates.append({
-                "symbol": symbol, "side": side, "price": price, "qty": qty,
-                "tp": tp, "sl": sl, "rating": rating, "why": why,
-                "signal_summary": signal_summary, "risk_check": risk_check,
-                "cost_check": cost_check, "execution_check": execution_check,
-                "range": r, "tier_name": tier_name,
-                "confidence": float(sig.confidence),
-                "edge_net_score": edge_net_score,
-                "atr": float(atr),
-            })
+            candidates.append(
+                {
+                    "symbol": symbol,
+                    "side": side,
+                    "price": price,
+                    "qty": qty,
+                    "tp": tp,
+                    "sl": sl,
+                    "rating": rating,
+                    "why": why,
+                    "signal_summary": signal_summary,
+                    "risk_check": risk_check,
+                    "cost_check": cost_check,
+                    "execution_check": execution_check,
+                    "range": r,
+                    "tier_name": tier_name,
+                    "confidence": float(sig.confidence),
+                    "edge_net_score": edge_net_score,
+                    "atr": float(atr),
+                }
+            )
 
         # --- Ranking kandydatów: sortuj po edge_net_score, bierz najlepsze ---
         candidates.sort(key=lambda c: c["edge_net_score"], reverse=True)
@@ -2490,25 +3299,42 @@ class DataCollector:
                 current_max_affordable = available_cash / float(price)
                 if current_max_affordable < min_qty:
                     self._trace_decision(
-                        db, symbol=symbol, action="SKIP",
+                        db,
+                        symbol=symbol,
+                        action="SKIP",
                         reason_code="insufficient_cash_or_qty_below_min",
-                        runtime_ctx=runtime_ctx, mode="demo",
+                        runtime_ctx=runtime_ctx,
+                        mode="demo",
                         signal_summary=signal_summary,
-                        execution_check={"eligible": False, "available_cash": available_cash, "min_qty": min_qty},
+                        execution_check={
+                            "eligible": False,
+                            "available_cash": available_cash,
+                            "min_qty": min_qty,
+                        },
                     )
                     continue
                 qty = min(qty, current_max_affordable)
 
             self._trace_decision(
-                db, symbol=symbol,
-                action="CREATE_PENDING_ENTRY" if side == "BUY" else "CREATE_PENDING_EXIT",
+                db,
+                symbol=symbol,
+                action=(
+                    "CREATE_PENDING_ENTRY" if side == "BUY" else "CREATE_PENDING_EXIT"
+                ),
                 reason_code="all_gates_passed",
-                runtime_ctx=runtime_ctx, mode="demo",
-                signal_summary=signal_summary, risk_check=risk_check,
-                cost_check=cost_check, execution_check=execution_check,
+                runtime_ctx=runtime_ctx,
+                mode="demo",
+                signal_summary=signal_summary,
+                risk_check=risk_check,
+                cost_check=cost_check,
+                execution_check=execution_check,
                 details={
-                    "side": side, "qty": qty, "price": price, "rating": rating,
-                    "why": why, "tier": tier_name,
+                    "side": side,
+                    "qty": qty,
+                    "price": price,
+                    "rating": rating,
+                    "why": why,
+                    "tier": tier_name,
                     "edge_net_score": cand["edge_net_score"],
                     "rank": candidates.index(cand) + 1,
                     "total_candidates": len(candidates),
@@ -2516,7 +3342,11 @@ class DataCollector:
                 },
             )
             pending_id = self._create_pending_order(
-                db=db, symbol=symbol, side=side, price=price, qty=qty,
+                db=db,
+                symbol=symbol,
+                side=side,
+                price=price,
+                qty=qty,
                 mode="demo",
                 reason=f"{why}. Pewność {int(cand['confidence']*100)}%, rating {rating}/5.",
                 config_snapshot_id=runtime_ctx.get("snapshot_id"),
@@ -2526,17 +3356,25 @@ class DataCollector:
             # Auto-confirm + auto-execute gdy demo_require_manual_confirm=False
             if not demo_require_manual_confirm:
                 try:
-                    pending_obj = db.query(PendingOrder).filter(PendingOrder.id == pending_id).first()
+                    pending_obj = (
+                        db.query(PendingOrder)
+                        .filter(PendingOrder.id == pending_id)
+                        .first()
+                    )
                     if pending_obj:
                         pending_obj.status = "CONFIRMED"
                         pending_obj.confirmed_at = now
                         db.flush()
                 except Exception as exc_confirm:
-                    log_exception("demo_trading", "Błąd auto-confirm pending", exc_confirm, db=db)
+                    log_exception(
+                        "demo_trading", "Błąd auto-confirm pending", exc_confirm, db=db
+                    )
 
             if side == "BUY":
                 try:
-                    available_cash = max(0.0, float(available_cash) - (float(price) * float(qty)))
+                    available_cash = max(
+                        0.0, float(available_cash) - (float(price) * float(qty))
+                    )
                 except Exception:
                     pass
 
@@ -2551,11 +3389,13 @@ class DataCollector:
                 )
                 alert_title = f"{_mode_label}: POTWIERDŹ"
             else:
-                confirm_block = "\n✅ Auto-potwierdzone — pozycja otwarta automatycznie."
+                confirm_block = (
+                    "\n✅ Auto-potwierdzone — pozycja otwarta automatycznie."
+                )
                 alert_title = f"{_mode_label}: OTWARTO POZYCJĘ"
             rank_info = f"Kandydat #{candidates.index(cand) + 1}/{len(candidates)}"
-            conf_pct = int(cand['confidence'] * 100)
-            edge_score = cand.get('edge_net_score', 0)
+            conf_pct = int(cand["confidence"] * 100)
+            edge_score = cand.get("edge_net_score", 0)
             msg = (
                 f"{action_emoji} [{_mode_label}] {alert_title}\n"
                 f"━━━━━━━━━━━━━━━━━━━━\n"
@@ -2607,24 +3447,37 @@ class DataCollector:
             sym_tier = tier_map.get(sym_norm, {})
             if sym_tier.get("hold_mode"):
                 continue
-            state = self.demo_state.get(sym, {"loss_streak": 0, "cooldown": base_cooldown})
-            state["loss_streak"] = min(int(state.get("loss_streak", 0)) + 1, loss_streak_limit)
-            state["cooldown"] = min(base_cooldown * (1 + int(state["loss_streak"])), 3600)
+            state = self.demo_state.get(
+                sym, {"loss_streak": 0, "cooldown": base_cooldown}
+            )
+            state["loss_streak"] = min(
+                int(state.get("loss_streak", 0)) + 1, loss_streak_limit
+            )
+            state["cooldown"] = min(
+                base_cooldown * (1 + int(state["loss_streak"])), 3600
+            )
             self.demo_state[sym] = state
         msg = "🟠 Dzienny limit straty osiągnięty\nSystem ograniczył ryzyko na wszystkich symbolach.\nBot nadal działa, ale nowe transakcje są wstrzymane.\nCo zrobić: poczekaj na następny dzień lub przejrzyj otwarte pozycje."
         log_to_db("WARNING", "demo_trading", msg, db=db)
         self._send_telegram_alert("RISK: Daily loss", msg, force_send=True)
 
-    def _detect_crash(self, db: Session, symbol: str, window_minutes: int, drop_pct: float) -> bool:
+    def _detect_crash(
+        self, db: Session, symbol: str, window_minutes: int, drop_pct: float
+    ) -> bool:
         """
         Wykryj gwałtowny spadek w krótkim oknie na live danych.
         """
         since = utc_now_naive() - timedelta(minutes=window_minutes)
-        klines = db.query(Kline).filter(
-            Kline.symbol == symbol,
-            Kline.timeframe == "1m",
-            Kline.open_time >= since
-        ).order_by(Kline.open_time).all()
+        klines = (
+            db.query(Kline)
+            .filter(
+                Kline.symbol == symbol,
+                Kline.timeframe == "1m",
+                Kline.open_time >= since,
+            )
+            .order_by(Kline.open_time)
+            .all()
+        )
         if len(klines) < 5:
             return False
         start_price = klines[0].open
@@ -2637,17 +3490,17 @@ class DataCollector:
     def collect_market_data(self, db: Session):
         """
         Zbierz dane rynkowe (ticker prices) dla watchlist
-        
+
         Args:
             db: Sesja bazy danych
         """
         logger.info("📊 Collecting market data...")
-        
+
         for symbol in self.watchlist:
             try:
                 # Pobierz 24h ticker
                 ticker = self.binance.get_24hr_ticker(symbol)
-                
+
                 if ticker:
                     # Zapisz do bazy
                     market_data = MarketData(
@@ -2656,23 +3509,29 @@ class DataCollector:
                         volume=ticker["volume"],
                         bid=ticker["bid_price"],
                         ask=ticker["ask_price"],
-                        timestamp=utc_now_naive()
+                        timestamp=utc_now_naive(),
                     )
                     db.add(market_data)
-                    
-                    logger.info(f"✅ {symbol}: ${ticker['last_price']:.2f} "
-                              f"({ticker['price_change_percent']:+.2f}%)")
+
+                    logger.info(
+                        f"✅ {symbol}: ${ticker['last_price']:.2f} "
+                        f"({ticker['price_change_percent']:+.2f}%)"
+                    )
                 else:
                     logger.warning(f"⚠️  Failed to get ticker for {symbol}")
-                    log_to_db("WARNING", "collector", f"Brak tickera dla {symbol}", db=db)
-                
+                    log_to_db(
+                        "WARNING", "collector", f"Brak tickera dla {symbol}", db=db
+                    )
+
                 # Rate limiting - nie bombardujemy API
                 time.sleep(0.2)
-                
+
             except Exception as e:
                 logger.error(f"❌ Error collecting data for {symbol}: {str(e)}")
-                log_exception("collector", f"Błąd collect_market_data dla {symbol}", e, db=db)
-        
+                log_exception(
+                    "collector", f"Błąd collect_market_data dla {symbol}", e, db=db
+                )
+
         try:
             db.commit()
             logger.info("✅ Market data committed to database")
@@ -2680,35 +3539,39 @@ class DataCollector:
             logger.error(f"❌ Error committing market data: {str(e)}")
             log_exception("collector", "Błąd commit market data", e, db=db)
             db.rollback()
-    
+
     def collect_klines(self, db: Session):
         """
         Zbierz dane świecowe (klines) dla watchlist
-        
+
         Args:
             db: Sesja bazy danych
         """
         logger.info("📈 Collecting klines...")
-        
+
         for symbol in self.watchlist:
             for timeframe in self.kline_timeframes:
                 try:
                     # Pobierz ostatnie 100 świec
                     klines = self.binance.get_klines(symbol, timeframe, limit=100)
-                    
+
                     if klines:
                         saved_count = 0
                         for k in klines:
                             # Sprawdź czy już istnieje (unikamy duplikatów)
                             open_time = datetime.fromtimestamp(k["open_time"] / 1000)
                             close_time = datetime.fromtimestamp(k["close_time"] / 1000)
-                            
-                            existing = db.query(Kline).filter(
-                                Kline.symbol == symbol,
-                                Kline.timeframe == timeframe,
-                                Kline.open_time == open_time
-                            ).first()
-                            
+
+                            existing = (
+                                db.query(Kline)
+                                .filter(
+                                    Kline.symbol == symbol,
+                                    Kline.timeframe == timeframe,
+                                    Kline.open_time == open_time,
+                                )
+                                .first()
+                            )
+
                             if not existing:
                                 kline = Kline(
                                     symbol=symbol,
@@ -2723,24 +3586,40 @@ class DataCollector:
                                     quote_volume=k["quote_volume"],
                                     trades=k["trades"],
                                     taker_buy_base=k["taker_buy_base"],
-                                    taker_buy_quote=k["taker_buy_quote"]
+                                    taker_buy_quote=k["taker_buy_quote"],
                                 )
                                 db.add(kline)
                                 saved_count += 1
-                        
+
                         if saved_count > 0:
-                            logger.info(f"✅ {symbol} {timeframe}: saved {saved_count} new klines")
+                            logger.info(
+                                f"✅ {symbol} {timeframe}: saved {saved_count} new klines"
+                            )
                     else:
-                        logger.warning(f"⚠️  Failed to get klines for {symbol} {timeframe}")
-                        log_to_db("WARNING", "collector", f"Brak klines {symbol} {timeframe}", db=db)
-                    
+                        logger.warning(
+                            f"⚠️  Failed to get klines for {symbol} {timeframe}"
+                        )
+                        log_to_db(
+                            "WARNING",
+                            "collector",
+                            f"Brak klines {symbol} {timeframe}",
+                            db=db,
+                        )
+
                     # Rate limiting
                     time.sleep(0.2)
-                    
+
                 except Exception as e:
-                    logger.error(f"❌ Error collecting klines for {symbol} {timeframe}: {str(e)}")
-                    log_exception("collector", f"Błąd collect_klines dla {symbol} {timeframe}", e, db=db)
-        
+                    logger.error(
+                        f"❌ Error collecting klines for {symbol} {timeframe}: {str(e)}"
+                    )
+                    log_exception(
+                        "collector",
+                        f"Błąd collect_klines dla {symbol} {timeframe}",
+                        e,
+                        db=db,
+                    )
+
         try:
             db.commit()
             logger.info("✅ Klines committed to database")
@@ -2748,11 +3627,11 @@ class DataCollector:
             logger.error(f"❌ Error committing klines: {str(e)}")
             log_exception("collector", "Błąd commit klines", e, db=db)
             db.rollback()
-    
+
     def run_once(self):
         """Wykonaj jeden cykl zbierania danych"""
         logger.info("🔄 Starting data collection cycle...")
-        
+
         db = SessionLocal()
         try:
             provider = os.getenv("AI_PROVIDER", "auto").strip().lower()
@@ -2763,7 +3642,10 @@ class DataCollector:
                 # Nie blokuj bota — fallback do heurystyki zadziała w analysis.py
             if provider == "auto" and not self._has_any_ai_key():
                 now = utc_now_naive()
-                if not self.last_openai_missing_log_ts or (now - self.last_openai_missing_log_ts).total_seconds() > 300:
+                if (
+                    not self.last_openai_missing_log_ts
+                    or (now - self.last_openai_missing_log_ts).total_seconds() > 300
+                ):
                     self.last_openai_missing_log_ts = now
                     msg = "Brak kluczy AI (Gemini/Groq/OpenAI) — AI_PROVIDER=auto → heurystyka ATR/Bollinger."
                     logger.warning(f"⚠️ {msg}")
@@ -2773,7 +3655,9 @@ class DataCollector:
             try:
                 self._execute_confirmed_pending_orders(db)
             except Exception as exc:
-                log_exception("collector", "Błąd wykonania potwierdzonych transakcji", exc, db=db)
+                log_exception(
+                    "collector", "Błąd wykonania potwierdzonych transakcji", exc, db=db
+                )
 
             ws_enabled = effective_bool(db, "ws_enabled", "WS_ENABLED", True)
 
@@ -2789,7 +3673,12 @@ class DataCollector:
                     old = ", ".join(self.watchlist) if self.watchlist else "(pusto)"
                     new = ", ".join(wl_override) if wl_override else "(pusto)"
                     logger.info(f"🛠️ Watchlista (override): {old} -> {new}")
-                    log_to_db("INFO", "collector", f"Watchlist override: {old} -> {new}", db=db)
+                    log_to_db(
+                        "INFO",
+                        "collector",
+                        f"Watchlist override: {old} -> {new}",
+                        db=db,
+                    )
                     self.watchlist = wl_override
                     if self.ws_running:
                         self.stop_ws()
@@ -2812,7 +3701,10 @@ class DataCollector:
 
             # Uczenie / kalibracja co 1h
             now = utc_now_naive()
-            if not self.last_learning_ts or (now - self.last_learning_ts).seconds > 3600:
+            if (
+                not self.last_learning_ts
+                or (now - self.last_learning_ts).seconds > 3600
+            ):
                 self._learn_from_history(db)
                 self.last_learning_ts = now
 
@@ -2830,7 +3722,10 @@ class DataCollector:
             # Sync pozycji LIVE DB ↔ Binance (co 5 min)
             try:
                 now_sync = utc_now_naive()
-                if not self._last_binance_sync_ts or (now_sync - self._last_binance_sync_ts).total_seconds() > 300:
+                if (
+                    not self._last_binance_sync_ts
+                    or (now_sync - self._last_binance_sync_ts).total_seconds() > 300
+                ):
                     self._sync_binance_positions(db)
                     self._last_binance_sync_ts = now_sync
             except Exception as exc:
@@ -2838,15 +3733,22 @@ class DataCollector:
 
             # Generuj sygnały heurystyczne co cykl (do DB dla collectora)
             try:
-                from backend.analysis import generate_market_insights, _heuristic_ranges, _merge_ranges_with_insights, persist_insights_as_signals
+                from backend.analysis import (
+                    _heuristic_ranges,
+                    _merge_ranges_with_insights,
+                    generate_market_insights,
+                    persist_insights_as_signals,
+                )
+
                 insights = generate_market_insights(db, self.watchlist, timeframe="1h")
                 if insights:
                     ranges = _heuristic_ranges(insights)
                     insights = _merge_ranges_with_insights(insights, ranges)
                     persist_insights_as_signals(db, insights)
             except Exception as exc:
-                log_exception("collector", "Błąd generacji sygnałów heurystycznych", exc, db=db)
-
+                log_exception(
+                    "collector", "Błąd generacji sygnałów heurystycznych", exc, db=db
+                )
 
             # Zbierz świece
             self.collect_klines(db)
@@ -2867,14 +3769,18 @@ class DataCollector:
             try:
                 self._execute_confirmed_pending_orders(db)
             except Exception as exc:
-                log_exception("collector", "Błąd wykonania auto-confirmed transakcji", exc, db=db)
+                log_exception(
+                    "collector", "Błąd wykonania auto-confirmed transakcji", exc, db=db
+                )
 
             # Sprawdź trafność prognoz (co cykl — szybkie)
             try:
                 self._check_forecast_accuracy(db)
             except Exception as exc:
-                log_exception("collector", "Błąd weryfikacji trafności prognoz", exc, db=db)
-            
+                log_exception(
+                    "collector", "Błąd weryfikacji trafności prognoz", exc, db=db
+                )
+
             logger.info("✅ Collection cycle completed")
         except Exception as e:
             logger.error(f"❌ Error in collection cycle: {str(e)}")
@@ -2890,7 +3796,9 @@ class DataCollector:
         now = utc_now_naive()
         pending = (
             db.query(ForecastRecord)
-            .filter(ForecastRecord.checked == False, ForecastRecord.target_ts <= now)  # noqa: E712
+            .filter(
+                ForecastRecord.checked == False, ForecastRecord.target_ts <= now
+            )  # noqa: E712
             .limit(50)
             .all()
         )
@@ -2909,11 +3817,17 @@ class DataCollector:
                 actual = price_cache[sym]
                 if actual and rec.forecast_price and rec.forecast_price > 0:
                     rec.actual_price = actual
-                    rec.error_pct = abs((actual - rec.forecast_price) / rec.forecast_price) * 100
+                    rec.error_pct = (
+                        abs((actual - rec.forecast_price) / rec.forecast_price) * 100
+                    )
                     if rec.direction and rec.current_price_at_forecast:
                         expected_up = rec.direction == "WZROST"
                         actual_up = actual >= rec.current_price_at_forecast
-                        rec.correct_direction = (expected_up == actual_up) if rec.direction != "BOCZNY" else None
+                        rec.correct_direction = (
+                            (expected_up == actual_up)
+                            if rec.direction != "BOCZNY"
+                            else None
+                        )
                 rec.checked = True
             except Exception:
                 rec.checked = True  # nie blokuj pętlą nieudanych
@@ -2932,7 +3846,11 @@ class DataCollector:
         now = utc_now_naive()
 
         # Uruchamiaj co najwyżej raz na godzinę
-        if hasattr(self, "_last_purge_ts") and self._last_purge_ts and (now - self._last_purge_ts).total_seconds() < 3600:
+        if (
+            hasattr(self, "_last_purge_ts")
+            and self._last_purge_ts
+            and (now - self._last_purge_ts).total_seconds() < 3600
+        ):
             return
         self._last_purge_ts = now
 
@@ -2951,9 +3869,11 @@ class DataCollector:
                 batch_total = 0
                 while True:
                     result = db.execute(
-                        text(f"DELETE FROM {table} WHERE id IN "
-                             f"(SELECT id FROM {table} WHERE {ts_col} < :cutoff LIMIT :batch)"),
-                        {"cutoff": cutoff, "batch": self._PURGE_BATCH}
+                        text(
+                            f"DELETE FROM {table} WHERE id IN "
+                            f"(SELECT id FROM {table} WHERE {ts_col} < :cutoff LIMIT :batch)"
+                        ),
+                        {"cutoff": cutoff, "batch": self._PURGE_BATCH},
                     )
                     db.commit()
                     deleted = result.rowcount
@@ -2961,7 +3881,12 @@ class DataCollector:
                         break
                     batch_total += deleted
                 if batch_total:
-                    log_to_db("INFO", "collector", f"Retencja: usunięto {batch_total} starych wierszy {table}", db=db)
+                    log_to_db(
+                        "INFO",
+                        "collector",
+                        f"Retencja: usunięto {batch_total} starych wierszy {table}",
+                        db=db,
+                    )
                     total_deleted += batch_total
             except Exception as exc:
                 log_exception("collector", f"Błąd retencji {table}", exc, db=db)
@@ -2972,11 +3897,19 @@ class DataCollector:
             cutoff_pending = now - timedelta(hours=24)
             expired = (
                 db.query(PendingOrder)
-                .filter(PendingOrder.status == "PENDING", PendingOrder.created_at < cutoff_pending)
+                .filter(
+                    PendingOrder.status == "PENDING",
+                    PendingOrder.created_at < cutoff_pending,
+                )
                 .update({"status": "EXPIRED"}, synchronize_session=False)
             )
             if expired:
-                log_to_db("INFO", "collector", f"Retencja: oznaczono {expired} starych pending orders jako EXPIRED (>24h)", db=db)
+                log_to_db(
+                    "INFO",
+                    "collector",
+                    f"Retencja: oznaczono {expired} starych pending orders jako EXPIRED (>24h)",
+                    db=db,
+                )
             db.commit()
         except Exception as exc:
             log_exception("collector", "Błąd retencji pending_orders", exc, db=db)
@@ -2987,7 +3920,12 @@ class DataCollector:
             try:
                 db.commit()
                 db.execute(text("VACUUM"))
-                log_to_db("INFO", "collector", f"VACUUM po usunięciu {total_deleted} wierszy", db=db)
+                log_to_db(
+                    "INFO",
+                    "collector",
+                    f"VACUUM po usunięciu {total_deleted} wierszy",
+                    db=db,
+                )
             except Exception:
                 pass  # VACUUM nie jest krytyczny
 
@@ -2996,11 +3934,16 @@ class DataCollector:
         report_lines = []
         for symbol in self.watchlist:
             since = utc_now_naive() - timedelta(days=self.learning_days)
-            klines = db.query(Kline).filter(
-                Kline.symbol == symbol,
-                Kline.timeframe == "1h",
-                Kline.open_time >= since
-            ).order_by(Kline.open_time).all()
+            klines = (
+                db.query(Kline)
+                .filter(
+                    Kline.symbol == symbol,
+                    Kline.timeframe == "1h",
+                    Kline.open_time >= since,
+                )
+                .order_by(Kline.open_time)
+                .all()
+            )
             if len(klines) < 50:
                 continue
             prices = [k.close for k in klines if k.close]
@@ -3015,7 +3958,7 @@ class DataCollector:
             # Volatility estimate
             mean_r = sum(returns) / len(returns)
             var = sum((r - mean_r) ** 2 for r in returns) / max(1, (len(returns) - 1))
-            vol = var ** 0.5
+            vol = var**0.5
 
             # Trend strength estimate
             ema20 = sum(prices[-20:]) / 20
@@ -3024,7 +3967,12 @@ class DataCollector:
 
             # Conservative tuning
             base_conf = 0.55
-            conf = min(0.72, base_conf + min(0.12, vol * 2) + (0.05 if trend_strength < 0.002 else 0))
+            conf = min(
+                0.72,
+                base_conf
+                + min(0.12, vol * 2)
+                + (0.05 if trend_strength < 0.002 else 0),
+            )
             risk_scale = max(0.3, min(1.0, 1.0 - vol * 3))
 
             self.symbol_params[symbol] = {
@@ -3039,23 +3987,46 @@ class DataCollector:
             )
 
         if report_lines:
-            log_to_db("INFO", "learning", f"Kalibracja na {self.learning_days} dni: " + " | ".join(report_lines), db=db)
+            log_to_db(
+                "INFO",
+                "learning",
+                f"Kalibracja na {self.learning_days} dni: " + " | ".join(report_lines),
+                db=db,
+            )
             # Persystuj symbol_params do RuntimeSetting (klucz learning_symbol_params)
             try:
                 import json as _json
+
                 from backend.runtime_settings import upsert_overrides
-                upsert_overrides(db, {"learning_symbol_params": _json.dumps(self.symbol_params)})
+
+                upsert_overrides(
+                    db, {"learning_symbol_params": _json.dumps(self.symbol_params)}
+                )
             except Exception as _exc:
-                log_exception("learning", "Błąd persistowania symbol_params", _exc, db=db)
+                log_exception(
+                    "learning", "Błąd persistowania symbol_params", _exc, db=db
+                )
             # Nie wysyłamy automatycznych raportów uczenia na Telegram (tylko na żądanie)
 
     def _ws_streams(self) -> str:
+        """Buduj URL strumieni WS do Binance. Max URL ~8000 znaków."""
         streams = []
+        char_count = 0
+        max_url_len = 7000  # Binance limit jest ~8000, zostaw margines
+
         for symbol in self.watchlist:
             s = symbol.lower()
-            streams.append(f"{s}@ticker")
-            streams.append(f"{s}@kline_1m")
-            streams.append(f"{s}@kline_1h")
+            # Każda para: "btceur@ticker/btceur@kline_1m/btceur@kline_1h"  ~40 znaków
+            new_streams = [f"{s}@ticker", f"{s}@kline_1m", f"{s}@kline_1h"]
+            new_str = "/".join(new_streams)
+            if char_count + len(new_str) + 1 > max_url_len:
+                logger.warning(
+                    f"⚠️  WS streams URL >7000 chars, omitting {symbol} (watchlist zbyt długa)"
+                )
+                break
+            streams.extend(new_streams)
+            char_count += len(new_str) + 1
+
         return "/".join(streams)
 
     async def _handle_ws_message(self, msg: dict):
@@ -3080,7 +4051,9 @@ class DataCollector:
                 db.add(market_data)
                 db.commit()
             except Exception as exc:
-                log_exception("collector_ws", f"Błąd zapisu tickera {symbol}", exc, db=db)
+                log_exception(
+                    "collector_ws", f"Błąd zapisu tickera {symbol}", exc, db=db
+                )
                 db.rollback()
             finally:
                 db.close()
@@ -3128,7 +4101,12 @@ class DataCollector:
                     db.add(kline)
                     db.commit()
             except Exception as exc:
-                log_exception("collector_ws", f"Błąd zapisu kline {symbol} {timeframe}", exc, db=db)
+                log_exception(
+                    "collector_ws",
+                    f"Błąd zapisu kline {symbol} {timeframe}",
+                    exc,
+                    db=db,
+                )
                 db.rollback()
             finally:
                 db.close()
@@ -3137,23 +4115,52 @@ class DataCollector:
         while self.ws_running:
             streams = self._ws_streams()
             if not streams:
-                await asyncio.sleep(2)
+                logger.warning("⚠️ Watchlist empty, waiting for data...")
+                await asyncio.sleep(5)
                 continue
+
             url = f"wss://stream.binance.com:9443/stream?streams={streams}"
             try:
-                async with websockets.connect(url, ping_interval=20, ping_timeout=20) as ws:
-                    log_to_db("INFO", "collector_ws", f"Połączono z Binance WS ({len(self.watchlist)} symboli)")
-                    logger.info(f"📡 WS connected ({len(self.watchlist)} symboli)")
+                # Zwiększone timeout'y dla bardziej niezawodnego połączenia
+                async with websockets.connect(
+                    url,
+                    ping_interval=30,  # 30s zamiast 20s
+                    ping_timeout=10,  # 10s zamiast 20s
+                    close_timeout=10,
+                    max_size=10000000,  # max message size
+                ) as ws:
+                    log_to_db(
+                        "INFO",
+                        "collector_ws",
+                        f"Połączono z Binance WS ({len(self.watchlist)} symboli)",
+                    )
+                    logger.info(
+                        f"📡 WS connected ({len(self.watchlist)} symboli na URL: {url[:80]}...)"
+                    )
                     self.ws_backoff_seconds = 2
 
                     while self.ws_running:
-                        raw = await ws.recv()
-                        msg = json.loads(raw)
-                        await self._handle_ws_message(msg)
+                        try:
+                            raw = await asyncio.wait_for(ws.recv(), timeout=60)
+                            msg = json.loads(raw)
+                            await self._handle_ws_message(msg)
+                        except asyncio.TimeoutError:
+                            logger.warning("⚠️ WS recv timeout — reconnecting")
+                            break
+            except ConnectionRefusedError as exc:
+                log_exception(
+                    "collector_ws", "Connection refused — Binance WS niedostępny", exc
+                )
+                await asyncio.sleep(self.ws_backoff_seconds)
+                self.ws_backoff_seconds = min(self.ws_backoff_seconds * 2, 120)
+            except asyncio.TimeoutError as exc:
+                log_exception("collector_ws", "WS connect timeout — network issue", exc)
+                await asyncio.sleep(self.ws_backoff_seconds)
+                self.ws_backoff_seconds = min(self.ws_backoff_seconds * 2, 120)
             except Exception as exc:
                 log_exception("collector_ws", "Błąd połączenia WS - reconnect", exc)
                 await asyncio.sleep(self.ws_backoff_seconds)
-                self.ws_backoff_seconds = min(self.ws_backoff_seconds * 2, 60)
+                self.ws_backoff_seconds = min(self.ws_backoff_seconds * 2, 120)
 
     def _run_ws_thread(self):
         asyncio.run(self._ws_loop())
@@ -3180,20 +4187,20 @@ class DataCollector:
                 pass
         self.ws_thread = None
         logger.info("🛑 Binance WS stopped")
-    
+
     def start(self):
         """Uruchom kolektor w pętli"""
         self.running = True
         logger.info("🚀 DataCollector started")
-        
+
         while self.running:
             try:
                 self.run_once()
-                
+
                 # Czekaj do następnego cyklu
                 logger.info(f"⏰ Next collection in {self.interval} seconds...")
                 time.sleep(self.interval)
-                
+
             except KeyboardInterrupt:
                 logger.info("⚠️  Keyboard interrupt received")
                 self.stop()
@@ -3201,7 +4208,7 @@ class DataCollector:
                 logger.error(f"❌ Unexpected error in collector loop: {str(e)}")
                 log_exception("collector", "Błąd w pętli kolektora", e)
                 time.sleep(5)  # Krótka pauza przed ponowną próbą
-    
+
     def stop(self):
         """Zatrzymaj kolektor"""
         self.running = False
@@ -3214,9 +4221,9 @@ def main():
     logger.info("=" * 60)
     logger.info("RLdC Trading Bot - Data Collector")
     logger.info("=" * 60)
-    
+
     collector = DataCollector()
-    
+
     try:
         collector.start()
     except Exception as e:
