@@ -2,33 +2,19 @@
 
 import { getApiBase } from '@/lib/api'
 import { useEffect, useMemo, useState } from 'react'
-import { 
-  Area, 
-  CartesianGrid, 
-  ComposedChart, 
-  Line, 
-  LineChart, 
-  ReferenceArea, 
-  ReferenceLine, 
-  ResponsiveContainer, 
-  Tooltip, 
-  XAxis, 
-  YAxis 
-} from 'recharts'
 import {
-  TrendingUp,
-  TrendingDown,
-  Activity,
-  BarChart2,
-  Crosshair,
-  Minus,
-  Circle,
-  Square,
-  Triangle,
-  Type,
-  Image as ImageIcon,
-  Maximize2,
-} from 'lucide-react'
+    Area,
+    CartesianGrid,
+    ComposedChart,
+    Line,
+    LineChart,
+    ReferenceArea,
+    ReferenceLine,
+    ResponsiveContainer,
+    Tooltip,
+    XAxis,
+    YAxis
+} from 'recharts'
 
 type KlinePoint = {
   time: string

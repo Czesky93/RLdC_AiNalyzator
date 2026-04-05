@@ -1,15 +1,24 @@
 """
 Portfolio API Router - endpoints dla portfolio
 """
-from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy.orm import Session
-from sqlalchemy import desc, func
-from typing import Optional, Dict, List
-from datetime import datetime, timedelta, timezone
 
-from backend.accounting import summarize_positions, compute_demo_account_state
-from backend.database import get_db, Position, AccountSnapshot, ForecastRecord, MarketData, utc_now_naive
+from datetime import datetime, timedelta, timezone
+from typing import Dict, List, Optional
+
+from fastapi import APIRouter, Depends, HTTPException, Query
+from sqlalchemy import desc, func
+from sqlalchemy.orm import Session
+
+from backend.accounting import compute_demo_account_state, summarize_positions
 from backend.binance_client import get_binance_client
+from backend.database import (
+    AccountSnapshot,
+    ForecastRecord,
+    MarketData,
+    Position,
+    get_db,
+    utc_now_naive,
+)
 
 router = APIRouter()
 
@@ -22,13 +31,23 @@ def _build_live_spot_portfolio(db: Session) -> Dict:
     """
     binance = get_binance_client()
     if not binance.api_key or not binance.api_secret:
-        return {"error": "Brak kluczy Binance API — uzupełnij .env (BINANCE_API_KEY, BINANCE_API_SECRET)",
-                "spot_positions": [], "unpriced_assets": [], "total_equity_eur": 0.0, "free_cash_eur": 0.0}
+        return {
+            "error": "Brak kluczy Binance API — uzupełnij .env (BINANCE_API_KEY, BINANCE_API_SECRET)",
+            "spot_positions": [],
+            "unpriced_assets": [],
+            "total_equity_eur": 0.0,
+            "free_cash_eur": 0.0,
+        }
 
     balances = binance.get_balances() or []
     if not balances:
-        return {"error": "Brak sald z Binance — sprawdź klucze API",
-                "spot_positions": [], "unpriced_assets": [], "total_equity_eur": 0.0, "free_cash_eur": 0.0}
+        return {
+            "error": "Brak sald z Binance — sprawdź klucze API",
+            "spot_positions": [],
+            "unpriced_assets": [],
+            "total_equity_eur": 0.0,
+            "free_cash_eur": 0.0,
+        }
 
     # ─── Pobierz ceny EUR z DB (najnowszy tick dla każdego symbolu kończącego się na EUR)
     latest_ts_subq = (
@@ -39,9 +58,11 @@ def _build_live_spot_portfolio(db: Session) -> Dict:
     )
     md_eur_rows = (
         db.query(MarketData)
-        .join(latest_ts_subq,
-              (MarketData.symbol == latest_ts_subq.c.symbol) &
-              (MarketData.timestamp == latest_ts_subq.c.ts))
+        .join(
+            latest_ts_subq,
+            (MarketData.symbol == latest_ts_subq.c.symbol)
+            & (MarketData.timestamp == latest_ts_subq.c.ts),
+        )
         .all()
     )
     eur_prices: Dict[str, float] = {}  # asset -> cena w EUR
@@ -53,8 +74,10 @@ def _build_live_spot_portfolio(db: Session) -> Dict:
     # ─── Kurs USDT/EUR z DB lub Binance
     eur_per_usdt: Optional[float] = None
     eurusdt_md = (
-        db.query(MarketData).filter(MarketData.symbol == "EURUSDT")
-        .order_by(MarketData.timestamp.desc()).first()
+        db.query(MarketData)
+        .filter(MarketData.symbol == "EURUSDT")
+        .order_by(MarketData.timestamp.desc())
+        .first()
     )
     if eurusdt_md and (eurusdt_md.price or 0) > 0:
         eur_per_usdt = round(1.0 / float(eurusdt_md.price), 6)
@@ -121,24 +144,28 @@ def _build_live_spot_portfolio(db: Session) -> Dict:
             total_equity_eur += value_eur
             if asset in stable_stable or asset in stable_usdt:
                 free_cash_eur += free_value_eur
-            spot_positions.append({
-                "asset": asset,
-                "total": round(total_qty, 8),
-                "free": round(free_qty, 8),
-                "locked": round(locked_qty, 8),
-                "price_eur": round(price_eur, 6),
-                "price_source": price_source,
-                "value_eur": value_eur,
-                "free_value_eur": free_value_eur,
-                "weight_pct": 0.0,  # wypełnione poniżej
-            })
+            spot_positions.append(
+                {
+                    "asset": asset,
+                    "total": round(total_qty, 8),
+                    "free": round(free_qty, 8),
+                    "locked": round(locked_qty, 8),
+                    "price_eur": round(price_eur, 6),
+                    "price_source": price_source,
+                    "value_eur": value_eur,
+                    "free_value_eur": free_value_eur,
+                    "weight_pct": 0.0,  # wypełnione poniżej
+                }
+            )
         else:
             unpriced_assets.append({"asset": asset, "total": round(total_qty, 8)})
 
     # Posortuj wg wartości i policz udziały
     spot_positions.sort(key=lambda x: -x["value_eur"])
     for p in spot_positions:
-        p["weight_pct"] = round((p["value_eur"] / total_equity_eur * 100) if total_equity_eur > 0 else 0, 1)
+        p["weight_pct"] = round(
+            (p["value_eur"] / total_equity_eur * 100) if total_equity_eur > 0 else 0, 1
+        )
 
     return {
         "error": None,
@@ -156,49 +183,60 @@ def _build_live_spot_portfolio(db: Session) -> Dict:
 @router.get("")
 def get_portfolio(
     mode: str = Query("demo", description="Tryb: demo lub live"),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
 ):
     """
     Pobierz portfolio (otwarte pozycje)
     """
     try:
-        positions = db.query(Position).filter(
-            Position.mode == mode
-        ).all()
-        
+        positions = db.query(Position).filter(Position.mode == mode).all()
+
         # Jeśli brak pozycji w demo, zwracamy pusty wynik
-        
+
         # Formatuj dane
         result = []
         total_unrealized_pnl = 0.0
-        
+
         for pos in positions:
             # Aktualizuj current_price (w prawdziwym systemie z market data)
             # current_price = get_current_price(pos.symbol)
             unrealized_pnl = pos.unrealized_pnl or 0.0
             total_unrealized_pnl += unrealized_pnl
-            
-            result.append({
-                "id": pos.id,
-                "symbol": pos.symbol,
-                "side": pos.side,
-                "entry_price": pos.entry_price,
-                "current_price": pos.current_price,
-                "quantity": pos.quantity,
-                "unrealized_pnl": unrealized_pnl,
-                "pnl_percent": round((unrealized_pnl / (pos.entry_price * pos.quantity) * 100) if pos.entry_price > 0 else 0, 2),
-                "opened_at": pos.opened_at.isoformat(),
-                "updated_at": pos.updated_at.isoformat() if pos.updated_at else pos.opened_at.isoformat()
-            })
-        
+
+            result.append(
+                {
+                    "id": pos.id,
+                    "symbol": pos.symbol,
+                    "side": pos.side,
+                    "entry_price": pos.entry_price,
+                    "current_price": pos.current_price,
+                    "quantity": pos.quantity,
+                    "unrealized_pnl": unrealized_pnl,
+                    "pnl_percent": round(
+                        (
+                            (unrealized_pnl / (pos.entry_price * pos.quantity) * 100)
+                            if pos.entry_price > 0
+                            else 0
+                        ),
+                        2,
+                    ),
+                    "opened_at": pos.opened_at.isoformat(),
+                    "updated_at": (
+                        pos.updated_at.isoformat()
+                        if pos.updated_at
+                        else pos.opened_at.isoformat()
+                    ),
+                }
+            )
+
         response = {
             "success": True,
             "mode": mode,
             "data": result,
             "count": len(result),
-            "total_unrealized_pnl": round(total_unrealized_pnl, 2)
+            "total_unrealized_pnl": round(total_unrealized_pnl, 2),
         }
-        
+
         # Jeśli LIVE, dołącz salda z Binance
         if mode == "live":
             binance = get_binance_client()
@@ -214,17 +252,19 @@ def get_portfolio(
             response["simple_earn_locked"] = simple_earn_locked
             response["futures_balance"] = futures_balance
             response["futures_account"] = futures_account
-        
+
         return response
-        
+
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error getting portfolio: {str(e)}")
+        raise HTTPException(
+            status_code=500, detail=f"Error getting portfolio: {str(e)}"
+        )
 
 
 @router.get("/summary")
 def get_portfolio_summary(
     mode: str = Query("demo", description="Tryb: demo lub live"),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
 ):
     """
     Podsumowanie portfolio
@@ -241,10 +281,14 @@ def get_portfolio_summary(
             "data": {
                 "total_positions": total_positions,
                 "total_value": round(float(summary.get("exposure") or 0.0), 2),
-                "total_unrealized_pnl": round(sum(float(pos.unrealized_pnl or 0.0) for pos in positions), 2),
+                "total_unrealized_pnl": round(
+                    sum(float(pos.unrealized_pnl or 0.0) for pos in positions), 2
+                ),
                 "winning_positions": winning,
                 "losing_positions": losing,
-                "win_rate": round((winning / total_positions * 100) if total_positions > 0 else 0.0, 2),
+                "win_rate": round(
+                    (winning / total_positions * 100) if total_positions > 0 else 0.0, 2
+                ),
                 "gross_pnl": round(float(summary.get("gross_pnl") or 0.0), 2),
                 "net_pnl": round(float(summary.get("net_pnl") or 0.0), 2),
                 "total_cost": round(float(summary.get("total_cost") or 0.0), 2),
@@ -253,15 +297,17 @@ def get_portfolio_summary(
                 "spread_cost": round(float(summary.get("spread_cost") or 0.0), 2),
             },
         }
-        
+
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error getting portfolio summary: {str(e)}")
+        raise HTTPException(
+            status_code=500, detail=f"Error getting portfolio summary: {str(e)}"
+        )
 
 
 @router.get("/wealth")
 def get_portfolio_wealth(
     mode: str = Query("demo", description="Tryb: demo lub live"),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
 ):
     """
     Pełny majątek portfela — pozycje z wartościami EUR, historia equity (wykres), wolna gotówka.
@@ -281,23 +327,30 @@ def get_portfolio_wealth(
             pnl_eur = round(value - cost, 4)
             pnl_pct = round((pnl_eur / cost * 100) if cost > 0 else 0, 2)
             total_positions_value += value
-            items.append({
-                "symbol": pos.symbol,
-                "side": pos.side or "BUY",
-                "quantity": qty,
-                "entry_price": entry,
-                "current_price": current,
-                "value_eur": round(value, 4),
-                "cost_eur": round(cost, 4),
-                "pnl_eur": pnl_eur,
-                "pnl_pct": pnl_pct,
-                "opened_at": pos.opened_at.isoformat() if pos.opened_at else None,
-            })
+            items.append(
+                {
+                    "symbol": pos.symbol,
+                    "side": pos.side or "BUY",
+                    "quantity": qty,
+                    "entry_price": entry,
+                    "current_price": current,
+                    "value_eur": round(value, 4),
+                    "cost_eur": round(cost, 4),
+                    "pnl_eur": pnl_eur,
+                    "pnl_pct": pnl_pct,
+                    "opened_at": pos.opened_at.isoformat() if pos.opened_at else None,
+                }
+            )
 
         items.sort(key=lambda x: x["value_eur"], reverse=True)
         for item in items:
             item["weight_pct"] = round(
-                (item["value_eur"] / total_positions_value * 100) if total_positions_value > 0 else 0, 1
+                (
+                    (item["value_eur"] / total_positions_value * 100)
+                    if total_positions_value > 0
+                    else 0
+                ),
+                1,
             )
 
         # Historia equity (ostatnie 48h, max 60 punktów) — do wykresu portfela
@@ -321,7 +374,9 @@ def get_portfolio_wealth(
         if mode == "demo":
             state = compute_demo_account_state(db)
             free_cash = float(state.get("cash") or 0.0)
-            total_equity = float(state.get("equity") or (total_positions_value + free_cash))
+            total_equity = float(
+                state.get("equity") or (total_positions_value + free_cash)
+            )
         elif mode == "live":
             live_data = _build_live_spot_portfolio(db)
             if live_data.get("error"):
@@ -345,12 +400,23 @@ def get_portfolio_wealth(
 
                     # Użyj prawdziwej ceny wejścia z lokalnej DB (jeśli dostępna)
                     local_pos = local_positions.get(symbol)
-                    if local_pos and local_pos.entry_price and float(local_pos.entry_price) > 0 and not is_stable:
+                    if (
+                        local_pos
+                        and local_pos.entry_price
+                        and float(local_pos.entry_price) > 0
+                        and not is_stable
+                    ):
                         entry_price = float(local_pos.entry_price)
                         cost_eur = round(entry_price * qty, 4)
                         pnl_eur = round(value_eur - cost_eur, 4)
-                        pnl_pct = round((pnl_eur / cost_eur * 100) if cost_eur > 0 else 0, 2)
-                        opened_at = local_pos.opened_at.isoformat() if local_pos.opened_at else None
+                        pnl_pct = round(
+                            (pnl_eur / cost_eur * 100) if cost_eur > 0 else 0, 2
+                        )
+                        opened_at = (
+                            local_pos.opened_at.isoformat()
+                            if local_pos.opened_at
+                            else None
+                        )
                     else:
                         entry_price = current_price
                         cost_eur = value_eur
@@ -358,23 +424,25 @@ def get_portfolio_wealth(
                         pnl_pct = 0.0
                         opened_at = None
 
-                    items.append({
-                        "symbol": symbol,
-                        "asset": asset,
-                        "side": "HOLD",
-                        "quantity": qty,
-                        "free": p["free"],
-                        "locked": p["locked"],
-                        "entry_price": entry_price,
-                        "current_price": current_price,
-                        "value_eur": value_eur,
-                        "cost_eur": cost_eur,
-                        "pnl_eur": pnl_eur,
-                        "pnl_pct": pnl_pct,
-                        "weight_pct": p["weight_pct"],
-                        "price_source": p["price_source"],
-                        "opened_at": opened_at,
-                    })
+                    items.append(
+                        {
+                            "symbol": symbol,
+                            "asset": asset,
+                            "side": "HOLD",
+                            "quantity": qty,
+                            "free": p["free"],
+                            "locked": p["locked"],
+                            "entry_price": entry_price,
+                            "current_price": current_price,
+                            "value_eur": value_eur,
+                            "cost_eur": cost_eur,
+                            "pnl_eur": pnl_eur,
+                            "pnl_pct": pnl_pct,
+                            "weight_pct": p["weight_pct"],
+                            "price_source": p["price_source"],
+                            "opened_at": opened_at,
+                        }
+                    )
                 total_equity = live_data["total_equity_eur"]
                 free_cash = live_data["free_cash_eur"]
                 total_positions_value = total_equity
@@ -395,7 +463,9 @@ def get_portfolio_wealth(
             day_ago = utc_now_naive() - timedelta(hours=24)
             prev_snap = (
                 db.query(AccountSnapshot)
-                .filter(AccountSnapshot.mode == mode, AccountSnapshot.timestamp <= day_ago)
+                .filter(
+                    AccountSnapshot.mode == mode, AccountSnapshot.timestamp <= day_ago
+                )
                 .order_by(AccountSnapshot.timestamp.desc())
                 .first()
             )
@@ -421,7 +491,7 @@ def get_portfolio_wealth(
             "positions_value": round(total_positions_value, 2),
             "positions_count": len(items),
             "total_pnl": total_pnl,
-            "unrealized_pnl": total_pnl,          # alias dla kompatybilności
+            "unrealized_pnl": total_pnl,  # alias dla kompatybilności
             "equity_change": equity_change,
             "equity_change_pct": equity_change_pct,
             "margin_level": margin_level,
@@ -435,7 +505,9 @@ def get_portfolio_wealth(
         return response
 
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Błąd pobierania majątku: {str(e)}")
+        raise HTTPException(
+            status_code=500, detail=f"Błąd pobierania majątku: {str(e)}"
+        )
 
 
 @router.get("/live-sync")
@@ -487,7 +559,7 @@ def get_live_sync(db: Session = Depends(get_db)):
 @router.get("/forecast")
 def get_portfolio_forecast(
     mode: str = Query("demo", description="Tryb: demo lub live"),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
 ):
     """
     Prognoza wartości portfela za 1h / 2h / 7 dni.
@@ -530,8 +602,14 @@ def get_portfolio_forecast(
                     .order_by(desc(ForecastRecord.forecast_ts))
                     .first()
                 )
-                if fr and fr.current_price_at_forecast and fr.current_price_at_forecast > 0:
-                    pct = (float(fr.forecast_price) - float(fr.current_price_at_forecast)) / float(fr.current_price_at_forecast)
+                if (
+                    fr
+                    and fr.current_price_at_forecast
+                    and fr.current_price_at_forecast > 0
+                ):
+                    pct = (
+                        float(fr.forecast_price) - float(fr.current_price_at_forecast)
+                    ) / float(fr.current_price_at_forecast)
                     if sym not in forecasts_by_symbol:
                         forecasts_by_symbol[sym] = {}
                     forecasts_by_symbol[sym][horizon] = pct

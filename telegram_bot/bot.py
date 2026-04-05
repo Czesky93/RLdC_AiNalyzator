@@ -1,17 +1,29 @@
 """
 Telegram Bot for RLdC Trading Bot
 """
-import os
+
 import json
-import requests
+import os
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
+import requests
 from dotenv import load_dotenv
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 
-from backend.database import SessionLocal, Signal, Order, Position, BlogPost, SystemLog, AccountSnapshot, PendingOrder, Alert, utc_now_naive
+from backend.database import (
+    AccountSnapshot,
+    Alert,
+    BlogPost,
+    Order,
+    PendingOrder,
+    Position,
+    SessionLocal,
+    Signal,
+    SystemLog,
+    utc_now_naive,
+)
 from backend.system_logger import log_exception
 from backend.telegram_intelligence import log_telegram_event
 
@@ -93,7 +105,11 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     db = SessionLocal()
     try:
         last_signal = db.query(Signal).order_by(Signal.timestamp.desc()).first()
-        last_signal_text = "brak" if not last_signal else f"{last_signal.symbol} {last_signal.signal_type}"
+        last_signal_text = (
+            "brak"
+            if not last_signal
+            else f"{last_signal.symbol} {last_signal.signal_type}"
+        )
         text = (
             "✅ Status systemu\n"
             f"Tryb: {TRADING_MODE}\n"
@@ -121,7 +137,9 @@ async def stop_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif resp.status_code == 401:
             text = "⛔ Brak autoryzacji API — sprawdź ADMIN_TOKEN w .env."
         else:
-            text = f"⚠️ Nie udało się zatrzymać (status {resp.status_code}). Sprawdź API."
+            text = (
+                f"⚠️ Nie udało się zatrzymać (status {resp.status_code}). Sprawdź API."
+            )
     except Exception as exc:
         text = f"❌ Błąd wywołania API: {exc}"
     await _send_reply(update, text, "/stop")
@@ -211,7 +229,9 @@ async def portfolio_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             lines = ["💼 Portfolio:"]
             for p in positions:
-                lines.append(f"{p.symbol} {p.side} qty={p.quantity} PnL={p.unrealized_pnl}")
+                lines.append(
+                    f"{p.symbol} {p.side} qty={p.quantity} PnL={p.unrealized_pnl}"
+                )
             text = "\n".join(lines)
     finally:
         db.close()
@@ -325,7 +345,9 @@ async def logs_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             lines = ["🧱 Ostatnie logi:"]
             for l in logs:
-                lines.append(f"{l.timestamp.strftime('%H:%M:%S')} {l.level} {l.module}: {l.message}")
+                lines.append(
+                    f"{l.timestamp.strftime('%H:%M:%S')} {l.level} {l.module}: {l.message}"
+                )
             text = "\n".join(lines)
     finally:
         db.close()
@@ -336,19 +358,32 @@ async def logs_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     db = SessionLocal()
     try:
-        orders = db.query(Order).filter(Order.mode == "demo").order_by(Order.timestamp.desc()).limit(10).all()
+        orders = (
+            db.query(Order)
+            .filter(Order.mode == "demo")
+            .order_by(Order.timestamp.desc())
+            .limit(10)
+            .all()
+        )
         if not orders:
             text = "Brak danych do raportu."
         else:
             lines = ["Raport (ostatnie 10 decyzji)"]
             for o in orders:
-                alert = db.query(Alert).filter(
-                    Alert.symbol == o.symbol,
-                    Alert.alert_type == "SIGNAL",
-                    Alert.timestamp <= o.timestamp + timedelta(minutes=2),
-                    Alert.timestamp >= o.timestamp - timedelta(minutes=2)
-                ).order_by(Alert.timestamp.desc()).first()
-                reason = alert.message if alert and alert.message else "brak uzasadnienia"
+                alert = (
+                    db.query(Alert)
+                    .filter(
+                        Alert.symbol == o.symbol,
+                        Alert.alert_type == "SIGNAL",
+                        Alert.timestamp <= o.timestamp + timedelta(minutes=2),
+                        Alert.timestamp >= o.timestamp - timedelta(minutes=2),
+                    )
+                    .order_by(Alert.timestamp.desc())
+                    .first()
+                )
+                reason = (
+                    alert.message if alert and alert.message else "brak uzasadnienia"
+                )
                 side_pl = "Kupno" if o.side == "BUY" else "Sprzedaż"
                 price = o.executed_price or o.price
                 lines.append(
@@ -356,7 +391,9 @@ async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     f"Ilość {o.quantity}, cena {price}. "
                     f"Uzasadnienie: {reason}."
                 )
-            lines.append("\nWniosek: decyzje wykonano zgodnie z filtrem trendu i zakresem AI.")
+            lines.append(
+                "\nWniosek: decyzje wykonano zgodnie z filtrem trendu i zakresem AI."
+            )
             text = "\n".join(lines)
     finally:
         db.close()
@@ -431,7 +468,7 @@ async def governance_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return
     db = SessionLocal()
     try:
-        from backend.governance import get_pipeline_status, get_operator_queue
+        from backend.governance import get_operator_queue, get_pipeline_status
 
         status = get_pipeline_status(db)
         queue = get_operator_queue(db)
@@ -448,13 +485,21 @@ async def governance_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         else:
             lines = ["🟠 Pipeline częściowo zablokowany"]
             if not promo_ok:
-                lines.append(f"  🚫 Wdrożenia zablokowane ({status.get('promotion_blockers_count', 0)} alertów)")
+                lines.append(
+                    f"  🚫 Wdrożenia zablokowane ({status.get('promotion_blockers_count', 0)} alertów)"
+                )
             if not rollback_ok:
-                lines.append(f"  🚫 Cofanie zmian zablokowane ({status.get('rollback_blockers_count', 0)} alertów)")
+                lines.append(
+                    f"  🚫 Cofanie zmian zablokowane ({status.get('rollback_blockers_count', 0)} alertów)"
+                )
             if not exp_ok:
-                lines.append(f"  🚫 Eksperymenty zablokowane ({status.get('experiment_blockers_count', 0)} alertów)")
+                lines.append(
+                    f"  🚫 Eksperymenty zablokowane ({status.get('experiment_blockers_count', 0)} alertów)"
+                )
             if not rec_ok:
-                lines.append(f"  🚫 Rekomendacje zablokowane ({status.get('recommendation_blockers_count', 0)} alertów)")
+                lines.append(
+                    f"  🚫 Rekomendacje zablokowane ({status.get('recommendation_blockers_count', 0)} alertów)"
+                )
 
         if queue:
             lines.append(f"\nDo przejrzenia: {len(queue)} spraw")
@@ -539,7 +584,12 @@ async def incidents_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not active:
             text = "✅ Brak aktywnych incydentów — wszystko w porządku"
         else:
-            prio_labels = {"critical": "krytyczna", "high": "wysoka", "medium": "średnia", "low": "niska"}
+            prio_labels = {
+                "critical": "krytyczna",
+                "high": "wysoka",
+                "medium": "średnia",
+                "low": "niska",
+            }
             lines = [f"🔔 Aktywne incydenty: {len(active)}"]
             for inc in active[:10]:
                 inc_id = inc.get("id", "?")
@@ -565,9 +615,11 @@ async def ip_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     try:
         # Używamy Cloudflare DNS API do pobrania IP publicznego
-        resp = requests.get("https://1.1.1.1/dns-query?name=whoami.cloudflare&type=TXT", 
-                           headers={"accept": "application/dns-json"},
-                           timeout=5)
+        resp = requests.get(
+            "https://1.1.1.1/dns-query?name=whoami.cloudflare&type=TXT",
+            headers={"accept": "application/dns-json"},
+            timeout=5,
+        )
         if resp.status_code == 200:
             data = resp.json()
             ip = None
@@ -607,7 +659,7 @@ async def ai_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             code = data.get("code")
             model = data.get("model", "unknown")
             key_fp = data.get("key_fingerprint", "none")
-            
+
             if status == "ok":
                 icon = "✅"
                 text = f"{icon} AI System: OK\n"

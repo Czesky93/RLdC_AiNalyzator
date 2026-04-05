@@ -1,13 +1,25 @@
 """
 Database models and configuration for RLdC Trading Bot.
 """
-import logging
 
-from sqlalchemy import create_engine, Column, Integer, Float, String, DateTime, Boolean, Text, inspect, text
-from sqlalchemy.orm import declarative_base, sessionmaker
-from datetime import datetime, timezone
 import json
+import logging
 import os
+from datetime import datetime, timezone
+
+from sqlalchemy import (
+    Boolean,
+    Column,
+    DateTime,
+    Float,
+    Integer,
+    String,
+    Text,
+    create_engine,
+    inspect,
+    text,
+)
+from sqlalchemy.orm import declarative_base, sessionmaker
 
 logger = logging.getLogger(__name__)
 from dotenv import load_dotenv
@@ -23,6 +35,7 @@ def utc_now_naive() -> datetime:
     Używaj tej funkcji wszędzie tam, gdzie czas jest porównywany z kolumnami DB.
     """
     return datetime.now(timezone.utc).replace(tzinfo=None)
+
 
 _ENV_PATH = os.path.join(os.path.dirname(__file__), "..", ".env")
 load_dotenv(dotenv_path=_ENV_PATH, override=False)
@@ -42,6 +55,7 @@ _engine_kwargs: dict = {
 }
 if "sqlite" in DATABASE_URL:
     from sqlalchemy.pool import NullPool as _NullPool
+
     _engine_kwargs["poolclass"] = _NullPool
 else:
     _engine_kwargs["pool_pre_ping"] = True
@@ -60,6 +74,7 @@ if "sqlite" in DATABASE_URL:
         cursor.execute("PRAGMA synchronous=NORMAL")
         cursor.close()
 
+
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
@@ -67,8 +82,9 @@ Base = declarative_base()
 # Database Models
 class MarketData(Base):
     """Dane rynkowe (tickery)"""
+
     __tablename__ = "market_data"
-    
+
     id = Column(Integer, primary_key=True, index=True)
     symbol = Column(String(20), index=True, nullable=False)
     price = Column(Float, nullable=False)
@@ -80,8 +96,9 @@ class MarketData(Base):
 
 class Kline(Base):
     """Świece (OHLCV)"""
+
     __tablename__ = "klines"
-    
+
     id = Column(Integer, primary_key=True, index=True)
     symbol = Column(String(20), index=True, nullable=False)
     timeframe = Column(String(10), nullable=False)  # 1m, 5m, 15m, 1h, 4h, 1d
@@ -100,8 +117,9 @@ class Kline(Base):
 
 class Signal(Base):
     """Sygnały AI"""
+
     __tablename__ = "signals"
-    
+
     id = Column(Integer, primary_key=True, index=True)
     symbol = Column(String(20), index=True, nullable=False)
     signal_type = Column(String(10), nullable=False)  # BUY, SELL, HOLD
@@ -114,8 +132,9 @@ class Signal(Base):
 
 class Order(Base):
     """Zlecenia (demo i live)"""
+
     __tablename__ = "orders"
-    
+
     id = Column(Integer, primary_key=True, index=True)
     symbol = Column(String(20), index=True, nullable=False)
     side = Column(String(10), nullable=False)  # BUY, SELL
@@ -142,8 +161,9 @@ class Order(Base):
 
 class Position(Base):
     """Otwarte pozycje"""
+
     __tablename__ = "positions"
-    
+
     id = Column(Integer, primary_key=True, index=True)
     symbol = Column(String(20), index=True, nullable=False)
     side = Column(String(10), nullable=False)  # LONG, SHORT
@@ -166,22 +186,25 @@ class Position(Base):
     opened_at = Column(DateTime, default=utc_now_naive)
     updated_at = Column(DateTime, default=utc_now_naive, onupdate=utc_now_naive)
     # Exit quality tracking (MFE/MAE)
-    planned_tp = Column(Float)       # TP ustawiony przy wejściu
-    planned_sl = Column(Float)       # SL ustawiony przy wejściu
-    mfe_price = Column(Float)        # Maximum Favorable Excursion — najlepsza cena od wejścia
-    mae_price = Column(Float)        # Maximum Adverse Excursion — najgorsza cena od wejścia
-    mfe_pnl = Column(Float)          # PnL w momencie MFE
-    mae_pnl = Column(Float)          # PnL w momencie MAE
+    planned_tp = Column(Float)  # TP ustawiony przy wejściu
+    planned_sl = Column(Float)  # SL ustawiony przy wejściu
+    mfe_price = Column(Float)  # Maximum Favorable Excursion — najlepsza cena od wejścia
+    mae_price = Column(Float)  # Maximum Adverse Excursion — najgorsza cena od wejścia
+    mfe_pnl = Column(Float)  # PnL w momencie MFE
+    mae_pnl = Column(Float)  # PnL w momencie MAE
     # Exit engine — warstwowe zarządzanie wyjściem
-    highest_price_seen = Column(Float)           # max cena od wejścia (na bieżąco)
+    highest_price_seen = Column(Float)  # max cena od wejścia (na bieżąco)
     trailing_active = Column(Boolean, default=False)  # czy trailing stop jest aktywny
-    trailing_stop_price = Column(Float)          # aktualny poziom trailing stop
-    partial_take_count = Column(Integer, default=0)   # ile razy już było częściowe zamknięcie
-    exit_plan_json = Column(Text)                # JSON z planem wyjścia
+    trailing_stop_price = Column(Float)  # aktualny poziom trailing stop
+    partial_take_count = Column(
+        Integer, default=0
+    )  # ile razy już było częściowe zamknięcie
+    exit_plan_json = Column(Text)  # JSON z planem wyjścia
 
 
 class ExitQuality(Base):
     """Podsumowanie jakości trade'u — tworzone przy zamknięciu pozycji."""
+
     __tablename__ = "exit_quality"
 
     id = Column(Integer, primary_key=True, index=True)
@@ -199,15 +222,19 @@ class ExitQuality(Base):
     net_pnl = Column(Float)
     total_cost = Column(Float)
     # Metryki diagnostyczne
-    mfe_pnl = Column(Float)           # max zysk osiągnięty w trakcie pozycji
-    mae_pnl = Column(Float)           # max strata osiągnięta w trakcie pozycji
-    gave_back_pct = Column(Float)     # % zysku oddanego po MFE: (mfe_pnl - net_pnl) / mfe_pnl * 100
-    tp_hit = Column(Boolean)          # czy cena dotarła do TP
-    tp_near_miss_pct = Column(Float)  # jak blisko TP dotarł MFE: (mfe - entry) / (tp - entry) * 100
-    sl_hit = Column(Boolean)          # czy cena dotarła do SL
-    expected_rr = Column(Float)       # planowany R:R = (tp-entry) / (entry-sl)
-    realized_rr = Column(Float)       # zrealizowany R:R = net_pnl / |planned_risk|
-    edge_vs_cost = Column(Float)      # net_pnl / total_cost — >1 = edge pokrył koszty
+    mfe_pnl = Column(Float)  # max zysk osiągnięty w trakcie pozycji
+    mae_pnl = Column(Float)  # max strata osiągnięta w trakcie pozycji
+    gave_back_pct = Column(
+        Float
+    )  # % zysku oddanego po MFE: (mfe_pnl - net_pnl) / mfe_pnl * 100
+    tp_hit = Column(Boolean)  # czy cena dotarła do TP
+    tp_near_miss_pct = Column(
+        Float
+    )  # jak blisko TP dotarł MFE: (mfe - entry) / (tp - entry) * 100
+    sl_hit = Column(Boolean)  # czy cena dotarła do SL
+    expected_rr = Column(Float)  # planowany R:R = (tp-entry) / (entry-sl)
+    realized_rr = Column(Float)  # zrealizowany R:R = net_pnl / |planned_risk|
+    edge_vs_cost = Column(Float)  # net_pnl / total_cost — >1 = edge pokrył koszty
     duration_seconds = Column(Float)  # czas trwania pozycji
     config_snapshot_id = Column(String(64), index=True)
     exit_reason_code = Column(String(80))
@@ -216,8 +243,9 @@ class ExitQuality(Base):
 
 class AccountSnapshot(Base):
     """Snapshoty konta (equity, margin)"""
+
     __tablename__ = "account_snapshots"
-    
+
     id = Column(Integer, primary_key=True, index=True)
     mode = Column(String(10), nullable=False)  # demo, live
     equity = Column(Float, nullable=False)
@@ -231,8 +259,9 @@ class AccountSnapshot(Base):
 
 class Alert(Base):
     """Alerty systemowe"""
+
     __tablename__ = "alerts"
-    
+
     id = Column(Integer, primary_key=True, index=True)
     alert_type = Column(String(50), nullable=False)  # SIGNAL, RISK, WHALE, NEWS
     severity = Column(String(20), nullable=False)  # INFO, WARNING, CRITICAL
@@ -245,8 +274,9 @@ class Alert(Base):
 
 class SystemLog(Base):
     """Logi systemowe"""
+
     __tablename__ = "system_logs"
-    
+
     id = Column(Integer, primary_key=True, index=True)
     level = Column(String(20), nullable=False)  # DEBUG, INFO, WARNING, ERROR, CRITICAL
     module = Column(String(50), nullable=False)
@@ -257,8 +287,9 @@ class SystemLog(Base):
 
 class BlogPost(Base):
     """Wpisy blogowe"""
+
     __tablename__ = "blog_posts"
-    
+
     id = Column(Integer, primary_key=True, index=True)
     title = Column(String(200), nullable=False)
     content = Column(Text, nullable=False)
@@ -271,32 +302,40 @@ class BlogPost(Base):
 
 class TelegramMessage(Base):
     """Historia wiadomości Telegram — z klasyfikacją i parserem (Telegram Intelligence Layer)"""
+
     __tablename__ = "telegram_messages"
 
     id = Column(Integer, primary_key=True, index=True)
     chat_id = Column(String(50), nullable=False)
-    message_type = Column(String(50), nullable=False)  # command | alert | signal | execution | status | error
+    message_type = Column(
+        String(50), nullable=False
+    )  # command | alert | signal | execution | status | error
     command = Column(String(50))
     message = Column(Text, nullable=False)
     is_sent = Column(Boolean, default=False)
     error = Column(Text)
     timestamp = Column(DateTime, default=utc_now_naive, index=True)
     # Telegram Intelligence Layer — pola klasyfikacji
-    direction = Column(String(20))          # incoming | outgoing | internal
-    msg_category = Column(String(40))       # SIGNAL_MESSAGE | EXECUTION_MESSAGE | BLOCKER_MESSAGE | ...
-    severity = Column(String(20))           # info | warning | critical
-    source_module = Column(String(50))      # collector | telegram_bot | risk | orders | control | ui
+    direction = Column(String(20))  # incoming | outgoing | internal
+    msg_category = Column(
+        String(40)
+    )  # SIGNAL_MESSAGE | EXECUTION_MESSAGE | BLOCKER_MESSAGE | ...
+    severity = Column(String(20))  # info | warning | critical
+    source_module = Column(
+        String(50)
+    )  # collector | telegram_bot | risk | orders | control | ui
     parsed_symbol = Column(String(20))
     parsed_side = Column(String(10))
     parsed_confidence = Column(Float)
     action_required = Column(Boolean, default=False)
-    parsed_payload_json = Column(Text)      # JSON z wyciągniętymi danymi
+    parsed_payload_json = Column(Text)  # JSON z wyciągniętymi danymi
     linked_order_id = Column(Integer)
     linked_position_id = Column(Integer)
 
 
 class PendingOrder(Base):
     """Oczekujące potwierdzenia transakcji (Telegram)"""
+
     __tablename__ = "pending_orders"
 
     id = Column(Integer, primary_key=True, index=True)
@@ -306,7 +345,9 @@ class PendingOrder(Base):
     price = Column(Float)
     quantity = Column(Float, nullable=False)
     mode = Column(String(10), nullable=False)  # demo, live
-    status = Column(String(20), nullable=False, default="PENDING")  # PENDING, CONFIRMED, REJECTED, EXECUTED
+    status = Column(
+        String(20), nullable=False, default="PENDING"
+    )  # PENDING, CONFIRMED, REJECTED, EXECUTED
     reason = Column(Text)
     config_snapshot_id = Column(String(64), index=True)
     strategy_name = Column(String(80))
@@ -322,7 +363,9 @@ class RuntimeSetting(Base):
     id = Column(Integer, primary_key=True, index=True)
     key = Column(String(50), unique=True, index=True, nullable=False)
     value = Column(Text)
-    updated_at = Column(DateTime, default=utc_now_naive, onupdate=utc_now_naive, index=True)
+    updated_at = Column(
+        DateTime, default=utc_now_naive, onupdate=utc_now_naive, index=True
+    )
 
 
 class ConfigSnapshot(Base):
@@ -436,7 +479,9 @@ class ConfigPromotion(Base):
     failure_reason = Column(Text)
     rollback_available = Column(Boolean, default=False)
     rollback_snapshot_id = Column(String(64), index=True)
-    post_promotion_monitoring_status = Column(String(20), nullable=False, default="pending", index=True)
+    post_promotion_monitoring_status = Column(
+        String(20), nullable=False, default="pending", index=True
+    )
     validation_summary_json = Column(Text)
     runtime_apply_result_json = Column(Text)
     notes = Column(Text)
@@ -476,7 +521,9 @@ class ConfigRollback(Base):
     id = Column(Integer, primary_key=True, index=True)
     promotion_id = Column(Integer, nullable=False, index=True)
     monitoring_id = Column(Integer, nullable=False, index=True)
-    decision_source = Column(String(20), nullable=False, default="monitoring", index=True)
+    decision_source = Column(
+        String(20), nullable=False, default="monitoring", index=True
+    )
     decision_status = Column(String(24), nullable=False, index=True)
     execution_status = Column(String(20), nullable=False, default="pending", index=True)
     from_snapshot_id = Column(String(64), nullable=False, index=True)
@@ -594,16 +641,16 @@ class ForecastRecord(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     symbol = Column(String(20), index=True, nullable=False)
-    horizon = Column(String(10), nullable=False)          # "1h", "4h", "24h"
+    horizon = Column(String(10), nullable=False)  # "1h", "4h", "24h"
     forecast_ts = Column(DateTime, default=utc_now_naive, index=True)
-    forecast_price = Column(Float, nullable=False)        # przewidywana cena
+    forecast_price = Column(Float, nullable=False)  # przewidywana cena
     current_price_at_forecast = Column(Float, nullable=False)
     projected_pct = Column(Float)
-    direction = Column(String(20))                        # WZROST / SPADEK / BOCZNY
-    target_ts = Column(DateTime, index=True)              # kiedy sprawdzić
+    direction = Column(String(20))  # WZROST / SPADEK / BOCZNY
+    target_ts = Column(DateTime, index=True)  # kiedy sprawdzić
     actual_price = Column(Float, nullable=True)
-    error_pct = Column(Float, nullable=True)              # abs((actual-forecast)/forecast)*100
-    correct_direction = Column(Boolean, nullable=True)    # czy kierunek był trafny
+    error_pct = Column(Float, nullable=True)  # abs((actual-forecast)/forecast)*100
+    correct_direction = Column(Boolean, nullable=True)  # czy kierunek był trafny
     checked = Column(Boolean, default=False, index=True)
     created_at = Column(DateTime, default=utc_now_naive)
 
@@ -634,7 +681,9 @@ class UserExpectation(Base):
     __tablename__ = "user_expectations"
 
     id = Column(Integer, primary_key=True, index=True)
-    symbol = Column(String(20), index=True, nullable=True)      # None = dotyczy całego portfela
+    symbol = Column(
+        String(20), index=True, nullable=True
+    )  # None = dotyczy całego portfela
     mode = Column(String(10), nullable=False, default="demo", index=True)
 
     # Typy celu: "target_value_eur", "target_price", "target_profit_pct",
@@ -642,9 +691,9 @@ class UserExpectation(Base):
     expectation_type = Column(String(40), nullable=False)
 
     # Cele ilościowe
-    target_value_eur = Column(Float, nullable=True)      # cel wartości pozycji w EUR
-    target_price = Column(Float, nullable=True)           # cel ceny symbolu
-    target_profit_pct = Column(Float, nullable=True)      # cel zysku procentowego
+    target_value_eur = Column(Float, nullable=True)  # cel wartości pozycji w EUR
+    target_price = Column(Float, nullable=True)  # cel ceny symbolu
+    target_profit_pct = Column(Float, nullable=True)  # cel zysku procentowego
 
     # Zakazy i reguły ochronne
     no_buy = Column(Boolean, default=False)
@@ -653,7 +702,9 @@ class UserExpectation(Base):
 
     # Preferencje stylu działania
     preferred_horizon = Column(String(20), nullable=True)  # "1d", "3d", "7d", "30d"
-    profile_mode = Column(String(30), nullable=True)        # "scalp", "swing", "long_term", "capital_protection"
+    profile_mode = Column(
+        String(30), nullable=True
+    )  # "scalp", "swing", "long_term", "capital_protection"
 
     notes = Column(Text, nullable=True)
     is_active = Column(Boolean, default=True, index=True)
@@ -671,18 +722,20 @@ class DecisionAudit(Base):
     mode = Column(String(10), nullable=False, index=True)
 
     # Decyzje poszczególnych warstw (przed scaleniem)
-    symbol_signal = Column(String(20))         # BUY/SELL/HOLD z analizy technicznej
-    user_goal_decision = Column(String(30))    # z warstwy oczekiwań użytkownika
-    position_decision = Column(String(30))     # z warstwy zarządzania pozycją
-    portfolio_decision = Column(String(30))    # z warstwy trybu portfelowego / tiera
+    symbol_signal = Column(String(20))  # BUY/SELL/HOLD z analizy technicznej
+    user_goal_decision = Column(String(30))  # z warstwy oczekiwań użytkownika
+    position_decision = Column(String(30))  # z warstwy zarządzania pozycją
+    portfolio_decision = Column(String(30))  # z warstwy trybu portfelowego / tiera
 
     # Wynik finalny
     final_action = Column(String(30), nullable=False)
-    winning_priority = Column(String(40))      # która warstwa zdecydowała
+    winning_priority = Column(String(40))  # która warstwa zdecydowała
     confidence = Column(Float)
-    expectation_id = Column(Integer, nullable=True)   # FK do user_expectations (nie przez ORM)
+    expectation_id = Column(
+        Integer, nullable=True
+    )  # FK do user_expectations (nie przez ORM)
 
-    details_json = Column(Text)                # pełny kontekst w JSON
+    details_json = Column(Text)  # pełny kontekst w JSON
     created_at = Column(DateTime, default=utc_now_naive, index=True)
 
 
@@ -695,14 +748,14 @@ class GoalAssessment(Base):
     symbol = Column(String(20), index=True, nullable=False)
     expectation_id = Column(Integer, index=True, nullable=True)
 
-    target_type = Column(String(30))           # "value_eur", "price", "pct"
+    target_type = Column(String(30))  # "value_eur", "price", "pct"
     target_value = Column(Float)
     current_value = Column(Float)
     missing_value = Column(Float)
     required_move_pct = Column(Float)
 
-    realism_score = Column(Float)              # 0.0–1.0
-    realism_label = Column(String(40))         # "bardzo_realny"..."mało_realny"
+    realism_score = Column(Float)  # 0.0–1.0
+    realism_label = Column(String(40))  # "bardzo_realny"..."mało_realny"
 
     scenario_fast_days = Column(Float)
     scenario_base_days = Column(Float)
@@ -736,10 +789,19 @@ def _ensure_schema():
             return
         with engine.begin() as conn:
             try:
-                conn.execute(text(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {ddl}"))
-                logger.info("Dodano kolumnę '%s' do tabeli '%s'", column_name, table_name)
+                conn.execute(
+                    text(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {ddl}")
+                )
+                logger.info(
+                    "Dodano kolumnę '%s' do tabeli '%s'", column_name, table_name
+                )
             except Exception as exc:
-                logger.warning("Nie udało się dodać kolumny '%s' do '%s': %s", column_name, table_name, exc)
+                logger.warning(
+                    "Nie udało się dodać kolumny '%s' do '%s': %s",
+                    column_name,
+                    table_name,
+                    exc,
+                )
 
     _ensure_column("klines", "timeframe", "VARCHAR(10)")
     for table_name in ("orders", "positions"):
@@ -771,7 +833,9 @@ def _ensure_schema():
         _ensure_column("positions", col, ddl)
 
     _ensure_column("pending_orders", "config_snapshot_id", "VARCHAR(64)")
-    _ensure_column("config_rollbacks", "execution_status", "VARCHAR(20) DEFAULT 'pending'")
+    _ensure_column(
+        "config_rollbacks", "execution_status", "VARCHAR(20) DEFAULT 'pending'"
+    )
     _ensure_column("pending_orders", "strategy_name", "VARCHAR(80)")
     _ensure_column("config_snapshots", "config_hash", "VARCHAR(128)")
     _ensure_column("config_snapshots", "payload_json", "TEXT")
@@ -910,7 +974,9 @@ def save_config_snapshot(
     existing = db.query(ConfigSnapshot).filter(ConfigSnapshot.id == snapshot_id).first()
     if existing is not None:
         if is_current:
-            db.query(ConfigSnapshot).update({ConfigSnapshot.is_current: False}, synchronize_session=False)
+            db.query(ConfigSnapshot).update(
+                {ConfigSnapshot.is_current: False}, synchronize_session=False
+            )
             existing.is_current = True
         if source and not existing.source:
             existing.source = source
@@ -923,7 +989,9 @@ def save_config_snapshot(
         return existing
 
     if is_current:
-        db.query(ConfigSnapshot).update({ConfigSnapshot.is_current: False}, synchronize_session=False)
+        db.query(ConfigSnapshot).update(
+            {ConfigSnapshot.is_current: False}, synchronize_session=False
+        )
 
     row = ConfigSnapshot(
         id=snapshot_id,
@@ -959,7 +1027,11 @@ def get_config_snapshot(db, snapshot_id: str | None) -> dict | None:
 
 
 def list_config_snapshots(db) -> list[dict]:
-    rows = db.query(ConfigSnapshot).order_by(ConfigSnapshot.created_at.desc(), ConfigSnapshot.id.desc()).all()
+    rows = (
+        db.query(ConfigSnapshot)
+        .order_by(ConfigSnapshot.created_at.desc(), ConfigSnapshot.id.desc())
+        .all()
+    )
     return [get_config_snapshot(db, row.id) for row in rows if row.id]
 
 
