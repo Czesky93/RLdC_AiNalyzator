@@ -18,6 +18,16 @@
 
 *Brak otwartych zadań niskiego priorytetu.*
 
+### DONE (zamknięte w sesji 13)
+
+| ID | Zadanie | Plik/Moduł | Status |
+|----|---------|------------|--------|
+| T-23 | `signal_filters_not_met` spam co 2 min gdy SELL bez pozycji → early-exit przed filtrami sygnałowymi | `collector.py` | DONE |
+| T-24 | DB↔Binance mismatch WARNING co 33 min dla dust ARB/AVAX/EGLD/PEPE → filtr wartości < min_notional | `collector.py` | DONE |
+| T-25 | `/api/signals/latest?symbol=` ignorował parametr → dodano filtr `Signal.symbol == symbol` | `routers/signals.py` | DONE |
+| T-26 | entry-readiness używał `_build_live_signals` (live analysis) zamiast Signal z DB → niespójność z collectorem; BNBEUR pokazywał BUY gdy DB ma SELL | `routers/signals.py` | DONE |
+| T-27 | `status_pl = "OKAZJE SĄ"` gdy brak kandydatów BUY (samo SELL bez pozycji) → `BRAK OKAZJI: {reason}` | `routers/signals.py` | DONE |
+
 ### DONE (zamknięte w sesji 12)
 
 | ID | Zadanie | Plik/Moduł | Status |

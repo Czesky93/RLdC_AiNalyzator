@@ -200,6 +200,7 @@ def _get_symbols_from_db_or_env(db: Session, include_spot: bool = True) -> List[
 @router.get("/latest")
 def get_latest_signals(
     limit: int = Query(10, ge=1, le=100, description="Liczba sygnałów"),
+    symbol: Optional[str] = Query(None, description="Filtr po symbolu"),
     signal_type: Optional[str] = Query(None, description="Filtr: BUY, SELL, HOLD"),
     db: Session = Depends(get_db),
 ):
@@ -209,6 +210,8 @@ def get_latest_signals(
     try:
         # Sygnały z bazy (zapisane przez collector)
         query = db.query(Signal)
+        if symbol:
+            query = query.filter(Signal.symbol == symbol.strip().upper())
         if signal_type:
             query = query.filter(Signal.signal_type == signal_type)
         db_signals = query.order_by(desc(Signal.timestamp)).limit(limit).all()
@@ -1985,12 +1988,32 @@ def get_entry_readiness(
         # symbol_tiers jest na top-levelu runtime_ctx (nie w "config" który jest pusty)
         tier_map = _build_tier_map(runtime_ctx.get("symbol_tiers") or {})
 
-        # Zbierz sygnały
+        # Sygnały z DB — spójne z tym co widzi collector (nie live re-analiza)
         symbols = _get_symbols_from_db_or_env(db)
-        live_signals = (
-            _build_live_signals(db, symbols, limit=len(symbols)) if symbols else []
+        db_sigs = (
+            db.query(Signal)
+            .filter(Signal.symbol.in_(symbols))
+            .order_by(desc(Signal.timestamp))
+            .all()
         )
-        signal_map = {s["symbol"]: s for s in live_signals}
+        # Wybierz jeden (najnowszy) sygnał na symbol
+        signal_map: dict = {}
+        for sig in db_sigs:
+            if sig.symbol not in signal_map:
+                try:
+                    ind = json.loads(sig.indicators) if sig.indicators else {}
+                except Exception:
+                    ind = {}
+                signal_map[sig.symbol] = {
+                    "symbol": sig.symbol,
+                    "signal_type": sig.signal_type,
+                    "confidence": float(sig.confidence or 0.0),
+                    "price": float(sig.price or 0.0),
+                    "ema_20": ind.get("ema_20"),
+                    "ema_50": ind.get("ema_50"),
+                    "rsi_14": ind.get("rsi_14"),
+                    "atr_14": ind.get("atr_14"),
+                }
 
         candidates = []
         blocked = []
@@ -2124,11 +2147,9 @@ def get_entry_readiness(
                 else "OKAZJE ZABLOKOWANE"
             )
         elif blocked:
-            status_pl = (
-                f"OKAZJE SĄ, ALE ZABLOKOWANE: {best_blocked['entry_reason_pl']}"
-                if best_blocked
-                else "OKAZJE ZABLOKOWANE"
-            )
+            # Tylko zablokowane (np. same SELL bez pozycji) — nie ma aktywnych okazji BUY
+            top_reason_pl = best_blocked["entry_reason_pl"] if best_blocked else "brak"
+            status_pl = f"BRAK OKAZJI: {top_reason_pl}"
         else:
             status_pl = "BRAK SENSOWNYCH OKAZJI"
 

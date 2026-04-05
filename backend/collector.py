@@ -976,6 +976,9 @@ class DataCollector:
             if base:
                 db_map[base] = db_map.get(base, 0.0) + float(pos.quantity or 0)
 
+        # Minimalna wartość (EUR) żeby niezgodność była raportowana — pomijamy dust
+        _min_notional = float(tc.get("min_order_notional", 25.0))
+
         # Porównaj
         mismatches = []
         all_assets = set(list(binance_map.keys()) + list(db_map.keys()))
@@ -983,6 +986,22 @@ class DataCollector:
             binance_qty = binance_map.get(asset, 0.0)
             db_qty = db_map.get(asset, 0.0)
             if abs(binance_qty - db_qty) > max(1e-6, db_qty * 0.01):
+                # Sprawdź wartość niezgodności (pomijamy dust poniżej min_notional)
+                mismatch_qty = abs(binance_qty - db_qty)
+                price_eur: float | None = None
+                for _quote in ("EUR", "USDC", "USDT"):
+                    _md = (
+                        db.query(MarketData)
+                        .filter(MarketData.symbol == f"{asset}{_quote}")
+                        .order_by(MarketData.timestamp.desc())
+                        .first()
+                    )
+                    if _md and _md.price:
+                        price_eur = float(_md.price)
+                        break
+                # Jeśli znamy cenę i wartość jest poniżej progu — pomijamy (dust)
+                if price_eur is not None and mismatch_qty * price_eur < _min_notional:
+                    continue
                 mismatches.append(f"{asset}: Binance={binance_qty:.8g} DB={db_qty:.8g}")
 
         if mismatches:
@@ -2830,6 +2849,11 @@ class DataCollector:
 
             r = range_map.get(symbol)
             if not r:
+                continue
+
+            # Shortcut: SELL sygnał bez otwartej pozycji — nie ma sensu sprawdzać filtrów
+            # Zapobiega spamowi "signal_filters_not_met" gdy nie ma pozycji do sprzedania
+            if sig.signal_type == "SELL" and position is None:
                 continue
 
             crash = self._detect_crash(db, symbol, crash_window_minutes, crash_drop_pct)
