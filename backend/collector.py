@@ -1687,6 +1687,7 @@ class DataCollector:
         }
 
         _mode_label = str(tc.get("mode") or "demo").upper()
+        _mode = tc.get("mode", "demo")
 
         def _exit_message(
             reason_code: str,
@@ -1850,7 +1851,7 @@ class DataCollector:
                     action="CREATE_PENDING_EXIT",
                     reason_code=reason_code,
                     runtime_ctx=runtime_ctx,
-                    mode="demo",
+                    mode=_mode,
                     signal_summary={
                         "source": "exit_engine",
                         "layer": "hard_exit",
@@ -1873,10 +1874,10 @@ class DataCollector:
                     side="SELL",
                     price=price,
                     qty=qty,
-                    mode="demo",
+                    mode=_mode,
                     reason=f"[SL] Stop Loss @ {price:.6f} (SL={stop_loss:.6f})",
                     config_snapshot_id=runtime_ctx.get("snapshot_id"),
-                    strategy_name="demo_collector",
+                    strategy_name=f"{_mode}_collector",
                 )
                 # Eskalacja cooldown po SL — zapobiega natychmiastowemu re-entry
                 sl_state = self.demo_state.get(
@@ -1924,7 +1925,7 @@ class DataCollector:
                     action="CREATE_PENDING_EXIT",
                     reason_code=reason_code,
                     runtime_ctx=runtime_ctx,
-                    mode="demo",
+                    mode=_mode,
                     signal_summary={
                         "source": "exit_engine",
                         "layer": "trailing",
@@ -1942,10 +1943,10 @@ class DataCollector:
                     side="SELL",
                     price=price,
                     qty=qty,
-                    mode="demo",
+                    mode=_mode,
                     reason=f"[TRAIL] Trailing stop @ {price:.6f} (trail={trailing_stop:.6f})",
                     config_snapshot_id=runtime_ctx.get("snapshot_id"),
-                    strategy_name="demo_collector",
+                    strategy_name=f"{_mode}_collector",
                 )
                 self._send_telegram_alert(
                     f"{_mode_label}: Trailing Stop", msg, force_send=True
@@ -1999,7 +2000,7 @@ class DataCollector:
                         action="CREATE_PENDING_EXIT",
                         reason_code=reason_code,
                         runtime_ctx=runtime_ctx,
-                        mode="demo",
+                        mode=_mode,
                         signal_summary={
                             "source": "exit_engine",
                             "layer": "tp_soft",
@@ -2024,10 +2025,10 @@ class DataCollector:
                         side="SELL",
                         price=price,
                         qty=partial_qty,
-                        mode="demo",
+                        mode=_mode,
                         reason=f"[TP-PARTIAL] Trend trwa — zamykamy 25% @ {price:.6f} (TP={take_profit:.6f})",
                         config_snapshot_id=runtime_ctx.get("snapshot_id"),
-                        strategy_name="demo_collector",
+                        strategy_name=f"{_mode}_collector",
                     )
                     # Podnieś SL do break-even lub wyżej
                     pos.planned_sl = max(stop_loss, entry)
@@ -2074,7 +2075,7 @@ class DataCollector:
                         action="CREATE_PENDING_EXIT",
                         reason_code=reason_code,
                         runtime_ctx=runtime_ctx,
-                        mode="demo",
+                        mode=_mode,
                         signal_summary={
                             "source": "exit_engine",
                             "layer": "tp_full",
@@ -2099,10 +2100,10 @@ class DataCollector:
                         side="SELL",
                         price=price,
                         qty=qty,
-                        mode="demo",
+                        mode=_mode,
                         reason=f"[TP-FULL] {_reason_pl.get(reason_code, reason_code)} @ {price:.6f}",
                         config_snapshot_id=runtime_ctx.get("snapshot_id"),
-                        strategy_name="demo_collector",
+                        strategy_name=f"{_mode}_collector",
                     )
                     # Sukces — zeruj loss_streak, zwiększ win_streak
                     tp_state = self.demo_state.get(
@@ -2153,7 +2154,7 @@ class DataCollector:
                         action="CREATE_PENDING_EXIT",
                         reason_code=reason_code,
                         runtime_ctx=runtime_ctx,
-                        mode="demo",
+                        mode=_mode,
                         signal_summary={
                             "source": "exit_engine",
                             "layer": "reversal",
@@ -2173,10 +2174,10 @@ class DataCollector:
                         side="SELL",
                         price=price,
                         qty=qty,
-                        mode="demo",
+                        mode=_mode,
                         reason=f"[REVERSAL] Odwrócenie trendu — zysk +{pnl_pct:.1f}% @ {price:.6f}",
                         config_snapshot_id=runtime_ctx.get("snapshot_id"),
-                        strategy_name="demo_collector",
+                        strategy_name=f"{_mode}_collector",
                     )
                     self._send_telegram_alert(
                         f"{_mode_label}: EXIT Reversal", msg, force_send=True
@@ -2720,7 +2721,7 @@ class DataCollector:
                     action="SKIP",
                     reason_code="active_pending_exists",
                     runtime_ctx=runtime_ctx,
-                    mode="demo",
+                    mode=_current_mode,
                     execution_check={"eligible": False, "has_active_pending": True},
                 )
                 continue
@@ -2731,7 +2732,7 @@ class DataCollector:
                     action="SKIP",
                     reason_code="pending_cooldown_active",
                     runtime_ctx=runtime_ctx,
-                    mode="demo",
+                    mode=_current_mode,
                     risk_check={
                         "cooldown_active": True,
                         "pending_cooldown_seconds": pending_cooldown_seconds,
@@ -2793,7 +2794,7 @@ class DataCollector:
                     action="SKIP",
                     reason_code="symbol_cooldown_active",
                     runtime_ctx=runtime_ctx,
-                    mode="demo",
+                    mode=_current_mode,
                     risk_check={"cooldown_active": True, "cooldown_seconds": cooldown},
                 )
                 continue
@@ -2827,7 +2828,7 @@ class DataCollector:
                     action="SKIP",
                     reason_code="signal_confidence_too_low",
                     runtime_ctx=runtime_ctx,
-                    mode="demo",
+                    mode=_current_mode,
                     signal_summary=signal_summary,
                     risk_check={"min_confidence": min_confidence, "tier": tier_name},
                 )
@@ -2839,7 +2840,7 @@ class DataCollector:
                     action="SKIP",
                     reason_code="signal_too_old",
                     runtime_ctx=runtime_ctx,
-                    mode="demo",
+                    mode=_current_mode,
                     signal_summary=signal_summary,
                     risk_check={"max_signal_age_seconds": max_signal_age},
                 )
@@ -3016,7 +3017,7 @@ class DataCollector:
                     action="SKIP",
                     reason_code="signal_filters_not_met",
                     runtime_ctx=runtime_ctx,
-                    mode="demo",
+                    mode=_current_mode,
                     signal_summary=signal_summary,
                     risk_check={
                         "ema20": ema20,
@@ -3038,7 +3039,7 @@ class DataCollector:
                     action="SKIP",
                     reason_code="buy_blocked_existing_position",
                     runtime_ctx=runtime_ctx,
-                    mode="demo",
+                    mode=_current_mode,
                     signal_summary=signal_summary,
                 )
                 continue
@@ -3049,7 +3050,7 @@ class DataCollector:
                     action="SKIP",
                     reason_code="sell_blocked_no_position",
                     runtime_ctx=runtime_ctx,
-                    mode="demo",
+                    mode=_current_mode,
                     signal_summary=signal_summary,
                 )
                 continue
@@ -3101,7 +3102,7 @@ class DataCollector:
                         action="SKIP",
                         reason_code="insufficient_cash_or_qty_below_min",
                         runtime_ctx=runtime_ctx,
-                        mode="demo",
+                        mode=_current_mode,
                         signal_summary=signal_summary,
                         execution_check={
                             "eligible": False,
@@ -3158,7 +3159,7 @@ class DataCollector:
                     action="SKIP",
                     reason_code="entry_score_below_min",
                     runtime_ctx=runtime_ctx,
-                    mode="demo",
+                    mode=_current_mode,
                     signal_summary=signal_summary,
                     risk_check={
                         "rating": rating,
@@ -3206,8 +3207,8 @@ class DataCollector:
                 symbol=symbol,
                 side=side,
                 notional=notional,
-                strategy_name="demo_collector",
-                mode="demo",
+                strategy_name=f"{_current_mode}_collector",
+                mode=_current_mode,
                 runtime_config=config,
                 config_snapshot_id=runtime_ctx.get("snapshot_id"),
                 signal_summary=signal_summary,
@@ -3222,7 +3223,7 @@ class DataCollector:
                     action="SKIP",
                     reason_code=risk_decision.reason_codes[0],
                     runtime_ctx=runtime_ctx,
-                    mode="demo",
+                    mode=_current_mode,
                     signal_summary=signal_summary,
                     risk_check=risk_check,
                 )
@@ -3240,7 +3241,7 @@ class DataCollector:
                     action="SKIP",
                     reason_code="cost_gate_failed",
                     runtime_ctx=runtime_ctx,
-                    mode="demo",
+                    mode=_current_mode,
                     signal_summary=signal_summary,
                     risk_check=risk_check,
                     cost_check=cost_check,
@@ -3255,7 +3256,7 @@ class DataCollector:
                     action="SKIP",
                     reason_code="min_notional_guard",
                     runtime_ctx=runtime_ctx,
-                    mode="demo",
+                    mode=_current_mode,
                     signal_summary=signal_summary,
                     risk_check=risk_check,
                     cost_check=cost_check,
@@ -3326,7 +3327,7 @@ class DataCollector:
                         action="SKIP",
                         reason_code="insufficient_cash_or_qty_below_min",
                         runtime_ctx=runtime_ctx,
-                        mode="demo",
+                        mode=_current_mode,
                         signal_summary=signal_summary,
                         execution_check={
                             "eligible": False,
@@ -3345,7 +3346,7 @@ class DataCollector:
                 ),
                 reason_code="all_gates_passed",
                 runtime_ctx=runtime_ctx,
-                mode="demo",
+                mode=_current_mode,
                 signal_summary=signal_summary,
                 risk_check=risk_check,
                 cost_check=cost_check,
@@ -3369,10 +3370,10 @@ class DataCollector:
                 side=side,
                 price=price,
                 qty=qty,
-                mode="demo",
+                mode=_current_mode,
                 reason=f"{why}. Pewność {int(cand['confidence']*100)}%, rating {rating}/5.",
                 config_snapshot_id=runtime_ctx.get("snapshot_id"),
-                strategy_name="demo_collector",
+                strategy_name=f"{_current_mode}_collector",
             )
 
             # Auto-confirm + auto-execute gdy demo_require_manual_confirm=False

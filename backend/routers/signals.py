@@ -313,9 +313,9 @@ def _score_opportunity(signal: dict, db: Session) -> dict:
     signal_type = signal.get("signal_type", "HOLD")
     confidence = float(signal.get("confidence") or 0.5)
     ind = signal.get("indicators") or {}
-    rsi = ind.get("rsi")
-    ema_20 = ind.get("ema_20")
-    ema_50 = ind.get("ema_50")
+    rsi = ind.get("rsi") or ind.get("rsi_14") or signal.get("rsi_14") or signal.get("rsi")
+    ema_20 = ind.get("ema_20") or signal.get("ema_20")
+    ema_50 = ind.get("ema_50") or signal.get("ema_50")
     price = float(signal.get("price") or 0)
 
     # Pobierz ATR z pełnego kontekstu
