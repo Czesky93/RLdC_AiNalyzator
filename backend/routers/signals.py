@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session
 
 from backend.analysis import persist_insights_as_signals
 from backend.database import (
+    AccountSnapshot,
     DecisionAudit,
     DecisionTrace,
     Kline,
@@ -440,7 +441,17 @@ def get_best_opportunity(
             from backend.routers.portfolio import _build_live_spot_portfolio
 
             live_data = _build_live_spot_portfolio(db)
-            cash = float(live_data.get("free_cash_eur", 0.0))
+            if live_data.get("error"):
+                # Binance timeout / brak kluczy — fallback na ostatni snapshot
+                _snap = (
+                    db.query(AccountSnapshot)
+                    .filter(AccountSnapshot.mode == "live")
+                    .order_by(AccountSnapshot.timestamp.desc())
+                    .first()
+                )
+                cash = float(_snap.free_margin or 0.0) if _snap else 0.0
+            else:
+                cash = float(live_data.get("free_cash_eur", 0.0))
 
         open_positions = db.query(Position).filter(Position.mode == mode).all()
         open_symbols = {p.symbol for p in open_positions}
@@ -451,11 +462,7 @@ def get_best_opportunity(
             for sp in _get_live_spot_positions(db):
                 open_symbols.add(sp["symbol"])
             # open_count — otwarte pozycje z DB (Position records)
-            open_count = (
-                db.query(Position)
-                .filter(Position.mode == "live")
-                .count()
-            )
+            open_count = db.query(Position).filter(Position.mode == "live").count()
         else:
             open_count = len(open_positions)
 
@@ -1916,6 +1923,7 @@ def get_entry_readiness(
         max_open_positions = int(config.get("max_open_positions", 3))
         min_order_notional = float(config.get("min_order_notional", 25.0))
         demo_min_conf = float(config.get("demo_min_signal_confidence", 0.55))
+        demo_min_score = float(config.get("demo_min_entry_score", 5.5))
         pending_cooldown_s = int(config.get("pending_order_cooldown_seconds", 300))
         base_cooldown_s = int(
             float(config.get("cooldown_after_loss_streak_minutes", 15)) * 60
@@ -1929,7 +1937,16 @@ def get_entry_readiness(
             from backend.routers.portfolio import _build_live_spot_portfolio
 
             _live_data = _build_live_spot_portfolio(db)
-            cash = float(_live_data.get("free_cash_eur", 0.0))
+            if _live_data.get("error"):
+                _snap = (
+                    db.query(AccountSnapshot)
+                    .filter(AccountSnapshot.mode == "live")
+                    .order_by(AccountSnapshot.timestamp.desc())
+                    .first()
+                )
+                cash = float(_snap.free_margin or 0.0) if _snap else 0.0
+            else:
+                cash = float(_live_data.get("free_cash_eur", 0.0))
         else:
             account_state = compute_demo_account_state(db, quote_ccy=demo_quote_ccy)
             initial_balance = float(account_state.get("initial_balance") or 10000)
@@ -1968,11 +1985,7 @@ def get_entry_readiness(
 
         # open_count — otwarte pozycje z DB (Position records), oba tryby spójnie
         if mode == "live":
-            open_count = (
-                db.query(Position)
-                .filter(Position.mode == "live")
-                .count()
-            )
+            open_count = db.query(Position).filter(Position.mode == "live").count()
         else:
             open_count = len(open_positions)
 
@@ -2064,6 +2077,8 @@ def get_entry_readiness(
                 entry_reason = "ENTRY_BLOCKED_PENDING_EXISTS"
             elif confidence < demo_min_conf:
                 entry_reason = "ENTRY_BLOCKED_SIGNAL_CONFIDENCE"
+            elif score < demo_min_score:
+                entry_reason = "ENTRY_BLOCKED_SCORE"
             elif available_cash < min_order_notional:
                 entry_reason = "ENTRY_BLOCKED_NO_CASH"
             else:

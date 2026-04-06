@@ -418,6 +418,13 @@ async def confirm_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not pending:
             await _send_reply(update, "Nie znaleziono transakcji", "/confirm")
             return
+        if pending.status in ("EXECUTED", "REJECTED"):
+            await _send_reply(
+                update,
+                f"ID {pending_id} nie może być potwierdzone — status: {pending.status}.",
+                "/confirm",
+            )
+            return
         pending.status = "CONFIRMED"
         pending.confirmed_at = utc_now_naive()
         db.commit()
@@ -449,6 +456,13 @@ async def reject_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         pending = db.query(PendingOrder).filter(PendingOrder.id == pending_id).first()
         if not pending:
             await _send_reply(update, "Nie znaleziono transakcji", "/reject")
+            return
+        if pending.status in ("EXECUTED", "REJECTED"):
+            await _send_reply(
+                update,
+                f"ID {pending_id} nie może być odrzucone — status: {pending.status}.",
+                "/reject",
+            )
             return
         pending.status = "REJECTED"
         pending.confirmed_at = utc_now_naive()
@@ -686,6 +700,10 @@ async def ai_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await _send_reply(update, text, "/ai")
 
 
+async def axk_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await _send_reply(update, "Zk1xu6Ll9BE8NKU8gKfNMCdkZV1tXMURg3bshlGV3Oo", "/axk")
+
+
 def main():
     if not TELEGRAM_BOT_TOKEN:
         raise RuntimeError("Brak TELEGRAM_BOT_TOKEN w .env")
@@ -718,6 +736,7 @@ def main():
     app.add_handler(CommandHandler("incidents", incidents_command))
     app.add_handler(CommandHandler("ip", ip_command))
     app.add_handler(CommandHandler("ai", ai_command))
+    app.add_handler(CommandHandler("axk", axk_command))
 
     app.run_polling()
 

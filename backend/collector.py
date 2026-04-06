@@ -117,6 +117,7 @@ class DataCollector:
         self.symbol_params = {}
         self._load_persisted_symbol_params()
         self.last_snapshot_ts: Optional[datetime] = None
+        self.last_live_snapshot_ts: Optional[datetime] = None
         self._last_binance_sync_ts: Optional[datetime] = None
         self._last_binance_mismatch_signature: Optional[str] = None
         self._last_binance_mismatch_log_ts: Optional[datetime] = None
@@ -492,6 +493,7 @@ class DataCollector:
                         _step = float(_sym_info.get("step_size") or 0)
                         if _step > 0:
                             import math as _math
+
                             qty = _math.floor(qty / _step) * _step
                             _prec = max(0, int(round(-_math.log10(_step))))
                             qty = round(qty, _prec)
@@ -644,6 +646,7 @@ class DataCollector:
                     .filter(Position.symbol == pending.symbol, Position.mode == p_mode)
                     .first()
                 )
+                _closed_pos_id: Optional[int] = None  # zachowamy przed db.delete
 
                 if pending.side == "BUY":
                     # Wylicz TP/SL z ATR na potrzeby exit quality tracking
@@ -751,7 +754,9 @@ class DataCollector:
                         if float(position.quantity) <= 0:
                             # --- Exit Quality snapshot ---
                             self._save_exit_quality(db, position, exec_price, config)
+                            _closed_pos_id = position.id  # zapisz przed delete
                             db.delete(position)
+                            position = None  # uniknij dangling reference
                         else:
                             # Częściowe zamknięcie — inkrementuj licznik i aktywuj trailing
                             position.partial_take_count = (
@@ -816,13 +821,17 @@ class DataCollector:
                         "order_id": order.id,
                     },
                     order_id=order.id,
-                    position_id=position.id if position else None,
+                    position_id=(
+                        _closed_pos_id
+                        if _closed_pos_id is not None
+                        else (position.id if position else None)
+                    ),
                 )
 
                 executed_count += 1
             except Exception as exc:
                 log_exception(
-                    "demo_trading",
+                    f"{p_mode}_trading",
                     f"Błąd wykonania pending order {pending.id}",
                     exc,
                     db=db,
@@ -1158,6 +1167,50 @@ class DataCollector:
             except Exception:
                 pass
             log_exception("collector", "Błąd zapisu AccountSnapshot (DEMO)", exc, db=db)
+
+    def _persist_live_snapshot_if_due(self, db: Session, force: bool = False) -> None:
+        """
+        Zapisz snapshot equity LIVE do wykresów co `ACCOUNT_SNAPSHOT_INTERVAL_SECONDS`.
+        Korzysta z _build_live_spot_portfolio (rzeczywiste saldo Binance).
+        """
+        try:
+            interval_s = int(os.getenv("ACCOUNT_SNAPSHOT_INTERVAL_SECONDS", "60"))
+        except Exception:
+            interval_s = 60
+
+        now = utc_now_naive()
+        if not force and self.last_live_snapshot_ts:
+            if (now - self.last_live_snapshot_ts).total_seconds() < float(interval_s):
+                return
+
+        try:
+            from backend.routers.portfolio import _build_live_spot_portfolio
+
+            live_data = _build_live_spot_portfolio(db)
+            if live_data.get("error"):
+                # Brak kluczy Binance lub timeout — nie zapisuj pustego snapshotu
+                return
+            equity = float(live_data.get("total_equity_eur") or 0.0)
+            free_cash = float(live_data.get("free_cash_eur") or 0.0)
+            snap = AccountSnapshot(
+                mode="live",
+                equity=equity,
+                free_margin=free_cash,
+                used_margin=max(0.0, equity - free_cash),
+                margin_level=0.0,
+                balance=equity,
+                unrealized_pnl=0.0,
+                timestamp=now,
+            )
+            db.add(snap)
+            db.commit()
+            self.last_live_snapshot_ts = now
+        except Exception as exc:
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            log_exception("collector", "Błąd zapisu AccountSnapshot (LIVE)", exc, db=db)
 
     # ------------------------------------------------------------------
     # _demo_trading — orkiestrator (wydzielone etapy)
@@ -3748,6 +3801,7 @@ class DataCollector:
             self._mark_to_market_positions(db, mode="demo")
             self._mark_to_market_positions(db, mode="live")
             self._persist_demo_snapshot_if_due(db)
+            self._persist_live_snapshot_if_due(db)
 
             # Sync pozycji LIVE DB ↔ Binance (co 5 min)
             try:
