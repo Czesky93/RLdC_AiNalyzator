@@ -18,6 +18,17 @@
 
 *Brak otwartych zadań niskiego priorytetu.*
 
+### DONE (zamknięte w sesji 15)
+
+| ID | Zadanie | Plik/Moduł | Status |
+|----|---------|------------|--------|
+| T-36 | `/confirm` nie sprawdzał statusu → re-wykonanie EXECUTED order → podwójne zlecenie BUY na Binance | `telegram_bot/bot.py` | DONE |
+| T-37 | Brak LIVE AccountSnapshot → wykres equity LIVE zawsze pusty | `collector.py` | DONE |
+| T-38 | Dangling `position_id` w DecisionTrace po pełnym SELL (`db.delete(position)`) | `collector.py` | DONE |
+| T-39 | Binance timeout → `free_cash=0` → wszystkie LIVE entries zablokowane; fallback na AccountSnapshot | `routers/signals.py` | DONE |
+| T-40 | `entry-readiness` bez MIN_SCORE gate → niespójna diagnostyka vs `best-opportunity` | `routers/signals.py` | DONE |
+| T-41 | Błędy wykonania LIVE pending order logowane jako `demo_trading` namespace | `collector.py` | DONE |
+
 ### DONE (zamknięte w sesji 14)
 
 | ID | Zadanie | Plik/Moduł | Status |
