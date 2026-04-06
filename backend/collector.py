@@ -484,6 +484,20 @@ class DataCollector:
                 qty = float(pending.quantity)
 
                 if p_mode == "live":
+                    # Zaokrąglij qty do step_size Binance (LOT_SIZE filter — zapobiega rejection)
+                    try:
+                        _sym_info = (self.binance.get_allowed_symbols() or {}).get(
+                            pending.symbol, {}
+                        )
+                        _step = float(_sym_info.get("step_size") or 0)
+                        if _step > 0:
+                            import math as _math
+                            qty = _math.floor(qty / _step) * _step
+                            _prec = max(0, int(round(-_math.log10(_step))))
+                            qty = round(qty, _prec)
+                    except Exception:
+                        pass  # fallback: wysyłamy raw qty, Binance zwróci error
+
                     # ——— LIVE: wykonaj przez Binance API ———
                     result = self.binance.place_order(
                         symbol=pending.symbol,
@@ -2284,20 +2298,15 @@ class DataCollector:
                 if _has_active_pending(sym):
                     continue
 
-                pending_id = f"HOLD_SELL_{sym}_{now.strftime('%Y%m%d%H%M%S')}"
                 _m = tc.get("mode", "demo")
-                db.add(
-                    Order(
-                        order_id=pending_id,
-                        symbol=sym,
-                        side="SELL",
-                        order_type="LIMIT",
-                        quantity=qty,
-                        price=price,
-                        status="pending_review",
-                        mode=_m,
-                        timestamp=now,
-                    )
+                pending_id = self._create_pending_order(
+                    db=db,
+                    symbol=sym,
+                    side="SELL",
+                    price=price,
+                    qty=qty,
+                    mode=_m,
+                    reason=f"[HOLD] Cel osiągnięty: {position_value:.2f} EUR >= {target_eur:.0f} EUR",
                 )
                 msg = (
                     f"🟢 [HOLD] Cel osiągnięty — {sym}\n"
@@ -2306,9 +2315,7 @@ class DataCollector:
                     f"Cena: {price:.6f}\n"
                     f"Ilość: {qty}\n"
                     f"\n"
-                    f"Co zrobić:\n"
-                    f"/confirm {pending_id} — potwierdź sprzedaż\n"
-                    f"/reject {pending_id} — odrzuć"
+                    f"Zlecenie SELL utworzone i auto-potwierdzone (ID: {pending_id})."
                 )
                 self._send_telegram_alert("[HOLD] TARGET", msg, force_send=True)
                 db.add(
