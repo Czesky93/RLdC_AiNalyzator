@@ -25,6 +25,7 @@
 | T-30 | `_check_exits` hardkodował `mode="demo"` w `_trace_decision` i `_create_pending_order` (SL/trailing/TP/reversal) → LIVE exits logowane jako demo w DecisionTrace | `collector.py` | DONE |
 | T-31 | `_screen_entry_candidates` hardkodował `mode="demo"` w 14 `_trace_decision` + `build_risk_context` + `_create_pending_order` → LIVE entry decyzje logowane jako demo | `collector.py` | DONE |
 | T-32 | `_score_opportunity` ignorowała EMA20/EMA50/RSI (po T-26 pola są na top-level sygnału, nie w `indicators`) → EMA trend +1.5 i RSI +1.5 nie działały | `routers/signals.py` | DONE |
+| T-33 | `open_count` dla LIVE liczył unikalne BUY Order (nie Position) → BTCEUR synced_from_binance nie wliczało się do limitu max_open_positions → `can_enter_now=True` mimo otwartej pozycji | `routers/signals.py` | DONE |
 
 ### DONE (zamknięte w sesji 13)
 
