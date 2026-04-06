@@ -26,6 +26,8 @@
 | T-31 | `_screen_entry_candidates` hardkodował `mode="demo"` w 14 `_trace_decision` + `build_risk_context` + `_create_pending_order` → LIVE entry decyzje logowane jako demo | `collector.py` | DONE |
 | T-32 | `_score_opportunity` ignorowała EMA20/EMA50/RSI (po T-26 pola są na top-level sygnału, nie w `indicators`) → EMA trend +1.5 i RSI +1.5 nie działały | `routers/signals.py` | DONE |
 | T-33 | `open_count` dla LIVE liczył unikalne BUY Order (nie Position) → BTCEUR synced_from_binance nie wliczało się do limitu max_open_positions → `can_enter_now=True` mimo otwartej pozycji | `routers/signals.py` | DONE |
+| T-34 | Brak zaokrąglenia qty do Binance LOT_SIZE step_size przed LIVE `place_order` → `BinanceAPIException: Invalid quantity` dla każdego LIVE BUY/SELL | `collector.py` | DONE |
+| T-35 | `_check_hold_targets` tworzyła `Order(status="pending_review")` zamiast `PendingOrder` → telegram `/confirm` nie znajdował zlecenia, LIVE nigdy nie wykonał SELL przez Binance API | `collector.py` | DONE |
 
 ### DONE (zamknięte w sesji 13)
 
