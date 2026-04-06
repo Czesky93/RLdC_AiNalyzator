@@ -450,15 +450,12 @@ def get_best_opportunity(
 
             for sp in _get_live_spot_positions(db):
                 open_symbols.add(sp["symbol"])
-            # open_count TYLKO bot-otwarte (mają BUY Order)
-            _bot_buys_opp = {
-                r[0]
-                for r in db.query(Ord.symbol)
-                .filter(Ord.mode == "live", Ord.side == "BUY")
-                .distinct()
-                .all()
-            }
-            open_count = len(_bot_buys_opp)
+            # open_count — otwarte pozycje z DB (Position records)
+            open_count = (
+                db.query(Position)
+                .filter(Position.mode == "live")
+                .count()
+            )
         else:
             open_count = len(open_positions)
 
@@ -1969,16 +1966,13 @@ def get_entry_readiness(
                 if pos_value >= min_order_notional:
                     open_symbols.add(sp["symbol"])
 
-        # open_count TYLKO bot-otwarte pozycje (mają BUY Order) — na potrzeby max_open_positions
+        # open_count — otwarte pozycje z DB (Position records), oba tryby spójnie
         if mode == "live":
-            _bot_buys = {
-                r[0]
-                for r in db.query(Ord.symbol)
-                .filter(Ord.mode == "live", Ord.side == "BUY")
-                .distinct()
-                .all()
-            }
-            open_count = len(_bot_buys)
+            open_count = (
+                db.query(Position)
+                .filter(Position.mode == "live")
+                .count()
+            )
         else:
             open_count = len(open_positions)
 
