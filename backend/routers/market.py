@@ -1,18 +1,35 @@
 """
 Market API Router - endpoints dla danych rynkowych
 """
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from sqlalchemy.orm import Session
-from sqlalchemy import desc
-from typing import List, Optional
-from datetime import datetime, timedelta, timezone
-import os
-import json
 
-from backend.database import get_db, MarketData, Kline, SystemLog, ForecastRecord, utc_now_naive
+import json
+import os
+import threading
+import time
+from datetime import datetime, timedelta, timezone
+from typing import List, Optional
+
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from sqlalchemy import desc
+from sqlalchemy.orm import Session
+
 from backend.binance_client import get_binance_client
+from backend.database import (
+    ForecastRecord,
+    Kline,
+    MarketData,
+    SystemLog,
+    get_db,
+    utc_now_naive,
+)
 
 router = APIRouter()
+
+# ─── Cache TTL dla market scanner (30s) ─────────────────────────────────────
+_scanner_cache: dict = {}
+_scanner_cache_ts: float = 0.0
+_scanner_cache_ttl: float = 60.0
+_scanner_cache_lock = threading.Lock()
 
 
 def _asset_to_candidates(asset: str) -> list[str]:
@@ -43,7 +60,11 @@ def get_market_summary(request: Request, db: Session = Depends(get_db)):
 
         # 2) Fallback: zbuduj z portfela Binance
         if not symbols:
-            quotes = [q.strip().upper() for q in os.getenv("PORTFOLIO_QUOTES", "EUR,USDC").split(",") if q.strip()]
+            quotes = [
+                q.strip().upper()
+                for q in os.getenv("PORTFOLIO_QUOTES", "EUR,USDC").split(",")
+                if q.strip()
+            ]
             balances = binance.get_balances()
             assets = [b.get("asset") for b in balances if (b.get("total") or 0) > 0]
 
@@ -69,65 +90,78 @@ def get_market_summary(request: Request, db: Session = Depends(get_db)):
                     resolved_symbol = item.replace("/", "").strip().upper()
                 if resolved_symbol and resolved_symbol not in symbols:
                     symbols.append(resolved_symbol)
-        
+
         summary = []
         for symbol in symbols:
             # Ostatni ticker z bazy
-            latest = db.query(MarketData).filter(
-                MarketData.symbol == symbol
-            ).order_by(desc(MarketData.timestamp)).first()
-            
+            latest = (
+                db.query(MarketData)
+                .filter(MarketData.symbol == symbol)
+                .order_by(desc(MarketData.timestamp))
+                .first()
+            )
+
             if latest:
                 # Poprzednia cena (24h temu)
                 day_ago = utc_now_naive() - timedelta(hours=24)
-                prev = db.query(MarketData).filter(
-                    MarketData.symbol == symbol,
-                    MarketData.timestamp >= day_ago
-                ).order_by(MarketData.timestamp).first()
-                
+                prev = (
+                    db.query(MarketData)
+                    .filter(
+                        MarketData.symbol == symbol, MarketData.timestamp >= day_ago
+                    )
+                    .order_by(MarketData.timestamp)
+                    .first()
+                )
+
                 price_change = 0
                 price_change_percent = 0
                 if prev and prev.price > 0:
                     price_change = latest.price - prev.price
                     price_change_percent = (price_change / prev.price) * 100
-                
-                summary.append({
-                    "symbol": symbol,
-                    "price": latest.price,
-                    "volume": latest.volume,
-                    "bid": latest.bid,
-                    "ask": latest.ask,
-                    "price_change": price_change,
-                    "price_change_percent": price_change_percent,
-                    "timestamp": latest.timestamp.isoformat(),
-                    "last_update": latest.timestamp.isoformat()
-                })
+
+                summary.append(
+                    {
+                        "symbol": symbol,
+                        "price": latest.price,
+                        "volume": latest.volume,
+                        "bid": latest.bid,
+                        "ask": latest.ask,
+                        "price_change": price_change,
+                        "price_change_percent": price_change_percent,
+                        "timestamp": latest.timestamp.isoformat(),
+                        "last_update": latest.timestamp.isoformat(),
+                    }
+                )
             else:
                 # Fallback - pobierz z Binance jeśli brak w bazie
                 ticker = binance.get_24hr_ticker(symbol)
-                
+
                 if ticker:
-                    summary.append({
-                        "symbol": symbol,
-                        "price": ticker["last_price"],
-                        "volume": ticker["volume"],
-                        "bid": ticker["bid_price"],
-                        "ask": ticker["ask_price"],
-                        "price_change": ticker["price_change"],
-                        "price_change_percent": ticker["price_change_percent"],
-                        "timestamp": utc_now_naive().isoformat(),
-                        "last_update": utc_now_naive().isoformat()
-                    })
-        
+                    summary.append(
+                        {
+                            "symbol": symbol,
+                            "price": ticker["last_price"],
+                            "volume": ticker["volume"],
+                            "bid": ticker["bid_price"],
+                            "ask": ticker["ask_price"],
+                            "price_change": ticker["price_change"],
+                            "price_change_percent": ticker["price_change_percent"],
+                            "timestamp": utc_now_naive().isoformat(),
+                            "last_update": utc_now_naive().isoformat(),
+                        }
+                    )
+
         return {
             "success": True,
             "data": summary,
             "count": len(summary),
-            "timestamp": utc_now_naive().isoformat()
+            "timestamp": utc_now_naive().isoformat(),
         }
-        
+
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error getting market summary: {str(e)}")
+        raise HTTPException(
+            status_code=500, detail=f"Error getting market summary: {str(e)}"
+        )
 
 
 @router.get("/kline")
@@ -135,7 +169,7 @@ def get_kline_data(
     symbol: str = Query(..., description="Symbol (np. BTCUSDT)"),
     tf: str = Query("1h", description="Timeframe (1m, 5m, 15m, 1h, 4h, 1d)"),
     limit: int = Query(100, ge=1, le=1000, description="Liczba świec"),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
 ):
     """
     Pobierz dane świecowe (klines) dla symbolu
@@ -148,66 +182,75 @@ def get_kline_data(
             "15m": "15m",
             "1h": "1h",
             "4h": "4h",
-            "1d": "1d"
+            "1d": "1d",
         }
-        
+
         timeframe = timeframe_map.get(tf, "1h")
-        
+
         # Pobierz z bazy danych
-        klines = db.query(Kline).filter(
-            Kline.symbol == symbol,
-            Kline.timeframe == timeframe
-        ).order_by(desc(Kline.open_time)).limit(limit).all()
-        
+        klines = (
+            db.query(Kline)
+            .filter(Kline.symbol == symbol, Kline.timeframe == timeframe)
+            .order_by(desc(Kline.open_time))
+            .limit(limit)
+            .all()
+        )
+
         if not klines:
             # Fallback - pobierz z Binance
             binance = get_binance_client()
             klines_data = binance.get_klines(symbol, timeframe, limit)
-            
+
             if klines_data:
                 result = []
                 for k in klines_data:
-                    result.append({
-                        "timestamp": k["open_time"],
-                        "open": k["open"],
-                        "high": k["high"],
-                        "low": k["low"],
-                        "close": k["close"],
-                        "volume": k["volume"]
-                    })
-                
+                    result.append(
+                        {
+                            "timestamp": k["open_time"],
+                            "open": k["open"],
+                            "high": k["high"],
+                            "low": k["low"],
+                            "close": k["close"],
+                            "volume": k["volume"],
+                        }
+                    )
+
                 return {
                     "success": True,
                     "symbol": symbol,
                     "timeframe": timeframe,
                     "data": result,
                     "count": len(result),
-                    "source": "binance"
+                    "source": "binance",
                 }
-        
+
         # Formatuj dane z bazy
         result = []
         for k in reversed(klines):  # Odwróć aby były chronologicznie
-            result.append({
-                "timestamp": int(k.open_time.timestamp() * 1000),
-                "open": k.open,
-                "high": k.high,
-                "low": k.low,
-                "close": k.close,
-                "volume": k.volume
-            })
-        
+            result.append(
+                {
+                    "timestamp": int(k.open_time.timestamp() * 1000),
+                    "open": k.open,
+                    "high": k.high,
+                    "low": k.low,
+                    "close": k.close,
+                    "volume": k.volume,
+                }
+            )
+
         return {
             "success": True,
             "symbol": symbol,
             "timeframe": timeframe,
             "data": result,
             "count": len(result),
-            "source": "database"
+            "source": "database",
         }
-        
+
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error getting kline data: {str(e)}")
+        raise HTTPException(
+            status_code=500, detail=f"Error getting kline data: {str(e)}"
+        )
 
 
 @router.get("/ticker/{symbol}")
@@ -216,11 +259,24 @@ def get_ticker(symbol: str, db: Session = Depends(get_db)):
     Pobierz aktualną cenę symbolu
     """
     try:
+        from backend.quote_service import get_validated_quote
+
+        symbol = (
+            str(symbol or "")
+            .strip()
+            .replace(" ", "")
+            .replace("/", "")
+            .replace("-", "")
+            .upper()
+        )
         # Najpierw z bazy
-        latest = db.query(MarketData).filter(
-            MarketData.symbol == symbol
-        ).order_by(desc(MarketData.timestamp)).first()
-        
+        latest = (
+            db.query(MarketData)
+            .filter(MarketData.symbol == symbol)
+            .order_by(desc(MarketData.timestamp))
+            .first()
+        )
+
         if latest:
             return {
                 "success": True,
@@ -230,24 +286,24 @@ def get_ticker(symbol: str, db: Session = Depends(get_db)):
                 "ask": latest.ask,
                 "volume": latest.volume,
                 "timestamp": latest.timestamp.isoformat(),
-                "source": "database"
+                "source": "database",
             }
-        
-        # Fallback - Binance
-        binance = get_binance_client()
-        ticker = binance.get_ticker_price(symbol)
-        
-        if ticker:
+
+        quote = get_validated_quote(symbol, binance_client=get_binance_client())
+        if quote.get("success"):
             return {
                 "success": True,
                 "symbol": symbol,
-                "price": ticker["price"],
+                "price": quote["price"],
+                "bid": quote.get("bid"),
+                "ask": quote.get("ask"),
                 "timestamp": utc_now_naive().isoformat(),
-                "source": "binance"
+                "source": quote.get("quote_source"),
             }
-        
-        raise HTTPException(status_code=404, detail=f"Symbol {symbol} not found")
-        
+        if quote.get("error") == "invalid_symbol":
+            raise HTTPException(status_code=400, detail=f"Invalid symbol {symbol}")
+        raise HTTPException(status_code=404, detail=f"Quote for {symbol} unavailable")
+
     except HTTPException:
         raise
     except Exception as e:
@@ -256,8 +312,7 @@ def get_ticker(symbol: str, db: Session = Depends(get_db)):
 
 @router.get("/orderbook/{symbol}")
 def get_orderbook(
-    symbol: str,
-    limit: int = Query(20, ge=5, le=100, description="Głębokość orderbook")
+    symbol: str, limit: int = Query(20, ge=5, le=100, description="Głębokość orderbook")
 ):
     """
     Pobierz orderbook (księgę zleceń) - zawsze z Binance (real-time)
@@ -265,34 +320,37 @@ def get_orderbook(
     try:
         binance = get_binance_client()
         orderbook = binance.get_orderbook(symbol, limit)
-        
+
         if orderbook:
             return {
                 "success": True,
                 "symbol": symbol,
                 "bids": orderbook["bids"],
                 "asks": orderbook["asks"],
-                "timestamp": utc_now_naive().isoformat()
+                "timestamp": utc_now_naive().isoformat(),
             }
-        
+
         raise HTTPException(status_code=404, detail=f"Orderbook for {symbol} not found")
-        
+
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error getting orderbook: {str(e)}")
+        raise HTTPException(
+            status_code=500, detail=f"Error getting orderbook: {str(e)}"
+        )
 
 
 @router.get("/ranges")
 def get_price_ranges(
     symbol: Optional[str] = Query(None, description="Symbol (np. BTCUSDT)"),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
 ):
     """
     Zwróć ostatnie zakresy cen (OpenAI) zapisane w blogu.
     """
     try:
         from backend.database import BlogPost
+
         latest = db.query(BlogPost).order_by(desc(BlogPost.created_at)).first()
         if not latest or not latest.market_insights:
             return {"success": True, "data": []}
@@ -305,19 +363,21 @@ def get_price_ranges(
                 continue
             if symbol and ins.get("symbol") != symbol:
                 continue
-            ranges.append({
-                "symbol": ins.get("symbol"),
-                "buy_low": r.get("buy_low"),
-                "buy_high": r.get("buy_high"),
-                "sell_low": r.get("sell_low"),
-                "sell_high": r.get("sell_high"),
-                "buy_action": r.get("buy_action"),
-                "buy_target": r.get("buy_target"),
-                "sell_action": r.get("sell_action"),
-                "sell_target": r.get("sell_target"),
-                "comment": r.get("comment"),
-                "timestamp": ins.get("timestamp"),
-            })
+            ranges.append(
+                {
+                    "symbol": ins.get("symbol"),
+                    "buy_low": r.get("buy_low"),
+                    "buy_high": r.get("buy_high"),
+                    "sell_low": r.get("sell_low"),
+                    "sell_high": r.get("sell_high"),
+                    "buy_action": r.get("buy_action"),
+                    "buy_target": r.get("buy_target"),
+                    "sell_action": r.get("sell_action"),
+                    "sell_target": r.get("sell_target"),
+                    "comment": r.get("comment"),
+                    "timestamp": ins.get("timestamp"),
+                }
+            )
 
         return {"success": True, "data": ranges}
     except Exception as e:
@@ -325,14 +385,13 @@ def get_price_ranges(
 
 
 @router.get("/quantum")
-def get_quantum_analysis(
-    db: Session = Depends(get_db)
-):
+def get_quantum_analysis(db: Session = Depends(get_db)):
     """
     Zwróć ostatnią analizę kwantową z bloga.
     """
     try:
         from backend.database import BlogPost
+
         latest = db.query(BlogPost).order_by(desc(BlogPost.created_at)).first()
         if not latest or not latest.market_insights:
             return {"success": True, "data": []}
@@ -342,12 +401,14 @@ def get_quantum_analysis(
         for ins in insights:
             q = ins.get("quantum")
             if q:
-                data.append({
-                    "symbol": ins.get("symbol"),
-                    "weight": q.get("weight"),
-                    "volatility": q.get("volatility"),
-                    "timestamp": ins.get("timestamp"),
-                })
+                data.append(
+                    {
+                        "symbol": ins.get("symbol"),
+                        "weight": q.get("weight"),
+                        "volatility": q.get("volatility"),
+                        "timestamp": ins.get("timestamp"),
+                    }
+                )
 
         return {"success": True, "data": data}
     except Exception as e:
@@ -356,7 +417,9 @@ def get_quantum_analysis(
 
 @router.post("/analyze-now")
 def analyze_now(
-    force: bool = Query(True, description="Jeśli true, pomija blokadę 1h i backoff (debug)"),
+    force: bool = Query(
+        True, description="Jeśli true, pomija blokadę 1h i backoff (debug)"
+    ),
     db: Session = Depends(get_db),
 ):
     """
@@ -367,7 +430,11 @@ def analyze_now(
         from backend.analysis import maybe_generate_insights_and_blog
 
         binance = get_binance_client()
-        quotes = [q.strip().upper() for q in os.getenv("PORTFOLIO_QUOTES", "EUR,USDC").split(",") if q.strip()]
+        quotes = [
+            q.strip().upper()
+            for q in os.getenv("PORTFOLIO_QUOTES", "EUR,USDC").split(",")
+            if q.strip()
+        ]
         symbols: List[str] = []
         balances = binance.get_balances()
         assets = [b.get("asset") for b in balances if (b.get("total") or 0) > 0]
@@ -385,7 +452,9 @@ def analyze_now(
                         symbols.append(resolved)
 
         if not symbols:
-            raise HTTPException(status_code=400, detail="Brak symboli z portfela (Spot) do analizy")
+            raise HTTPException(
+                status_code=400, detail="Brak symboli z portfela (Spot) do analizy"
+            )
 
         post = maybe_generate_insights_and_blog(db, symbols, force=force)
         if not post:
@@ -400,7 +469,9 @@ def analyze_now(
                 "symbols": symbols,
                 "generated": False,
                 "message": "Nie wygenerowano nowych zakresów/insightów (sprawdź Logi -> module=analysis).",
-                "last_openai_error": (last_err.message[:220] if last_err and last_err.message else None),
+                "last_openai_error": (
+                    last_err.message[:220] if last_err and last_err.message else None
+                ),
             }
         return {
             "success": True,
@@ -420,15 +491,17 @@ def analyze_now(
 # MARKET SCANNER — TOP N okazji wyliczonych z prawdziwej analizy technicznej
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 def _score_symbol(db: Session, symbol: str) -> Optional[dict]:
     """
     Oblicz composite score dla symbolu na podstawie wskaźników technicznych.
     Zwraca dict z polami: symbol, signal, confidence, score, price, reasons, rsi, trend
     lub None jeśli brak danych.
     """
-    from backend.analysis import get_live_context
     import pandas as pd
     import pandas_ta as ta
+
+    from backend.analysis import get_live_context
 
     ctx = get_live_context(db, symbol, timeframe="1h", limit=200)
     if not ctx:
@@ -483,7 +556,9 @@ def _score_symbol(db: Session, symbol: str) -> Optional[dict]:
     # Momentum (ATR jako % ceny = zmienność)
     volatility_pct = (atr / close * 100) if atr and close else 0
     if volatility_pct > 3:
-        reasons.append(f"Wysoka zmienność ({volatility_pct:.1f}%) — dobry moment na wejście")
+        reasons.append(
+            f"Wysoka zmienność ({volatility_pct:.1f}%) — dobry moment na wejście"
+        )
         confidence += 0.05
 
     confidence = round(max(0.40, min(confidence, 0.97)), 2)
@@ -522,6 +597,15 @@ def market_scanner(
     na podstawie analizy technicznej (RSI, EMA, ATR).
     Działa bez OpenAI.
     """
+    global _scanner_cache, _scanner_cache_ts
+    now_mono = time.monotonic()
+    with _scanner_cache_lock:
+        if _scanner_cache and (now_mono - _scanner_cache_ts) < _scanner_cache_ttl:
+            cached = dict(_scanner_cache)
+            cached["data"] = cached["data"][:top_n]
+            cached["top_n"] = top_n
+            return cached
+
     try:
         # Pobierz symbole z kolektora lub portfela
         symbols: List[str] = []
@@ -533,7 +617,11 @@ def market_scanner(
 
         if not symbols:
             binance = get_binance_client()
-            quotes = [q.strip().upper() for q in os.getenv("PORTFOLIO_QUOTES", "EUR,USDC").split(",") if q.strip()]
+            quotes = [
+                q.strip().upper()
+                for q in os.getenv("PORTFOLIO_QUOTES", "EUR,USDC").split(",")
+                if q.strip()
+            ]
             balances = binance.get_balances()
             assets = [b.get("asset") for b in balances if (b.get("total") or 0) > 0]
             for asset in assets:
@@ -554,22 +642,43 @@ def market_scanner(
             symbols = [s.strip() for s in raw.split(",") if s.strip()]
 
         results = []
-        for sym in symbols:
-            scored = _score_symbol(db, sym)
-            if scored:
-                results.append(scored)
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        from backend.database import SessionLocal
+
+        def _score_in_thread(sym: str):
+            thread_db = SessionLocal()
+            try:
+                return _score_symbol(thread_db, sym)
+            finally:
+                thread_db.close()
+
+        with ThreadPoolExecutor(max_workers=6) as pool:
+            futures = {pool.submit(_score_in_thread, sym): sym for sym in symbols}
+            for fut in as_completed(futures):
+                try:
+                    scored = fut.result(timeout=8.0)
+                    if scored:
+                        results.append(scored)
+                except Exception:
+                    pass
 
         # Sortuj wg score malejąco, HOLD na końcu
         results.sort(key=lambda x: (-x["score"], x["signal"] == "HOLD"))
 
-        top = results[:top_n]
-        return {
+        payload = {
             "success": True,
-            "data": top,
+            "data": results,
             "scanned": len(results),
             "top_n": top_n,
             "timestamp": utc_now_naive().isoformat(),
         }
+        with _scanner_cache_lock:
+            _scanner_cache = payload
+            _scanner_cache_ts = time.monotonic()
+        payload = dict(payload)
+        payload["data"] = results[:top_n]
+        return payload
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Scanner error: {str(e)}")
 
@@ -577,6 +686,7 @@ def market_scanner(
 # ─────────────────────────────────────────────────────────────────────────────
 # FORECAST — prognoza kierunku ceny 1h / 4h / 24h (EMA + momentum, bez ML)
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 @router.get("/forecast/{symbol}")
 def get_forecast(
@@ -589,8 +699,9 @@ def get_forecast(
     Nie wymaga OpenAI. Jakość modelu na podstawie trafności historycznej RSI.
     """
     try:
-        from backend.analysis import get_live_context
         import math
+
+        from backend.analysis import get_live_context
 
         ctx_1h = get_live_context(db, symbol, timeframe="1h", limit=200)
         ctx_4h = get_live_context(db, symbol, timeframe="4h", limit=100)
@@ -601,10 +712,14 @@ def get_forecast(
             .order_by(desc(MarketData.timestamp))
             .first()
         )
-        current_price = latest_md.price if latest_md else (ctx_1h.get("close") if ctx_1h else None)
+        current_price = (
+            latest_md.price if latest_md else (ctx_1h.get("close") if ctx_1h else None)
+        )
 
         if not current_price:
-            raise HTTPException(status_code=404, detail=f"Brak danych ceny dla {symbol}")
+            raise HTTPException(
+                status_code=404, detail=f"Brak danych ceny dla {symbol}"
+            )
 
         forecasts: dict = {}
 
@@ -636,12 +751,19 @@ def get_forecast(
             rsi_quality = abs(rsi - 50) / 50  # 0..1, większy = skrajniejszy RSI
             model_quality = round(50 + rsi_quality * 35, 0)  # 50..85%
 
-            direction = "WZROST" if projected_pct > 0.2 else ("SPADEK" if projected_pct < -0.2 else "BOCZNY")
+            direction = (
+                "WZROST"
+                if projected_pct > 0.2
+                else ("SPADEK" if projected_pct < -0.2 else "BOCZNY")
+            )
 
             return {
                 "direction": direction,
                 "projected_pct": round(projected_pct, 2),
-                "projected_price": round(projected_price, 8 if current_price < 1 else 4 if current_price < 100 else 2),
+                "projected_price": round(
+                    projected_price,
+                    8 if current_price < 1 else 4 if current_price < 100 else 2,
+                ),
                 "model_quality": int(model_quality),
                 "atr_pct": round(atr_pct, 2),
             }
@@ -652,7 +774,11 @@ def get_forecast(
 
         # Zapisz prognozy do DB dla śledzenia trafności
         now = utc_now_naive()
-        for horizon, fdata, hours in [("1h", f1h, 1), ("4h", f4h, 4), ("24h", f24h, 24)]:
+        for horizon, fdata, hours in [
+            ("1h", f1h, 1),
+            ("4h", f4h, 4),
+            ("24h", f24h, 24),
+        ]:
             if fdata:
                 try:
                     rec = ForecastRecord(
@@ -692,10 +818,13 @@ def get_forecast(
 # FORECAST ACCURACY — historia trafności prognoz dla symbolu
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 @router.get("/forecast-accuracy/{symbol}")
 def get_forecast_accuracy(
     symbol: str,
-    horizon: Optional[str] = Query(None, description="1h / 4h / 24h — pomiń dla wszystkich"),
+    horizon: Optional[str] = Query(
+        None, description="1h / 4h / 24h — pomiń dla wszystkich"
+    ),
     limit: int = Query(30, ge=1, le=200),
     db: Session = Depends(get_db),
 ):
@@ -703,29 +832,32 @@ def get_forecast_accuracy(
     Zwraca historię sprawdzonych prognoz dla symbolu oraz statystyki trafności.
     """
     try:
-        q = (
-            db.query(ForecastRecord)
-            .filter(ForecastRecord.symbol == symbol, ForecastRecord.checked == True)  # noqa: E712
-        )
+        q = db.query(ForecastRecord).filter(
+            ForecastRecord.symbol == symbol, ForecastRecord.checked == True
+        )  # noqa: E712
         if horizon:
             q = q.filter(ForecastRecord.horizon == horizon)
         records = q.order_by(desc(ForecastRecord.forecast_ts)).limit(limit).all()
 
         items = []
         for r in records:
-            items.append({
-                "id": r.id,
-                "horizon": r.horizon,
-                "forecast_ts": r.forecast_ts.isoformat() if r.forecast_ts else None,
-                "target_ts": r.target_ts.isoformat() if r.target_ts else None,
-                "current_price_at_forecast": r.current_price_at_forecast,
-                "forecast_price": r.forecast_price,
-                "actual_price": r.actual_price,
-                "error_pct": round(r.error_pct, 2) if r.error_pct is not None else None,
-                "direction": r.direction,
-                "correct_direction": r.correct_direction,
-                "projected_pct": r.projected_pct,
-            })
+            items.append(
+                {
+                    "id": r.id,
+                    "horizon": r.horizon,
+                    "forecast_ts": r.forecast_ts.isoformat() if r.forecast_ts else None,
+                    "target_ts": r.target_ts.isoformat() if r.target_ts else None,
+                    "current_price_at_forecast": r.current_price_at_forecast,
+                    "forecast_price": r.forecast_price,
+                    "actual_price": r.actual_price,
+                    "error_pct": (
+                        round(r.error_pct, 2) if r.error_pct is not None else None
+                    ),
+                    "direction": r.direction,
+                    "correct_direction": r.correct_direction,
+                    "projected_pct": r.projected_pct,
+                }
+            )
 
         # Statystyki zbiorcze
         checked_with_error = [r for r in records if r.error_pct is not None]
@@ -733,12 +865,17 @@ def get_forecast_accuracy(
         directional_checked = [r for r in records if r.correct_direction is not None]
 
         avg_error = (
-            round(sum(r.error_pct for r in checked_with_error) / len(checked_with_error), 2)
-            if checked_with_error else None
+            round(
+                sum(r.error_pct for r in checked_with_error) / len(checked_with_error),
+                2,
+            )
+            if checked_with_error
+            else None
         )
         direction_accuracy = (
             round(len(correct_dir) / len(directional_checked) * 100, 1)
-            if directional_checked else None
+            if directional_checked
+            else None
         )
 
         return {
@@ -753,16 +890,21 @@ def get_forecast_accuracy(
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Forecast accuracy error: {str(e)}")
+        raise HTTPException(
+            status_code=500, detail=f"Forecast accuracy error: {str(e)}"
+        )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # ALLOWED SYMBOLS — jakie pary SPOT można handlować na tym koncie Binance
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 @router.get("/allowed-symbols")
 def get_allowed_symbols_endpoint(
-    quotes: str = Query("EUR,USDC,USDT", description="Kwoty po przecinku, np. EUR,USDC"),
+    quotes: str = Query(
+        "EUR,USDC,USDT", description="Kwoty po przecinku, np. EUR,USDC"
+    ),
     request: Request = None,
     db: Session = Depends(get_db),
 ):
@@ -789,15 +931,17 @@ def get_allowed_symbols_endpoint(
         items = []
         for sym, info in sorted(allowed.items()):
             in_watchlist = sym in watchlist
-            items.append({
-                "symbol": sym,
-                "base_asset": info["base_asset"],
-                "quote_asset": info["quote_asset"],
-                "in_watchlist": in_watchlist,
-                "min_qty": info.get("min_qty"),
-                "step_size": info.get("step_size"),
-                "min_notional": info.get("min_notional"),
-            })
+            items.append(
+                {
+                    "symbol": sym,
+                    "base_asset": info["base_asset"],
+                    "quote_asset": info["quote_asset"],
+                    "in_watchlist": in_watchlist,
+                    "min_qty": info.get("min_qty"),
+                    "step_size": info.get("step_size"),
+                    "min_notional": info.get("min_notional"),
+                }
+            )
 
         # Osobna lista: symbole z watchlisty które NIE są w allowed
         blocked = [s for s in watchlist if s not in allowed]
@@ -814,4 +958,3 @@ def get_allowed_symbols_endpoint(
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Błąd allowed-symbols: {str(e)}")
-

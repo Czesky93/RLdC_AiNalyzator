@@ -1,20 +1,36 @@
 """
 Positions API Router - endpoints dla pozycji (otwarte pozycje)
 """
-from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy.orm import Session
-from sqlalchemy import desc
-from typing import Optional, List, Dict, Any
-from datetime import datetime, timezone
-import json
-from pydantic import BaseModel
 
-from backend.database import get_db, Position, PendingOrder, MarketData, RuntimeSetting, DecisionTrace, Order, utc_now_naive
+import json
+from datetime import datetime, timezone
+from typing import Any, Dict, List, Optional
+
+from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel
+from sqlalchemy import desc
+from sqlalchemy.orm import Session
+
+from backend.analysis import (
+    _compute_indicators,
+    _insight_from_indicators,
+    _klines_to_df,
+    get_live_context,
+)
 from backend.auth import require_admin
-from backend.analysis import get_live_context, _compute_indicators, _insight_from_indicators, _klines_to_df
-from backend.runtime_settings import get_runtime_config, build_symbol_tier_map
-from backend.database import Kline
 from backend.binance_client import get_binance_client
+from backend.database import (
+    DecisionTrace,
+    Kline,
+    MarketData,
+    Order,
+    PendingOrder,
+    Position,
+    RuntimeSetting,
+    get_db,
+    utc_now_naive,
+)
+from backend.runtime_settings import build_symbol_tier_map, get_runtime_config
 
 router = APIRouter()
 
@@ -58,7 +74,11 @@ def _estimate_live_entry_from_trades(
             new_qty = held_qty + qty
             if held_qty <= 1e-12:
                 opened_at = _trade_ts_to_naive(trade.get("time"))
-            avg_entry = (((avg_entry * held_qty) + (price * qty)) / new_qty) if new_qty > 0 else 0.0
+            avg_entry = (
+                (((avg_entry * held_qty) + (price * qty)) / new_qty)
+                if new_qty > 0
+                else 0.0
+            )
             held_qty = new_qty
         else:
             if held_qty <= 1e-12:
@@ -104,7 +124,9 @@ def _resolve_live_position_baseline(
         if abs(_as_float(existing.quantity) - quantity) > max(1e-8, quantity * 1e-6):
             existing.quantity = quantity
             dirty = True
-        if abs(_as_float(existing.current_price) - current_price) > max(1e-8, current_price * 1e-6):
+        if abs(_as_float(existing.current_price) - current_price) > max(
+            1e-8, current_price * 1e-6
+        ):
             existing.current_price = current_price
             dirty = True
         if abs(_as_float(existing.unrealized_pnl) - unrealized_pnl) > 1e-8:
@@ -120,7 +142,11 @@ def _resolve_live_position_baseline(
             "opened_at": existing.opened_at,
             "updated_at": existing.updated_at,
             "unrealized_pnl": unrealized_pnl,
-            "pnl_percent": ((unrealized_pnl / (entry_price * quantity)) * 100) if entry_price > 0 and quantity > 0 else None,
+            "pnl_percent": (
+                ((unrealized_pnl / (entry_price * quantity)) * 100)
+                if entry_price > 0 and quantity > 0
+                else None
+            ),
             "source": "local_live_position",
             "dirty": dirty,
         }
@@ -130,7 +156,9 @@ def _resolve_live_position_baseline(
     source = "missing_trade_history"
     try:
         trades = binance_client.get_my_trades(symbol, limit=500) or []
-        entry_price, opened_at, source = _estimate_live_entry_from_trades(trades, quantity)
+        entry_price, opened_at, source = _estimate_live_entry_from_trades(
+            trades, quantity
+        )
     except Exception:
         trades = []
 
@@ -189,7 +217,11 @@ def _resolve_live_position_baseline(
         "opened_at": existing.opened_at,
         "updated_at": existing.updated_at,
         "unrealized_pnl": unrealized_pnl,
-        "pnl_percent": ((unrealized_pnl / (entry_price * quantity)) * 100) if entry_price > 0 and quantity > 0 else None,
+        "pnl_percent": (
+            ((unrealized_pnl / (entry_price * quantity)) * 100)
+            if entry_price > 0 and quantity > 0
+            else None
+        ),
         "source": source,
         "dirty": True,
     }
@@ -199,22 +231,38 @@ def _resolve_live_position_baseline(
 # Helper: Buduj listę LIVE spot positions z Binance (źródło prawdy dla LIVE)
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 def _get_live_spot_positions(db: Session) -> List[Dict[str, Any]]:
     """
     Pobiera aktywa z Binance spot i zwraca listę pozycji w formacie
     kompatybilnym z lokalnym Position (symbol, qty, price_eur, value_eur).
     Reużywa _build_live_spot_portfolio z portfolio router.
+    Timeout 8s — Binance retry może trwać do ~15s.
     """
+    from concurrent.futures import ThreadPoolExecutor
+    from concurrent.futures import TimeoutError as FuturesTimeoutError
+
     from backend.routers.portfolio import _build_live_spot_portfolio
 
     binance_client = get_binance_client()
-    live_data = _build_live_spot_portfolio(db)
+    try:
+        with ThreadPoolExecutor(max_workers=1) as _pool:
+            _fut = _pool.submit(_build_live_spot_portfolio, db)
+            try:
+                live_data = _fut.result(timeout=8.0)
+            except FuturesTimeoutError:
+                return []
+    except Exception:
+        return []
     if live_data.get("error"):
         return []
     result = []
     dirty = False
-    from backend.runtime_settings import get_runtime_config as _get_rt_cfg
-    _min_notional = float(_get_rt_cfg(db).get("min_order_notional", 25.0))
+    import os as _os
+
+    # DISPLAY_DUST_EUR: próg prawdziwego pyłu dla wyświetlania danych (osobny od min_order_notional!)
+    # min_order_notional (25 EUR) to próg HANDLOWY — nie używaj go do filtrowania wyświetlania.
+    _display_dust_eur = float(_os.getenv("DISPLAY_DUST_EUR", "0.50"))
     for p in live_data["spot_positions"]:
         asset = p["asset"]
         # Pomijaj stablecoiny jako "pozycje" — one to gotówka
@@ -224,24 +272,40 @@ def _get_live_spot_positions(db: Session) -> List[Dict[str, Any]]:
         qty = _as_float(p.get("total"))
         current_price = _as_float(p.get("price_eur"))
         value_eur = qty * current_price
-        # Pomijaj pył — wartość < min_order_notional nie blokuje wejść i nie zasługuje na zapis w DB
-        if value_eur < _min_notional:
+        # Pomijaj mikropył — wartość < 0.50 EUR to faktycznie bezwartościowe fragmenty
+        # UWAGA: min_order_notional służy tylko jako próg HANDLOWY (minimalna kwota zlecenia),
+        # nie jako filtr wyświetlania danych. Nawet pozycja za 5 EUR zasługuje na PnL.
+        if value_eur < _display_dust_eur:
             # Usuń ewentualny stary DB-rekord jeśli istnieje (cleanup po bootstrapie)
-            _dust_pos = db.query(Position).filter(
-                Position.symbol == symbol, Position.mode == "live"
-            ).first()
+            _dust_pos = (
+                db.query(Position)
+                .filter(Position.symbol == symbol, Position.mode == "live")
+                .first()
+            )
             if _dust_pos:
                 db.delete(_dust_pos)
                 dirty = True
-            result.append({
-                "id": None, "symbol": symbol, "asset": asset, "side": "LONG",
-                "entry_price": None, "current_price": current_price,
-                "quantity": qty, "free": p.get("free"), "locked": p.get("locked"),
-                "value_eur": value_eur, "price_source": p.get("price_source"),
-                "source": "binance_spot_dust", "entry_price_source": "dust",
-                "unrealized_pnl": None, "pnl_percent": None,
-                "opened_at": None, "updated_at": None,
-            })
+            result.append(
+                {
+                    "id": None,
+                    "symbol": symbol,
+                    "asset": asset,
+                    "side": "LONG",
+                    "entry_price": None,
+                    "current_price": current_price,
+                    "quantity": qty,
+                    "free": p.get("free"),
+                    "locked": p.get("locked"),
+                    "value_eur": value_eur,
+                    "price_source": p.get("price_source"),
+                    "source": "binance_spot_dust",
+                    "entry_price_source": "dust",
+                    "unrealized_pnl": None,
+                    "pnl_percent": None,
+                    "opened_at": None,
+                    "updated_at": None,
+                }
+            )
             continue
         baseline = _resolve_live_position_baseline(
             db,
@@ -251,25 +315,35 @@ def _get_live_spot_positions(db: Session) -> List[Dict[str, Any]]:
             binance_client=binance_client,
         )
         dirty = dirty or bool(baseline.get("dirty"))
-        result.append({
-            "id": None,
-            "symbol": symbol,
-            "asset": asset,
-            "side": "LONG",
-            "entry_price": baseline.get("entry_price"),
-            "current_price": p["price_eur"],
-            "quantity": p["total"],
-            "free": p["free"],
-            "locked": p["locked"],
-            "value_eur": p["value_eur"],
-            "price_source": p["price_source"],
-            "source": "binance_spot",
-            "entry_price_source": baseline.get("source"),
-            "unrealized_pnl": baseline.get("unrealized_pnl"),
-            "pnl_percent": baseline.get("pnl_percent"),
-            "opened_at": baseline.get("opened_at").isoformat() if baseline.get("opened_at") else None,
-            "updated_at": baseline.get("updated_at").isoformat() if baseline.get("updated_at") else None,
-        })
+        result.append(
+            {
+                "id": None,
+                "symbol": symbol,
+                "asset": asset,
+                "side": "LONG",
+                "entry_price": baseline.get("entry_price"),
+                "current_price": p["price_eur"],
+                "quantity": p["total"],
+                "free": p["free"],
+                "locked": p["locked"],
+                "value_eur": p["value_eur"],
+                "price_source": p["price_source"],
+                "source": "binance_spot",
+                "entry_price_source": baseline.get("source"),
+                "unrealized_pnl": baseline.get("unrealized_pnl"),
+                "pnl_percent": baseline.get("pnl_percent"),
+                "opened_at": (
+                    baseline.get("opened_at").isoformat()
+                    if baseline.get("opened_at")
+                    else None
+                ),
+                "updated_at": (
+                    baseline.get("updated_at").isoformat()
+                    if baseline.get("updated_at")
+                    else None
+                ),
+            }
+        )
     if dirty:
         db.commit()
     return result
@@ -277,9 +351,9 @@ def _get_live_spot_positions(db: Session) -> List[Dict[str, Any]]:
 
 @router.get("")
 def get_positions(
-    mode: str = Query("demo", description="Tryb: demo lub live"),
+    mode: str = Query("live", description="Tryb: demo lub live"),
     symbol: Optional[str] = Query(None, description="Filtr po symbolu"),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
 ):
     """
     Pobierz listę otwartych pozycji.
@@ -307,7 +381,11 @@ def get_positions(
         result = []
         for pos in positions:
             unrealized_pnl = pos.unrealized_pnl or 0.0
-            denom = (pos.entry_price * pos.quantity) if pos.entry_price and pos.quantity else 0
+            denom = (
+                (pos.entry_price * pos.quantity)
+                if pos.entry_price and pos.quantity
+                else 0
+            )
             pnl_percent = round((unrealized_pnl / denom * 100) if denom > 0 else 0, 2)
 
             result.append(
@@ -321,7 +399,9 @@ def get_positions(
                     "unrealized_pnl": unrealized_pnl,
                     "pnl_percent": pnl_percent,
                     "opened_at": pos.opened_at.isoformat() if pos.opened_at else None,
-                    "updated_at": pos.updated_at.isoformat() if pos.updated_at else None,
+                    "updated_at": (
+                        pos.updated_at.isoformat() if pos.updated_at else None
+                    ),
                 }
             )
 
@@ -333,7 +413,9 @@ def get_positions(
         }
 
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error getting positions: {str(e)}")
+        raise HTTPException(
+            status_code=500, detail=f"Error getting positions: {str(e)}"
+        )
 
 
 def _latest_price_for_symbol(db: Session, symbol: str) -> Optional[float]:
@@ -354,8 +436,10 @@ def _latest_price_for_symbol(db: Session, symbol: str) -> Optional[float]:
 @router.post("/{position_id}/close")
 def close_position(
     position_id: int,
-    mode: str = Query("demo", description="Tryb: demo lub live"),
-    quantity: Optional[float] = Query(None, gt=0, description="Ile zamknąć (domyślnie: całość)"),
+    mode: str = Query("live", description="Tryb: demo lub live"),
+    quantity: Optional[float] = Query(
+        None, gt=0, description="Ile zamknąć (domyślnie: całość)"
+    ),
     db: Session = Depends(get_db),
     admin: None = Depends(require_admin),
 ):
@@ -368,18 +452,31 @@ def close_position(
 
     pos_mode = (pos.mode or "demo").lower()
     if pos_mode != mode.lower():
-        raise HTTPException(status_code=409, detail=f"Pozycja jest w trybie {pos_mode}, nie {mode}")
+        raise HTTPException(
+            status_code=409, detail=f"Pozycja jest w trybie {pos_mode}, nie {mode}"
+        )
 
     if (pos.side or "").upper() == "SHORT":
-        raise HTTPException(status_code=409, detail="Zamykanie SHORT nie jest wspierane")
+        raise HTTPException(
+            status_code=409, detail="Zamykanie SHORT nie jest wspierane"
+        )
 
-    sym = (pos.symbol or "").strip().replace(" ", "").replace("/", "").replace("-", "").upper()
+    sym = (
+        (pos.symbol or "")
+        .strip()
+        .replace(" ", "")
+        .replace("/", "")
+        .replace("-", "")
+        .upper()
+    )
     if not sym:
         raise HTTPException(status_code=400, detail="Nieprawidłowy symbol pozycji")
 
     pos_qty = float(pos.quantity or 0.0)
     if pos_qty <= 0:
-        raise HTTPException(status_code=409, detail="Quantity pozycji nie jest dodatnie")
+        raise HTTPException(
+            status_code=409, detail="Quantity pozycji nie jest dodatnie"
+        )
 
     qty = pos_qty
     if quantity is not None:
@@ -390,7 +487,9 @@ def close_position(
         if qty <= 0:
             raise HTTPException(status_code=400, detail="Quantity musi być dodatnie")
         if qty > pos_qty:
-            raise HTTPException(status_code=409, detail="Quantity przekracza rozmiar pozycji")
+            raise HTTPException(
+                status_code=409, detail="Quantity przekracza rozmiar pozycji"
+            )
 
     # ─── DEMO ────────────────────────────────────────────────────────────────
     if mode.lower() == "demo":
@@ -399,12 +498,17 @@ def close_position(
             .filter(
                 PendingOrder.mode == "demo",
                 PendingOrder.symbol == sym,
-                PendingOrder.status.in_(["PENDING", "CONFIRMED"]),
+                PendingOrder.status.in_(
+                    ["PENDING", "PENDING_CREATED", "CONFIRMED", "PENDING_CONFIRMED"]
+                ),
             )
             .first()
         )
         if existing:
-            raise HTTPException(status_code=409, detail="Istnieje już aktywny pending order dla tego symbolu")
+            raise HTTPException(
+                status_code=409,
+                detail="Istnieje już aktywny pending order dla tego symbolu",
+            )
 
         price = _latest_price_for_symbol(db, sym)
         if price is None and pos.current_price is not None:
@@ -413,7 +517,9 @@ def close_position(
             except Exception:
                 price = None
         if price is None or price <= 0:
-            raise HTTPException(status_code=400, detail="Brak ceny do stworzenia zlecenia zamknięcia")
+            raise HTTPException(
+                status_code=400, detail="Brak ceny do stworzenia zlecenia zamknięcia"
+            )
 
         p = PendingOrder(
             symbol=sym,
@@ -422,8 +528,12 @@ def close_position(
             price=price,
             quantity=qty,
             mode="demo",
-            status="PENDING",
-            reason=f"Zamknięcie pozycji #{pos.id}" if qty == pos_qty else f"Częściowe zamknięcie pozycji #{pos.id} qty={qty}",
+            status="PENDING_CREATED",
+            reason=(
+                f"Zamknięcie pozycji #{pos.id}"
+                if qty == pos_qty
+                else f"Częściowe zamknięcie pozycji #{pos.id} qty={qty}"
+            ),
             created_at=utc_now_naive(),
         )
         db.add(p)
@@ -446,7 +556,10 @@ def close_position(
     # ─── LIVE ─────────────────────────────────────────────────────────────────
     binance = get_binance_client()
     if not binance or not binance.api_key or not binance.api_secret:
-        raise HTTPException(status_code=503, detail="Brak kluczy Binance API — uzupełnij .env (BINANCE_API_KEY, BINANCE_API_SECRET)")
+        raise HTTPException(
+            status_code=503,
+            detail="Brak kluczy Binance API — uzupełnij .env (BINANCE_API_KEY, BINANCE_API_SECRET)",
+        )
 
     binance_response = binance.place_order(
         symbol=sym,
@@ -455,15 +568,20 @@ def close_position(
         quantity=qty,
     )
     if binance_response is None:
-        raise HTTPException(status_code=502, detail="Binance nie odpowiedział na zlecenie SELL — sprawdź logi")
+        raise HTTPException(
+            status_code=502,
+            detail="Binance nie odpowiedział na zlecenie SELL — sprawdź logi",
+        )
     if binance_response.get("_error"):
         raise HTTPException(
             status_code=400,
-            detail=f"Binance odrzucił zlecenie zamknięcia: {binance_response.get('error_message', 'nieznany błąd')} (kod: {binance_response.get('error_code', '?')})"
+            detail=f"Binance odrzucił zlecenie zamknięcia: {binance_response.get('error_message', 'nieznany błąd')} (kod: {binance_response.get('error_code', '?')})",
         )
 
     fills = binance.get_order_fills(sym, binance_response.get("orderId")) or {}
-    executed_price = fills.get("executed_price") or float(pos.current_price or pos.entry_price or 0)
+    executed_price = fills.get("executed_price") or float(
+        pos.current_price or pos.entry_price or 0
+    )
     executed_qty = fills.get("executed_qty") or qty
     fee = fills.get("fee") or 0.0
     fee_asset = fills.get("fee_asset") or "BNB"
@@ -516,31 +634,54 @@ def close_position(
 
 @router.post("/close-all")
 def close_all_positions(
-    mode: str = Query("demo", description="Tryb: demo lub live (na start: tylko demo)"),
+    mode: str = Query("live", description="Tryb: live lub demo"),
     db: Session = Depends(get_db),
     admin: None = Depends(require_admin),
 ):
     """
-    Utwórz PENDING ordery do zamknięcia wszystkich pozycji (DEMO).
+    Zamknij wszystkie pozycje.
+    DEMO: tworzy PENDING ordery.
+    LIVE: wykonuje SELL MARKET na Binance dla każdej pozycji.
     """
-    if mode != "demo":
-        raise HTTPException(status_code=403, detail="Only demo positions can be closed")
+    if mode not in ("live", "demo"):
+        raise HTTPException(status_code=400, detail="Nieprawidłowy mode")
 
-    positions = db.query(Position).filter(Position.mode == "demo").order_by(desc(Position.opened_at)).all()
+    positions = (
+        db.query(Position)
+        .filter(Position.mode == mode)
+        .order_by(desc(Position.opened_at))
+        .all()
+    )
     if not positions:
-        return {"success": True, "data": {"created": 0, "skipped_existing": 0, "skipped_short": 0, "skipped_invalid": 0}}
+        return {
+            "success": True,
+            "data": {
+                "created": 0,
+                "skipped_existing": 0,
+                "skipped_short": 0,
+                "skipped_invalid": 0,
+            },
+        }
 
     created: list[PendingOrder] = []
     skipped_existing = 0
     skipped_short = 0
     skipped_invalid = 0
+    live_results: list[dict] = []
 
     for pos in positions:
         if (pos.side or "").upper() == "SHORT":
             skipped_short += 1
             continue
 
-        sym = (pos.symbol or "").strip().replace(" ", "").replace("/", "").replace("-", "").upper()
+        sym = (
+            (pos.symbol or "")
+            .strip()
+            .replace(" ", "")
+            .replace("/", "")
+            .replace("-", "")
+            .upper()
+        )
         if not sym:
             skipped_invalid += 1
             continue
@@ -550,12 +691,51 @@ def close_all_positions(
             skipped_invalid += 1
             continue
 
+        if mode == "live":
+            # LIVE: wykonaj sell market na Binance bezpośrednio
+            try:
+                from backend.binance_client import get_binance_client
+
+                binance = get_binance_client()
+                if not binance or not binance.api_key or not binance.api_secret:
+                    skipped_invalid += 1
+                    continue
+                result = binance.place_order(
+                    symbol=sym, side="SELL", order_type="MARKET", quantity=qty
+                )
+                if result and not result.get("_error"):
+                    live_results.append({"symbol": sym, "qty": qty, "status": "OK"})
+                else:
+                    live_results.append(
+                        {
+                            "symbol": sym,
+                            "qty": qty,
+                            "status": "ERROR",
+                            "detail": str(result),
+                        }
+                    )
+                    skipped_invalid += 1
+            except Exception as ex:
+                live_results.append(
+                    {
+                        "symbol": sym,
+                        "qty": qty,
+                        "status": "EXCEPTION",
+                        "detail": str(ex),
+                    }
+                )
+                skipped_invalid += 1
+            continue
+
+        # DEMO: tworzy PendingOrder
         existing = (
             db.query(PendingOrder)
             .filter(
-                PendingOrder.mode == "demo",
+                PendingOrder.mode == mode,
                 PendingOrder.symbol == sym,
-                PendingOrder.status.in_(["PENDING", "CONFIRMED"]),
+                PendingOrder.status.in_(
+                    ["PENDING", "PENDING_CREATED", "CONFIRMED", "PENDING_CONFIRMED"]
+                ),
             )
             .first()
         )
@@ -579,8 +759,8 @@ def close_all_positions(
             order_type="MARKET",
             price=price,
             quantity=qty,
-            mode="demo",
-            status="PENDING",
+            mode=mode,
+            status="PENDING_CREATED",
             reason=f"Close all (position #{pos.id})",
             created_at=utc_now_naive(),
         )
@@ -591,18 +771,20 @@ def close_all_positions(
     for p in created:
         db.refresh(p)
 
-    return {
-        "success": True,
-        "data": {
-            "created": len(created),
-            "skipped_existing": skipped_existing,
-            "skipped_short": skipped_short,
-            "skipped_invalid": skipped_invalid,
-        },
+    result_data: dict = {
+        "created": len(created),
+        "skipped_existing": skipped_existing,
+        "skipped_short": skipped_short,
+        "skipped_invalid": skipped_invalid,
     }
+    if mode == "live" and live_results:
+        result_data["live_sells"] = live_results
+    return {"success": True, "data": result_data}
 
 
-def _analyze_position(pos: Position, db: Session, tier_map: Dict[str, Any]) -> Dict[str, Any]:
+def _analyze_position(
+    pos: Position, db: Session, tier_map: Dict[str, Any]
+) -> Dict[str, Any]:
     """Buduje kartę analizy dla jednej pozycji."""
     sym = (pos.symbol or "").strip()
     entry = float(pos.entry_price or 0)
@@ -633,6 +815,7 @@ def _analyze_position(pos: Position, db: Session, tier_map: Dict[str, Any]) -> D
         .all()
     )
     import pandas as pd
+
     df = _klines_to_df(list(reversed(klines)))
     full_indicators = None
     insight = None
@@ -665,13 +848,17 @@ def _analyze_position(pos: Position, db: Session, tier_map: Dict[str, Any]) -> D
         strength = "SILNY"
         if value >= target:
             decision = "SPRZEDAJ"
-            reasons.append(f"Osiągnięto cel {target} EUR (wartość: {round(value, 2)} EUR)")
+            reasons.append(
+                f"Osiągnięto cel {target} EUR (wartość: {round(value, 2)} EUR)"
+            )
         else:
             reasons.append(f"Do celu {target} EUR brakuje {remaining} EUR")
             if trend == "WZROSTOWY":
                 reasons.append("Trend wzrostowy — szansa na osiągnięcie celu")
             elif trend == "SPADKOWY":
-                reasons.append("Trend spadkowy, ale tryb HOLD — trzymaj i czekaj na odbicie")
+                reasons.append(
+                    "Trend spadkowy, ale tryb HOLD — trzymaj i czekaj na odbicie"
+                )
             if rsi is not None and rsi < 35:
                 reasons.append(f"RSI {round(rsi, 1)} — wyprzedanie, szansa na wzrost")
     else:
@@ -685,15 +872,21 @@ def _analyze_position(pos: Position, db: Session, tier_map: Dict[str, Any]) -> D
             if trend == "SPADKOWY":
                 decision = "SPRZEDAJ"
                 strength = "SILNY"
-                reasons.append(f"Zysk {pnl_pct}% przy spadkowym trendzie — zabierz zysk")
+                reasons.append(
+                    f"Zysk {pnl_pct}% przy spadkowym trendzie — zabierz zysk"
+                )
             elif rsi is not None and rsi > 70:
                 decision = "SPRZEDAJ"
                 strength = "SILNY"
-                reasons.append(f"Zysk {pnl_pct}%, RSI {round(rsi, 1)} — wykupienie, zabierz zysk")
+                reasons.append(
+                    f"Zysk {pnl_pct}%, RSI {round(rsi, 1)} — wykupienie, zabierz zysk"
+                )
             else:
                 decision = "TRZYMAJ"
                 strength = "UMIARKOWANY"
-                reasons.append(f"Zysk {pnl_pct}%, trend {trend.lower()} — można jeszcze trzymać")
+                reasons.append(
+                    f"Zysk {pnl_pct}%, trend {trend.lower()} — można jeszcze trzymać"
+                )
                 if tp is not None:
                     dist_tp = round(((tp - current) / current) * 100, 2)
                     reasons.append(f"Do TP ({round(tp, 2)}) zostało {dist_tp}%")
@@ -708,49 +901,69 @@ def _analyze_position(pos: Position, db: Session, tier_map: Dict[str, Any]) -> D
                 reasons.append(f"Mały zysk {pnl_pct}%, trend spadkowy — obserwuj")
                 if sl is not None:
                     dist_sl = round(((current - sl) / current) * 100, 2)
-                    reasons.append(f"SL ({round(sl, 2)}) jest {dist_sl}% poniżej — bufor OK")
+                    reasons.append(
+                        f"SL ({round(sl, 2)}) jest {dist_sl}% poniżej — bufor OK"
+                    )
         elif pnl_pct > -3:
             # Mała strata
             if trend == "WZROSTOWY":
                 decision = "TRZYMAJ"
-                reasons.append(f"Strata {pnl_pct}%, ale trend wzrostowy — szansa na odbicie")
+                reasons.append(
+                    f"Strata {pnl_pct}%, ale trend wzrostowy — szansa na odbicie"
+                )
             elif rsi is not None and rsi < 30:
                 decision = "TRZYMAJ"
-                reasons.append(f"Strata {pnl_pct}%, RSI {round(rsi, 1)} — wyprzedanie, szansa na odbicie")
+                reasons.append(
+                    f"Strata {pnl_pct}%, RSI {round(rsi, 1)} — wyprzedanie, szansa na odbicie"
+                )
             else:
                 decision = "CZEKAJ"
-                reasons.append(f"Strata {pnl_pct}%, trend {trend.lower()} — obserwuj SL")
+                reasons.append(
+                    f"Strata {pnl_pct}%, trend {trend.lower()} — obserwuj SL"
+                )
         else:
             # Duża strata
             if rsi is not None and rsi < 25:
                 decision = "TRZYMAJ"
                 strength = "SŁABY"
-                reasons.append(f"Strata {pnl_pct}%, ale RSI {round(rsi, 1)} — skrajne wyprzedanie, szansa na odbicie")
+                reasons.append(
+                    f"Strata {pnl_pct}%, ale RSI {round(rsi, 1)} — skrajne wyprzedanie, szansa na odbicie"
+                )
             elif trend == "WZROSTOWY":
                 decision = "TRZYMAJ"
                 strength = "SŁABY"
-                reasons.append(f"Strata {pnl_pct}%, trend się odwraca — szansa na odrobienie")
+                reasons.append(
+                    f"Strata {pnl_pct}%, trend się odwraca — szansa na odrobienie"
+                )
             else:
                 decision = "SPRZEDAJ"
                 strength = "SILNY"
-                reasons.append(f"Strata {pnl_pct}%, trend spadkowy — zamknij pozycję, ogranicz straty")
+                reasons.append(
+                    f"Strata {pnl_pct}%, trend spadkowy — zamknij pozycję, ogranicz straty"
+                )
 
         # Dodaj info o insight z analizy technicznej
         if insight:
             sig = insight.get("signal", "")
             conf = insight.get("confidence", 0)
             if sig == "SELL" and conf > 0.7 and decision != "SPRZEDAJ":
-                reasons.append(f"Analiza techniczna sygnalizuje SELL (pewność {round(conf * 100)}%)")
+                reasons.append(
+                    f"Analiza techniczna sygnalizuje SELL (pewność {round(conf * 100)}%)"
+                )
             elif sig == "BUY" and conf > 0.7 and decision == "SPRZEDAJ":
-                reasons.append(f"Uwaga: analiza techniczna sygnalizuje BUY mimo straty (pewność {round(conf * 100)}%)")
+                reasons.append(
+                    f"Uwaga: analiza techniczna sygnalizuje BUY mimo straty (pewność {round(conf * 100)}%)"
+                )
 
     # Precyzja: dla małych kwot używamy 6 miejsc
     decimals = 6 if max(value, cost) < 1.0 else 4 if max(value, cost) < 100 else 2
+    # DEMO: entry_price zawsze jest z DB → always valid_position (jeśli qty > 0 i entry > 0)
+    _is_valid_demo = entry > 0 and qty > 0 and current > 0
     card: Dict[str, Any] = {
         "symbol": sym,
         "side": pos.side,
         "quantity": qty,
-        "entry_price": entry,
+        "entry_price": entry if entry > 0 else None,
         "current_price": current,
         "position_value_eur": round(value, decimals),
         "cost_eur": round(cost, decimals),
@@ -769,36 +982,81 @@ def _analyze_position(pos: Position, db: Session, tier_map: Dict[str, Any]) -> D
         "decision": decision,
         "strength": strength,
         "reasons": reasons,
+        # Pola kontraktu API
+        "classification": "valid_position" if _is_valid_demo else "missing_entry_price",
+        "is_dust": False,
+        "has_entry_price": entry > 0,
+        "can_analyze": _is_valid_demo,
+        "can_compute_pnl": _is_valid_demo,
+        "warning_message": (
+            None
+            if _is_valid_demo
+            else "Brak ceny wejścia lub ilości w rekordzie pozycji"
+        ),
         "opened_at": pos.opened_at.isoformat() if pos.opened_at else None,
         "updated_at": pos.updated_at.isoformat() if pos.updated_at else None,
     }
 
     if is_hold:
         card["hold_target_eur"] = tier_info.get("target_value_eur", 300)
-        card["hold_remaining_eur"] = round(tier_info.get("target_value_eur", 300) - value, 2)
+        card["hold_remaining_eur"] = round(
+            tier_info.get("target_value_eur", 300) - value, 2
+        )
 
     return card
 
 
-def _analyze_spot_position(spot: Dict[str, Any], db: Session, tier_map: Dict[str, Any]) -> Dict[str, Any]:
+def _analyze_spot_position(
+    spot: Dict[str, Any], db: Session, tier_map: Dict[str, Any]
+) -> Dict[str, Any]:
     """
     Buduje kartę analizy dla pozycji LIVE spot (z Binance).
-    Jeśli da się odtworzyć baseline wejścia, pokazuje koszt i PnL.
+
+    Klasyfikacja pozycji (twarde reguły domenowe):
+    - dust_position       — wartość < DISPLAY_DUST_EUR lub source=binance_spot_dust
+    - missing_entry_price — brak ceny wejścia z historii Binance/fillów
+    - valid_position      — pełna pozycja z potwierdzoną ceną wejścia
+
+    Silnik rekomendacji (TRZYMAJ / SPRZEDAJ / REDUKUJ) działa WYŁĄCZNIE
+    dla valid_position. Dla pozostałych: decision = "DUST" lub "BRAK DANYCH".
     """
     sym = spot["symbol"]
     asset = spot.get("asset", sym.replace("EUR", ""))
     qty = float(spot.get("quantity", 0))
     current = float(spot.get("current_price", 0))
     value = float(spot.get("value_eur", current * qty))
-    entry_price = float(spot["entry_price"]) if spot.get("entry_price") is not None else None
-    cost_eur = round(entry_price * qty, 4) if entry_price is not None and qty > 0 else None
+    entry_price = (
+        float(spot["entry_price"]) if spot.get("entry_price") is not None else None
+    )
+    cost_eur = (
+        round(entry_price * qty, 4) if entry_price is not None and qty > 0 else None
+    )
     pnl_eur = round(value - cost_eur, 4) if cost_eur is not None else None
-    pnl_pct = round((pnl_eur / cost_eur) * 100, 2) if pnl_eur is not None and cost_eur and cost_eur > 0 else None
+    pnl_pct = (
+        round((pnl_eur / cost_eur) * 100, 2)
+        if pnl_eur is not None and cost_eur and cost_eur > 0
+        else None
+    )
     tier_info = tier_map.get(sym, {})
     is_hold = tier_info.get("hold_mode", False)
 
-    # Wskaźniki techniczne
-    ctx = get_live_context(db, sym, timeframe="1h", limit=200)
+    # ── KLASYFIKACJA POZYCJI ────────────────────────────────────────────────
+    # Twarde reguły domenowe: nie zgaduj, nie podstawiaj fake danych.
+    is_dust: bool = spot.get("source") == "binance_spot_dust" or value < 0.50
+    has_entry_price: bool = entry_price is not None
+    can_analyze: bool = not is_dust and has_entry_price and current > 0 and qty > 0
+    can_compute_pnl: bool = has_entry_price and qty > 0 and not is_dust
+
+    if is_dust:
+        classification = "dust_position"
+    elif not has_entry_price:
+        classification = "missing_entry_price"
+    else:
+        classification = "valid_position"
+
+    # Wskaźniki techniczne — pobieramy zawsze (do info), ale decyzja NA ICH PODSTAWIE
+    # tylko dla valid_position.
+    ctx = get_live_context(db, sym, timeframe="1h", limit=200) if can_analyze else None
     rsi = ctx.get("rsi") if ctx else None
     ema_20 = ctx.get("ema_20") if ctx else None
     ema_50 = ctx.get("ema_50") if ctx else None
@@ -811,48 +1069,155 @@ def _analyze_spot_position(spot: Dict[str, Any], db: Session, tier_map: Dict[str
         trend = "BRAK DANYCH"
 
     reasons: List[str] = []
-    decision = "TRZYMAJ"
-    strength = "NEUTRALNY"
+    decision: str
+    strength: str
+    warning_message: Optional[str] = None
 
-    if is_hold:
+    # ── GUARDRAIL: silnik rekomendacji działa TYLKO dla valid_position ──────
+    if is_dust:
+        decision = "DUST"
+        strength = "BRAK"
+        warning_message = "Mikropozycja poniżej progu analizy tradingowej."
+        reasons = [
+            f"Wartość pozycji ({round(value, 6)} EUR) poniżej progu analizy.",
+            "Brak rekomendacji tradingowej dla pyłu — to resztka po transakcjach.",
+        ]
+    elif not has_entry_price:
+        decision = "BRAK DANYCH"
+        strength = "BRAK"
+        warning_message = "Brak potwierdzonej ceny wejścia — analiza niemożliwa."
+        reasons = [
+            "Brak potwierdzonej ceny wejścia w historii transakcji Binance.",
+            "System nie może wiarygodnie policzyć wyniku tej pozycji.",
+            "Zasób kupiony poza historią dostępną przez API (np. Convert, transfer) "
+            "lub historia przekracza limit 1000 transakcji.",
+        ]
+    elif is_hold:
+        # ── Tryb HOLD — rekomendacja na podstawie celu wyceny ────────────────
         target = tier_info.get("target_value_eur", 300)
         remaining = round(target - value, 2)
         strength = "SILNY"
         if value >= target:
             decision = "SPRZEDAJ"
-            reasons.append(f"Osiągnięto cel {target} EUR (wartość: {round(value, 2)} EUR)")
+            reasons.append(
+                f"Osiągnięto cel {target} EUR (wartość: {round(value, 2)} EUR)"
+            )
         else:
+            decision = "TRZYMAJ"
             reasons.append(f"Do celu {target} EUR brakuje {remaining} EUR")
             if trend == "WZROSTOWY":
                 reasons.append("Trend wzrostowy — szansa na osiągnięcie celu")
             elif trend == "SPADKOWY":
-                reasons.append("Trend spadkowy, ale tryb HOLD — trzymaj i czekaj na odbicie")
+                reasons.append(
+                    "Trend spadkowy, ale tryb HOLD — trzymaj i czekaj na odbicie"
+                )
     else:
-        if entry_price is None:
-            reasons.append("Brak potwierdzonej ceny wejścia w historii Binance — PnL może być niepełny")
-        if trend == "SPADKOWY":
-            if rsi is not None and rsi < 30:
+        # ── Normalna pozycja z potwierdzoną ceną wejścia ─────────────────────
+        # PnL-based + trend/RSI logic
+        if pnl_pct is not None and pnl_pct > 5:
+            if trend == "SPADKOWY":
+                decision = "SPRZEDAJ"
+                strength = "SILNY"
+                reasons.append(
+                    f"Zysk {pnl_pct}% przy spadkowym trendzie — zabierz zysk"
+                )
+            elif rsi is not None and rsi > 70:
+                decision = "SPRZEDAJ"
+                strength = "SILNY"
+                reasons.append(
+                    f"Zysk {pnl_pct}%, RSI {round(rsi, 1)} — wykupienie, zabierz zysk"
+                )
+            else:
+                decision = "TRZYMAJ"
+                strength = "UMIARKOWANY"
+                reasons.append(
+                    f"Zysk {pnl_pct}%, trend {trend.lower()} — można jeszcze trzymać"
+                )
+        elif pnl_pct is not None and pnl_pct >= 0:
+            if trend == "WZROSTOWY":
+                decision = "TRZYMAJ"
+                strength = "UMIARKOWANY"
+                reasons.append(f"Mały zysk {pnl_pct}%, trend wzrostowy — trzymaj")
+            else:
+                decision = "CZEKAJ"
+                strength = "NEUTRALNY"
+                reasons.append(
+                    f"Mały zysk {pnl_pct}%, trend {trend.lower()} — obserwuj"
+                )
+        elif pnl_pct is not None and pnl_pct > -3:
+            if trend == "WZROSTOWY":
+                decision = "TRZYMAJ"
+                strength = "NEUTRALNY"
+                reasons.append(
+                    f"Strata {pnl_pct}%, ale trend wzrostowy — szansa na odbicie"
+                )
+            elif rsi is not None and rsi < 30:
+                decision = "TRZYMAJ"
+                strength = "NEUTRALNY"
+                reasons.append(
+                    f"Strata {pnl_pct}%, RSI {round(rsi, 1)} — wyprzedanie, szansa na odbicie"
+                )
+            else:
+                decision = "CZEKAJ"
+                strength = "NEUTRALNY"
+                reasons.append(
+                    f"Strata {pnl_pct}%, trend {trend.lower()} — obserwuj SL"
+                )
+        elif pnl_pct is not None:
+            if rsi is not None and rsi < 25:
                 decision = "TRZYMAJ"
                 strength = "SŁABY"
-                reasons.append(f"Trend spadkowy, ale RSI {round(rsi, 1)} — skrajne wyprzedanie, szansa na odbicie")
-            elif rsi is not None and rsi > 65:
-                decision = "REDUKUJ"
-                strength = "UMIARKOWANY"
-                reasons.append(f"Trend spadkowy + RSI {round(rsi, 1)} — rozważ częściowe wyjście")
-            else:
+                reasons.append(
+                    f"Strata {pnl_pct}%, ale RSI {round(rsi, 1)} — skrajne wyprzedanie, szansa na odbicie"
+                )
+            elif trend == "WZROSTOWY":
                 decision = "TRZYMAJ"
-                reasons.append("Trend spadkowy — obserwuj, brak pilnej potrzeby wyjścia")
-        elif trend == "WZROSTOWY":
-            if rsi is not None and rsi > 75:
-                decision = "REDUKUJ"
-                strength = "UMIARKOWANY"
-                reasons.append(f"Trend wzrostowy, RSI {round(rsi, 1)} — wykupienie, rozważ częściowy zysk")
+                strength = "SŁABY"
+                reasons.append(
+                    f"Strata {pnl_pct}%, trend się odwraca — szansa na odrobienie"
+                )
             else:
-                decision = "TRZYMAJ"
-                strength = "UMIARKOWANY"
-                reasons.append("Trend wzrostowy — trzymaj")
+                decision = "SPRZEDAJ"
+                strength = "SILNY"
+                reasons.append(
+                    f"Strata {pnl_pct}%, trend spadkowy — zamknij pozycję, ogranicz straty"
+                )
         else:
-            reasons.append("Brak danych trendowych — obserwuj")
+            # pnl_pct is None ale valid_position (nie powinno wystąpić, ale defensywnie)
+            if trend == "SPADKOWY":
+                if rsi is not None and rsi < 30:
+                    decision = "TRZYMAJ"
+                    strength = "SŁABY"
+                    reasons.append(
+                        f"Trend spadkowy, ale RSI {round(rsi, 1)} — skrajne wyprzedanie, szansa na odbicie"
+                    )
+                elif rsi is not None and rsi > 65:
+                    decision = "REDUKUJ"
+                    strength = "UMIARKOWANY"
+                    reasons.append(
+                        f"Trend spadkowy + RSI {round(rsi, 1)} — rozważ częściowe wyjście"
+                    )
+                else:
+                    decision = "TRZYMAJ"
+                    strength = "NEUTRALNY"
+                    reasons.append(
+                        "Trend spadkowy — obserwuj, brak pilnej potrzeby wyjścia"
+                    )
+            elif trend == "WZROSTOWY":
+                if rsi is not None and rsi > 75:
+                    decision = "REDUKUJ"
+                    strength = "UMIARKOWANY"
+                    reasons.append(
+                        f"Trend wzrostowy, RSI {round(rsi, 1)} — wykupienie, rozważ częściowy zysk"
+                    )
+                else:
+                    decision = "TRZYMAJ"
+                    strength = "UMIARKOWANY"
+                    reasons.append("Trend wzrostowy — trzymaj")
+            else:
+                decision = "CZEKAJ"
+                strength = "NEUTRALNY"
+                reasons.append("Brak danych trendowych — obserwuj")
 
     decimals = 6 if value < 1.0 else 4 if value < 100 else 2
     card: Dict[str, Any] = {
@@ -860,12 +1225,14 @@ def _analyze_spot_position(spot: Dict[str, Any], db: Session, tier_map: Dict[str
         "asset": asset,
         "side": "LONG",
         "quantity": qty,
+        # Dane finansowe — null jeśli niemożliwe do wyliczenia
         "entry_price": entry_price,
         "current_price": current,
         "position_value_eur": round(value, decimals),
-        "cost_eur": cost_eur,
-        "pnl_eur": pnl_eur,
-        "pnl_pct": pnl_pct,
+        "cost_eur": cost_eur if can_compute_pnl else None,
+        "pnl_eur": pnl_eur if can_compute_pnl else None,
+        "pnl_pct": pnl_pct if can_compute_pnl else None,
+        # Wskaźniki techniczne
         "trend": trend,
         "rsi": round(rsi, 1) if rsi is not None else None,
         "ema_20": round(ema_20, 6) if ema_20 is not None else None,
@@ -876,26 +1243,37 @@ def _analyze_spot_position(spot: Dict[str, Any], db: Session, tier_map: Dict[str
         "mfe_pnl": None,
         "mae_pnl": None,
         "is_hold": is_hold,
+        # Rekomendacja — tylko dla valid_position
         "decision": decision,
         "strength": strength,
         "reasons": reasons,
+        # ── Pola kontraktu API (jawna informacja o jakości danych) ──────────
+        "classification": classification,
+        "is_dust": is_dust,
+        "has_entry_price": has_entry_price,
+        "can_analyze": can_analyze,
+        "can_compute_pnl": can_compute_pnl,
+        "warning_message": warning_message,
+        # ────────────────────────────────────────────────────────────────────
         "opened_at": None,
         "updated_at": None,
-        "source": "binance_spot",
+        "source": spot.get("source", "binance_spot"),
         "price_source": spot.get("price_source"),
         "entry_price_source": spot.get("entry_price_source"),
     }
 
     if is_hold:
         card["hold_target_eur"] = tier_info.get("target_value_eur", 300)
-        card["hold_remaining_eur"] = round(tier_info.get("target_value_eur", 300) - value, 2)
+        card["hold_remaining_eur"] = round(
+            tier_info.get("target_value_eur", 300) - value, 2
+        )
 
     return card
 
 
 @router.get("/analysis")
 def position_analysis(
-    mode: str = Query("demo", description="Tryb: demo lub live"),
+    mode: str = Query("live", description="Tryb: demo lub live"),
     db: Session = Depends(get_db),
 ):
     """
@@ -919,11 +1297,27 @@ def position_analysis(
             )
             cards = [_analyze_position(pos, db, tier_map) for pos in positions]
 
-        # Podsumowanie
-        total_value = sum(c["position_value_eur"] for c in cards)
-        total_pnl = sum(c["pnl_eur"] or 0 for c in cards)
-        total_cost = sum((c["cost_eur"] or 0) for c in cards)
-        sdec = 6 if max(total_value, total_cost, abs(total_pnl), 0.000001) < 1.0 else 4 if max(total_value, total_cost) < 100 else 2
+        # Podsumowanie — tylko valid_position wchodzi do statystyk finansowych
+        # (dust i missing_entry_price nie mają wiarygodnego PnL)
+        valid_cards = [c for c in cards if c.get("classification") == "valid_position"]
+        dust_cards = [c for c in cards if c.get("is_dust")]
+        missing_cards = [
+            c for c in cards if c.get("classification") == "missing_entry_price"
+        ]
+
+        total_value = sum(c["position_value_eur"] for c in valid_cards)
+        total_pnl = sum(c["pnl_eur"] or 0 for c in valid_cards)
+        total_cost = sum((c["cost_eur"] or 0) for c in valid_cards)
+        # Wartość wszystkich aktywów (dust też ma bieżącą wartość rynkową)
+        all_value = sum(c["position_value_eur"] for c in cards)
+        dust_value = sum(c["position_value_eur"] for c in dust_cards)
+        missing_value = sum(c["position_value_eur"] for c in missing_cards)
+
+        sdec = (
+            6
+            if max(total_value, total_cost, abs(total_pnl), 0.000001) < 1.0
+            else 4 if max(total_value, total_cost) < 100 else 2
+        )
 
         return {
             "success": True,
@@ -931,10 +1325,22 @@ def position_analysis(
             "source": "binance_spot" if mode == "live" else "local_db",
             "summary": {
                 "positions_count": len(cards),
+                "valid_positions_count": len(valid_cards),
+                "dust_positions_count": len(dust_cards),
+                "missing_entry_count": len(missing_cards),
+                # Statystyki tylko z valid_position
                 "total_value_eur": round(total_value, sdec),
                 "total_cost_eur": round(total_cost, sdec) if total_cost > 0 else None,
                 "total_pnl_eur": round(total_pnl, sdec) if total_cost > 0 else None,
-                "total_pnl_pct": round((total_pnl / total_cost * 100) if total_cost > 0 else 0, 2),
+                "total_pnl_pct": round(
+                    (total_pnl / total_cost * 100) if total_cost > 0 else 0, 2
+                ),
+                # Wartości rynkowe do informacji (bez PnL bo brak baseline)
+                "all_assets_value_eur": round(all_value, 2),
+                "dust_value_eur": round(dust_value, 6) if dust_value > 0 else None,
+                "missing_entry_value_eur": (
+                    round(missing_value, 2) if missing_value > 0 else None
+                ),
             },
             "data": cards,
         }
@@ -944,6 +1350,7 @@ def position_analysis(
 
 # USER GOALS — persystencja celu na symbol
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 @router.get("/goal/{symbol}")
 def get_goal(
@@ -970,8 +1377,14 @@ def set_goal(
 ):
     """Zapisuje cel użytkownika dla symbolu (target_eur, label)."""
     target_eur = payload.get("target_eur")
-    if target_eur is None or not isinstance(target_eur, (int, float)) or target_eur <= 0:
-        raise HTTPException(status_code=422, detail="Pole target_eur musi być liczbą > 0")
+    if (
+        target_eur is None
+        or not isinstance(target_eur, (int, float))
+        or target_eur <= 0
+    ):
+        raise HTTPException(
+            status_code=422, detail="Pole target_eur musi być liczbą > 0"
+        )
     goal = {
         "target_eur": float(target_eur),
         "label": payload.get("label", ""),
@@ -1003,6 +1416,7 @@ def delete_goal(
 # GOAL ANALYSIS — silnik oceny celu użytkownika
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 def _score_for_alt_target(
     alt_value: float,
     quantity: Optional[float],
@@ -1031,8 +1445,11 @@ def _score_for_alt_target(
 @router.get("/goal-analysis/{symbol}")
 def get_goal_analysis(
     symbol: str,
-    mode: str = Query("demo", description="demo lub live"),
-    target_eur: Optional[float] = Query(None, description="Docelowa wartość pozycji w EUR (opcjonalnie nadpisuje zapisany cel)"),
+    mode: str = Query("live", description="demo lub live"),
+    target_eur: Optional[float] = Query(
+        None,
+        description="Docelowa wartość pozycji w EUR (opcjonalnie nadpisuje zapisany cel)",
+    ),
     db: Session = Depends(get_db),
 ):
     """
@@ -1049,8 +1466,7 @@ def get_goal_analysis(
         )
         spot_pos = None
         if mode == "live" and not pos:
-            spots = _get_live_spot_positions(db)
-            for s in spots:
+            for s in _get_live_spot_positions(db):
                 if s["symbol"] == symbol:
                     spot_pos = s
                     break
@@ -1058,7 +1474,9 @@ def get_goal_analysis(
         # 2. Zapisany cel
         stored_goal = None
         goal_key = f"user_goal_{symbol}"
-        goal_rec = db.query(RuntimeSetting).filter(RuntimeSetting.key == goal_key).first()
+        goal_rec = (
+            db.query(RuntimeSetting).filter(RuntimeSetting.key == goal_key).first()
+        )
         if goal_rec:
             try:
                 stored_goal = json.loads(goal_rec.value)
@@ -1101,12 +1519,24 @@ def get_goal_analysis(
         quantity = float(pos.quantity) if pos and pos.quantity else None
         if not quantity and spot_pos:
             quantity = spot_pos.get("quantity")
-        pos_value_eur = round(current_price * quantity, 4) if current_price and quantity else None
+        pos_value_eur = (
+            round(current_price * quantity, 4) if current_price and quantity else None
+        )
         if not pos_value_eur and spot_pos:
             pos_value_eur = spot_pos.get("value_eur")
-        cost_eur = round(entry_price * quantity, 4) if entry_price and quantity else None
-        pnl_eur = round(pos_value_eur - cost_eur, 4) if pos_value_eur is not None and cost_eur is not None else None
-        pnl_pct = round(pnl_eur / cost_eur * 100, 2) if pnl_eur is not None and cost_eur and cost_eur > 0 else None
+        cost_eur = (
+            round(entry_price * quantity, 4) if entry_price and quantity else None
+        )
+        pnl_eur = (
+            round(pos_value_eur - cost_eur, 4)
+            if pos_value_eur is not None and cost_eur is not None
+            else None
+        )
+        pnl_pct = (
+            round(pnl_eur / cost_eur * 100, 2)
+            if pnl_eur is not None and cost_eur and cost_eur > 0
+            else None
+        )
 
         # Domyślny cel +10% jeśli brak celu i jest pozycja
         if effective_target is None and pos_value_eur:
@@ -1123,7 +1553,9 @@ def get_goal_analysis(
             if quantity and quantity > 0:
                 target_price = effective_target / quantity
                 if current_price and current_price > 0:
-                    needed_move_pct = round((target_price - current_price) / current_price * 100, 2)
+                    needed_move_pct = round(
+                        (target_price - current_price) / current_price * 100, 2
+                    )
 
         # 7. Zmienność — ATR jako % ceny za godzinę
         atr_hourly_pct: Optional[float] = None
@@ -1207,9 +1639,13 @@ def get_goal_analysis(
             required_conditions.append(
                 f"Cena musi wzrosnąć do {round(target_price, 6)} EUR ({sign}{round(needed_move_pct, 2)}%)"
             )
-        required_conditions.append("Trend EMA20 > EMA50 powinien być utrzymany lub osiągnięty")
+        required_conditions.append(
+            "Trend EMA20 > EMA50 powinien być utrzymany lub osiągnięty"
+        )
         if rsi_sell:
-            required_conditions.append(f"RSI nie powinno przekroczyć {int(rsi_sell)} przed osiągnięciem celu")
+            required_conditions.append(
+                f"RSI nie powinno przekroczyć {int(rsi_sell)} przed osiągnięciem celu"
+            )
         if atr_daily_pct:
             min_daily_move = round(atr_daily_pct * 0.3, 2)
             required_conditions.append(
@@ -1219,17 +1655,25 @@ def get_goal_analysis(
         # 12. Blokery
         main_blockers: List[str] = []
         if trend == "SPADKOWY":
-            main_blockers.append("Trend 1h jest spadkowy — EMA20 < EMA50, rynek idzie w dół")
+            main_blockers.append(
+                "Trend 1h jest spadkowy — EMA20 < EMA50, rynek idzie w dół"
+            )
         if rsi is not None and rsi > rsi_sell:
-            main_blockers.append(f"RSI {round(rsi, 1)} przekroczył {int(rsi_sell)} — rynek wykupiony, ryzyko korekty")
+            main_blockers.append(
+                f"RSI {round(rsi, 1)} przekroczył {int(rsi_sell)} — rynek wykupiony, ryzyko korekty"
+            )
         if needed_move_pct and atr_daily_pct and needed_move_pct > atr_daily_pct * 14:
             main_blockers.append(
                 f"Potrzebny ruch +{round(needed_move_pct, 2)}% jest ponad 14-krotnym ATR dziennym ({round(atr_daily_pct, 2)}%) — cel bardzo odległy"
             )
         if pnl_pct is not None and pnl_pct < -5:
-            main_blockers.append(f"Pozycja {round(pnl_pct, 1)}% pod kreską — wymaga najpierw odrobienia strat")
+            main_blockers.append(
+                f"Pozycja {round(pnl_pct, 1)}% pod kreską — wymaga najpierw odrobienia strat"
+            )
         if not main_blockers:
-            main_blockers.append("Brak poważnych blokerów — warunki neutralne lub sprzyjające")
+            main_blockers.append(
+                "Brak poważnych blokerów — warunki neutralne lub sprzyjające"
+            )
 
         # 13. Alternatywne cele oparte na ATR
         safe_target = None
@@ -1245,17 +1689,23 @@ def get_goal_analysis(
             safe_target = {
                 "value": safe_val,
                 "reason": "Cel bezpieczny: +3 dni ruchu ATR (duże prawdopodobieństwo osiągnięcia)",
-                "reality_score": _score_for_alt_target(safe_val, quantity, current_price, atr_hourly_pct, trend),
+                "reality_score": _score_for_alt_target(
+                    safe_val, quantity, current_price, atr_hourly_pct, trend
+                ),
             }
             balanced_target = {
                 "value": bal_val,
                 "reason": "Cel wyważony: +7 dni ruchu ATR (dobry balans ryzyko/zysk)",
-                "reality_score": _score_for_alt_target(bal_val, quantity, current_price, atr_hourly_pct, trend),
+                "reality_score": _score_for_alt_target(
+                    bal_val, quantity, current_price, atr_hourly_pct, trend
+                ),
             }
             aggressive_target = {
                 "value": agg_val,
                 "reason": "Cel agresywny: +14 dni ruchu ATR (wymaga długoterminowej cierpliwości)",
-                "reality_score": _score_for_alt_target(agg_val, quantity, current_price, atr_hourly_pct, trend),
+                "reality_score": _score_for_alt_target(
+                    agg_val, quantity, current_price, atr_hourly_pct, trend
+                ),
             }
 
             # AI Exit: na podstawie stanu technicznego
@@ -1264,27 +1714,35 @@ def get_goal_analysis(
                 ai_exit_target = {
                     "value": ai_val,
                     "reason": "Wyjście AI: trend wzrostowy + RSI nie wykupione → optymalne okno 5-dniowe",
-                    "reality_score": _score_for_alt_target(ai_val, quantity, current_price, atr_hourly_pct, trend),
+                    "reality_score": _score_for_alt_target(
+                        ai_val, quantity, current_price, atr_hourly_pct, trend
+                    ),
                 }
             elif trend == "SPADKOWY" and pnl_pct is not None and pnl_pct > 0:
                 ai_val = round(pos_value_eur + atr_daily_eur * 1, 2)
                 ai_exit_target = {
                     "value": ai_val,
                     "reason": "Wyjście AI: trend spadkowy z małym zyskiem → szybkie zabezpieczenie",
-                    "reality_score": _score_for_alt_target(ai_val, quantity, current_price, atr_hourly_pct, trend),
+                    "reality_score": _score_for_alt_target(
+                        ai_val, quantity, current_price, atr_hourly_pct, trend
+                    ),
                 }
             elif pnl_pct is not None and pnl_pct < -3 and cost_eur:
                 ai_exit_target = {
                     "value": round(cost_eur, 2),
                     "reason": "Wyjście AI: odczekaj na break-even (zero strat) i zamknij pozycję",
-                    "reality_score": _score_for_alt_target(cost_eur, quantity, current_price, atr_hourly_pct, trend),
+                    "reality_score": _score_for_alt_target(
+                        cost_eur, quantity, current_price, atr_hourly_pct, trend
+                    ),
                 }
             else:
                 ai_val = round(pos_value_eur + atr_daily_eur * 3, 2)
                 ai_exit_target = {
                     "value": ai_val,
                     "reason": "Wyjście AI: neutralne warunki — ostrożny cel 3-dniowy",
-                    "reality_score": _score_for_alt_target(ai_val, quantity, current_price, atr_hourly_pct, trend),
+                    "reality_score": _score_for_alt_target(
+                        ai_val, quantity, current_price, atr_hourly_pct, trend
+                    ),
                 }
 
         # 14. Decyzja główna
@@ -1314,7 +1772,12 @@ def get_goal_analysis(
                     f"Cel {round(effective_target, 2)} EUR jest trudny do osiągnięcia. "
                     f"Rozważ zamknięcie pozycji i ograniczenie strat."
                 )
-            elif trend == "WZROSTOWY" and rsi is not None and rsi < rsi_sell and reality_score >= 40:
+            elif (
+                trend == "WZROSTOWY"
+                and rsi is not None
+                and rsi < rsi_sell
+                and reality_score >= 40
+            ):
                 goal_decision = "czekaj"
                 goal_decision_reason_pl = (
                     f"System pracuje w kierunku celu. Trend wzrostowy, RSI {round(rsi, 1)} nie osiągnęło "
@@ -1362,8 +1825,12 @@ def get_goal_analysis(
             "goal_reality_label": reality_label,
             "goal_reality_label_pl": reality_label_pl,
             "needed_move_pct": needed_move_pct,
-            "needed_move_eur": round(needed_move_eur, 4) if needed_move_eur is not None else None,
-            "distance_to_goal_eur": round(needed_move_eur, 4) if needed_move_eur is not None else None,
+            "needed_move_eur": (
+                round(needed_move_eur, 4) if needed_move_eur is not None else None
+            ),
+            "distance_to_goal_eur": (
+                round(needed_move_eur, 4) if needed_move_eur is not None else None
+            ),
             # Czas
             "days_needed": days_needed,
             "eta_label": eta_label,
@@ -1396,9 +1863,10 @@ def get_goal_analysis(
 # GOALS SUMMARY — skrócone podsumowanie wszystkich celów dla dashboardu
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 @router.get("/goals-summary")
 def get_goals_summary(
-    mode: str = Query("demo", description="demo lub live"),
+    mode: str = Query("live", description="demo lub live"),
     db: Session = Depends(get_db),
 ):
     """
@@ -1416,8 +1884,7 @@ def get_goals_summary(
                 "quantity": float(pos.quantity or 0),
             }
         if mode == "live":
-            spots = _get_live_spot_positions(db)
-            for s in spots:
+            for s in _get_live_spot_positions(db):
                 sym = s["symbol"]
                 if sym not in all_symbols_data:
                     all_symbols_data[sym] = {
@@ -1429,7 +1896,9 @@ def get_goals_summary(
 
         for sym, pos_data in all_symbols_data.items():
             goal_key = f"user_goal_{sym}"
-            goal_rec = db.query(RuntimeSetting).filter(RuntimeSetting.key == goal_key).first()
+            goal_rec = (
+                db.query(RuntimeSetting).filter(RuntimeSetting.key == goal_key).first()
+            )
             if not goal_rec:
                 continue
             try:
@@ -1443,22 +1912,32 @@ def get_goals_summary(
 
             current_price = pos_data["current_price"]
             quantity = pos_data["quantity"]
-            pos_value_eur = round(current_price * quantity, 4) if current_price and quantity else None
+            pos_value_eur = (
+                round(current_price * quantity, 4)
+                if current_price and quantity
+                else None
+            )
 
             ctx = get_live_context(db, sym, timeframe="1h", limit=200)
             if not ctx or not pos_value_eur:
-                result.append({
-                    "symbol": sym,
-                    "goal_value": target_eur,
-                    "goal_label": stored_goal.get("label", ""),
-                    "position_value_eur": pos_value_eur,
-                    "needed_move_eur": round(target_eur - pos_value_eur, 4) if pos_value_eur else None,
-                    "goal_reality_label_pl": "Brak danych",
-                    "goal_reality_score": 50,
-                    "goal_decision": "brak_danych",
-                    "eta_label": None,
-                    "trend": "BRAK DANYCH",
-                })
+                result.append(
+                    {
+                        "symbol": sym,
+                        "goal_value": target_eur,
+                        "goal_label": stored_goal.get("label", ""),
+                        "position_value_eur": pos_value_eur,
+                        "needed_move_eur": (
+                            round(target_eur - pos_value_eur, 4)
+                            if pos_value_eur
+                            else None
+                        ),
+                        "goal_reality_label_pl": "Brak danych",
+                        "goal_reality_score": 50,
+                        "goal_decision": "brak_danych",
+                        "eta_label": None,
+                        "trend": "BRAK DANYCH",
+                    }
+                )
                 continue
 
             # Oblicz osnovowe wskaźniki
@@ -1468,7 +1947,9 @@ def get_goals_summary(
             rsi = ctx.get("rsi")
             rsi_buy = float(ctx.get("rsi_buy") or 30.0)
             rsi_sell = float(ctx.get("rsi_sell") or 70.0)
-            atr_hourly_pct = (atr / current_price * 100) if atr and current_price > 0 else None
+            atr_hourly_pct = (
+                (atr / current_price * 100) if atr and current_price > 0 else None
+            )
 
             if ema_20 and ema_50:
                 trend = "WZROSTOWY" if ema_20 > ema_50 else "SPADKOWY"
@@ -1480,7 +1961,9 @@ def get_goals_summary(
             days_needed = None
             if quantity > 0 and current_price > 0:
                 target_price = target_eur / quantity
-                needed_move_pct = round((target_price - current_price) / current_price * 100, 2)
+                needed_move_pct = round(
+                    (target_price - current_price) / current_price * 100, 2
+                )
                 if atr_hourly_pct and atr_hourly_pct > 0 and needed_move_pct > 0:
                     hours = needed_move_pct / (atr_hourly_pct * 0.25)
                     days_needed = round(hours / 24, 1)
@@ -1542,22 +2025,24 @@ def get_goals_summary(
             elif trend == "WZROSTOWY" and reality_score >= 40:
                 goal_decision = "czekaj"
 
-            result.append({
-                "symbol": sym,
-                "goal_value": target_eur,
-                "goal_label": stored_goal.get("label", ""),
-                "position_value_eur": pos_value_eur,
-                "needed_move_eur": needed_move_eur,
-                "needed_move_pct": needed_move_pct,
-                "goal_reality_label": reality_label,
-                "goal_reality_label_pl": reality_label_pl,
-                "goal_reality_score": reality_score,
-                "goal_decision": goal_decision,
-                "eta_label": eta_label,
-                "trend": trend,
-                "rsi": round(rsi, 1) if rsi else None,
-                "days_needed": days_needed,
-            })
+            result.append(
+                {
+                    "symbol": sym,
+                    "goal_value": target_eur,
+                    "goal_label": stored_goal.get("label", ""),
+                    "position_value_eur": pos_value_eur,
+                    "needed_move_eur": needed_move_eur,
+                    "needed_move_pct": needed_move_pct,
+                    "goal_reality_label": reality_label,
+                    "goal_reality_label_pl": reality_label_pl,
+                    "goal_reality_score": reality_score,
+                    "goal_decision": goal_decision,
+                    "eta_label": eta_label,
+                    "trend": trend,
+                    "rsi": round(rsi, 1) if rsi else None,
+                    "days_needed": days_needed,
+                }
+            )
 
         return {
             "success": True,
@@ -1567,11 +2052,14 @@ def get_goals_summary(
         }
 
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Błąd podsumowania celów: {str(e)}")
+        raise HTTPException(
+            status_code=500, detail=f"Błąd podsumowania celów: {str(e)}"
+        )
 
 
 # GOAL EVALUATOR — ocena celu użytkownika (POST)
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 class GoalEvaluateRequest(BaseModel):
     mode: str = "demo"
@@ -1606,12 +2094,15 @@ def evaluate_goal(
             ctx = get_live_context(db, symbol, timeframe="1h", limit=200)
             current_price = ctx["close"] if ctx else None
 
-            pos = db.query(Position).filter(Position.symbol == symbol, Position.mode == mode).first()
+            pos = (
+                db.query(Position)
+                .filter(Position.symbol == symbol, Position.mode == mode)
+                .first()
+            )
             quantity = float(pos.quantity) if pos and pos.quantity else None
 
             if not quantity and mode == "live":
-                spots = _get_live_spot_positions(db)
-                for s in spots:
+                for s in _get_live_spot_positions(db):
                     if s["symbol"] == symbol:
                         quantity = s.get("quantity")
                         current_price = s.get("current_price") or current_price
@@ -1625,7 +2116,11 @@ def evaluate_goal(
             ema_20 = ctx.get("ema_20") if ctx else None
             ema_50 = ctx.get("ema_50") if ctx else None
             rsi = ctx.get("rsi") if ctx else None
-            atr_hourly_pct = (atr / current_price * 100) if atr and current_price and current_price > 0 else None
+            atr_hourly_pct = (
+                (atr / current_price * 100)
+                if atr and current_price and current_price > 0
+                else None
+            )
         else:
             # Portfolio-level evaluation
             current_price = None
@@ -1639,10 +2134,18 @@ def evaluate_goal(
             if actual_value is None:
                 if mode == "live":
                     from backend.routers.portfolio import _build_live_spot_portfolio
+
                     port = _build_live_spot_portfolio(db)
-                    actual_value = round(sum(s.get("value_eur", 0) for s in port.get("spot_positions", [])), 2)
+                    actual_value = round(
+                        sum(
+                            s.get("value_eur", 0)
+                            for s in port.get("spot_positions", [])
+                        ),
+                        2,
+                    )
                 else:
                     from backend.accounting import compute_demo_account_state
+
                     state = compute_demo_account_state(db)
                     actual_value = round(state.get("equity", 0), 2)
 
@@ -1654,7 +2157,11 @@ def evaluate_goal(
 
         # --- Obliczenia ---
         required_profit_eur = round(target_value - actual_value, 2)
-        required_move_pct = round((target_value - actual_value) / actual_value * 100, 2) if actual_value > 0 else None
+        required_move_pct = (
+            round((target_value - actual_value) / actual_value * 100, 2)
+            if actual_value > 0
+            else None
+        )
 
         # Trend
         if ema_20 and ema_50:
@@ -1710,11 +2217,17 @@ def evaluate_goal(
             if trend == "WZROSTOWY":
                 suggested_path.append("Trend wzrostowy sprzyja — trzymaj pozycję.")
             elif trend == "SPADKOWY":
-                suggested_path.append("Trend spadkowy — rozważ częściową redukcję lub poczekaj na odwrócenie.")
+                suggested_path.append(
+                    "Trend spadkowy — rozważ częściową redukcję lub poczekaj na odwrócenie."
+                )
             if rsi is not None and rsi > 70:
-                suggested_path.append("RSI wykupione — możliwa korekta przed dalszym wzrostem.")
+                suggested_path.append(
+                    "RSI wykupione — możliwa korekta przed dalszym wzrostem."
+                )
             if days_needed and days_needed > 14:
-                suggested_path.append(f"Szacowany czas ~{days_needed} dni — cel wymaga cierpliwości.")
+                suggested_path.append(
+                    f"Szacowany czas ~{days_needed} dni — cel wymaga cierpliwości."
+                )
             if horizon_days and days_needed and days_needed > horizon_days:
                 suggested_path.append(
                     f"Przy obecnej zmienności cel wymaga ~{days_needed} dni, a horyzont to {horizon_days} dni. "
@@ -1748,6 +2261,7 @@ def evaluate_goal(
 # DECISION HISTORY — historia decyzji bota per symbol
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 @router.get("/decisions/{symbol}")
 def get_decision_history(
     symbol: str,
@@ -1765,16 +2279,18 @@ def get_decision_history(
         )
         items = []
         for t in traces:
-            items.append({
-                "id": t.id,
-                "timestamp": t.timestamp.isoformat() if t.timestamp else None,
-                "action_type": t.action_type,
-                "reason_code": t.reason_code,
-                "mode": t.mode,
-                "strategy_name": t.strategy_name,
-                "signal_summary": t.signal_summary,
-                "timeframe": t.timeframe,
-            })
+            items.append(
+                {
+                    "id": t.id,
+                    "timestamp": t.timestamp.isoformat() if t.timestamp else None,
+                    "action_type": t.action_type,
+                    "reason_code": t.reason_code,
+                    "mode": t.mode,
+                    "strategy_name": t.strategy_name,
+                    "signal_summary": t.signal_summary,
+                    "timeframe": t.timeframe,
+                }
+            )
         return {"success": True, "symbol": symbol, "count": len(items), "data": items}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Błąd historii decyzji: {str(e)}")
@@ -1784,12 +2300,15 @@ def get_decision_history(
 # EVALUATE GOAL — ocena realności celu użytkownika
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 class GoalEvaluateRequest(BaseModel):
     mode: str = "demo"
-    target_type: str  # "position_value" | "portfolio_value" | "price_target" | "profit_pct"
+    target_type: (
+        str  # "position_value" | "portfolio_value" | "price_target" | "profit_pct"
+    )
     symbol: Optional[str] = None
-    current_value: Optional[float] = None   # EUR albo cena
-    target_value: Optional[float] = None    # wartość docelowa
+    current_value: Optional[float] = None  # EUR albo cena
+    target_value: Optional[float] = None  # wartość docelowa
     current_price: Optional[float] = None
     entry_price: Optional[float] = None
     quantity: Optional[float] = None
@@ -1850,9 +2369,16 @@ def evaluate_goal(
                 current_pos_value = current_p * qty
                 target_pos_value = target_v
                 if current_pos_value > 0:
-                    required_move_pct = round((target_pos_value - current_pos_value) / current_pos_value * 100, 2)
+                    required_move_pct = round(
+                        (target_pos_value - current_pos_value)
+                        / current_pos_value
+                        * 100,
+                        2,
+                    )
                 required_price = round(target_pos_value / qty, 8) if qty > 0 else None
-                required_profit_eur = round(target_pos_value - current_pos_value, 2) if qty > 0 else None
+                required_profit_eur = (
+                    round(target_pos_value - current_pos_value, 2) if qty > 0 else None
+                )
                 current_v = current_pos_value
 
         elif req.target_type == "portfolio_value":
@@ -1867,7 +2393,9 @@ def evaluate_goal(
                 required_move_pct = round((target_v - current_p) / current_p * 100, 2)
                 required_price = target_v
                 if qty > 0:
-                    required_profit_eur = round((target_v - (entry_p or current_p)) * qty, 2)
+                    required_profit_eur = round(
+                        (target_v - (entry_p or current_p)) * qty, 2
+                    )
 
         elif req.target_type == "profit_pct":
             # Cel: procent zysku. np. "+8%"
@@ -1898,10 +2426,10 @@ def evaluate_goal(
                 return "ponad tydzień"
 
         horizon_estimate = {
-            "1h": _estimate_horizon(0.5),   # wolny rynek
-            "4h": _estimate_horizon(1.0),   # normalny rynek
+            "1h": _estimate_horizon(0.5),  # wolny rynek
+            "4h": _estimate_horizon(1.0),  # normalny rynek
             "24h": _estimate_horizon(2.0),  # szybki rynek
-            "7d": _estimate_horizon(5.0),   # bardzo szybki rynek
+            "7d": _estimate_horizon(5.0),  # bardzo szybki rynek
         }
 
         # ─── Ocena realności ─────────────────────────────────────────────────
@@ -1945,13 +2473,17 @@ def evaluate_goal(
         }.get(req.target_type, req.target_type)
 
         if required_move_pct <= 0:
-            explanation_pl = f"Cel {target_type_pl} already osiągnięty lub nie wymaga ruchu rynku."
+            explanation_pl = (
+                f"Cel {target_type_pl} already osiągnięty lub nie wymaga ruchu rynku."
+            )
         else:
             trend_comment = ""
             if trend_support == "wzrostowy":
                 trend_comment = " Trend jest wzrostowy — sprzyja osiągnięciu celu."
             elif trend_support == "spadkowy":
-                trend_comment = " Uwaga: trend jest teraz spadkowy — to utrudnia osiągnięcie celu."
+                trend_comment = (
+                    " Uwaga: trend jest teraz spadkowy — to utrudnia osiągnięcie celu."
+                )
 
             realism_pl = {
                 "bardzo_realny": "Bardzo realny",
@@ -1969,7 +2501,9 @@ def evaluate_goal(
             if required_profit_eur is not None:
                 explanation_pl += f" Potrzebny zysk: {required_profit_eur:.2f} EUR."
             if rsi < 35:
-                explanation_pl += f" RSI = {rsi:.0f} — rynek wyprzedany, szansa na wzrost."
+                explanation_pl += (
+                    f" RSI = {rsi:.0f} — rynek wyprzedany, szansa na wzrost."
+                )
             elif rsi > 70:
                 explanation_pl += f" RSI = {rsi:.0f} — rynek wykupiony, ryzyko korekty."
 
@@ -1999,9 +2533,12 @@ def evaluate_goal(
 # SYNC — import pozycji z Binance do bazy bota
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 @router.post("/sync-from-binance")
 def sync_positions_from_binance(
-    mode: str = Query("live", description="Tryb: live (odczyt z Binance) lub demo (symulacja)"),
+    mode: str = Query(
+        "live", description="Tryb: live (odczyt z Binance) lub demo (symulacja)"
+    ),
     overwrite: bool = Query(False, description="Nadpisz istniejące pozycje jeśli true"),
     db: Session = Depends(get_db),
 ):
@@ -2018,6 +2555,7 @@ def sync_positions_from_binance(
         balances = binance.get_balances() or {}
 
         from backend.database import get_demo_quote_ccy
+
         quote_ccy = get_demo_quote_ccy()
 
         synced = []
@@ -2038,35 +2576,49 @@ def sync_positions_from_binance(
 
             ticker = binance.get_ticker_price(symbol)
             if not ticker or not ticker.get("price"):
-                errors.append({"symbol": symbol, "error": "Brak ceny rynkowej (para może nie istnieć)"})
+                errors.append(
+                    {
+                        "symbol": symbol,
+                        "error": "Brak ceny rynkowej (para może nie istnieć)",
+                    }
+                )
                 continue
             current_price = float(ticker["price"])
 
             # Pomiń pył (wartość < min_order_notional z config, domyślnie 25 EUR)
             from backend.runtime_settings import get_runtime_config
+
             _rt_cfg = get_runtime_config(db)
             _min_notional_sync = float(_rt_cfg.get("min_order_notional", 25.0))
             position_value = total_qty * current_price
             if position_value < _min_notional_sync:
-                skipped.append({
-                    "symbol": symbol,
-                    "reason": f"Pył — wartość {position_value:.4f} EUR < min {_min_notional_sync:.0f} EUR",
-                    "qty": round(total_qty, 8),
-                })
+                skipped.append(
+                    {
+                        "symbol": symbol,
+                        "reason": f"Pył — wartość {position_value:.4f} EUR < min {_min_notional_sync:.0f} EUR",
+                        "qty": round(total_qty, 8),
+                    }
+                )
                 continue
 
-            existing = db.query(Position).filter(
-                Position.symbol == symbol,
-                Position.mode == mode,
-            ).first()
+            existing = (
+                db.query(Position)
+                .filter(
+                    Position.symbol == symbol,
+                    Position.mode == mode,
+                )
+                .first()
+            )
 
             if existing and not overwrite:
-                skipped.append({
-                    "symbol": symbol,
-                    "reason": "Pozycja już istnieje (użyj overwrite=true żeby nadpisać)",
-                    "qty": float(existing.quantity),
-                    "entry_price": float(existing.entry_price),
-                })
+                skipped.append(
+                    {
+                        "symbol": symbol,
+                        "reason": "Pozycja już istnieje (użyj overwrite=true żeby nadpisać)",
+                        "qty": float(existing.quantity),
+                        "entry_price": float(existing.entry_price),
+                    }
+                )
                 continue
 
             baseline = _resolve_live_position_baseline(
@@ -2080,11 +2632,13 @@ def sync_positions_from_binance(
             entry_price = baseline.get("entry_price")
             opened_at = baseline.get("opened_at") or now
             if entry_price is None:
-                skipped.append({
-                    "symbol": symbol,
-                    "reason": "Brak historii transakcji do wyliczenia ceny wejścia",
-                    "qty": round(total_qty, 8),
-                })
+                skipped.append(
+                    {
+                        "symbol": symbol,
+                        "reason": "Brak historii transakcji do wyliczenia ceny wejścia",
+                        "qty": round(total_qty, 8),
+                    }
+                )
                 continue
 
             unrealized_pnl = (current_price - entry_price) * total_qty
@@ -2117,15 +2671,17 @@ def sync_positions_from_binance(
                 )
                 db.add(new_pos)
 
-            synced.append({
-                "symbol": symbol,
-                "qty": round(total_qty, 8),
-                "entry_price": round(entry_price, 6),
-                "current_price": round(current_price, 6),
-                "unrealized_pnl": round(unrealized_pnl, 4),
-                "opened_at": opened_at.isoformat(),
-                "overwritten": existing is not None and overwrite,
-            })
+            synced.append(
+                {
+                    "symbol": symbol,
+                    "qty": round(total_qty, 8),
+                    "entry_price": round(entry_price, 6),
+                    "current_price": round(current_price, 6),
+                    "unrealized_pnl": round(unrealized_pnl, 4),
+                    "opened_at": opened_at.isoformat(),
+                    "overwritten": existing is not None and overwrite,
+                }
+            )
 
         db.commit()
         return {
@@ -2141,4 +2697,6 @@ def sync_positions_from_binance(
         }
 
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Błąd synchronizacji Binance: {str(exc)}")
+        raise HTTPException(
+            status_code=500, detail=f"Błąd synchronizacji Binance: {str(exc)}"
+        )

@@ -6,18 +6,22 @@ DB overrides remain optional: if a key is not present in DB, the system falls ba
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from datetime import datetime, timezone
 import hashlib
 import json
 import os
+from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any, Callable, Dict, Iterable, Mapping, Optional
 
 from sqlalchemy.orm import Session
 
-from backend.database import RuntimeSetting, get_config_snapshot, save_config_snapshot, utc_now_naive
+from backend.database import (
+    RuntimeSetting,
+    get_config_snapshot,
+    save_config_snapshot,
+    utc_now_naive,
+)
 from backend.system_logger import log_to_db
-
 
 _TRUE = {"1", "true", "yes", "y", "on"}
 _FALSE = {"0", "false", "no", "n", "off"}
@@ -34,6 +38,7 @@ _LIVE_GUARD_KEYS = {
     "spread_buffer_bps",
     "min_edge_multiplier",
     "min_order_notional",
+    "min_buy_eur",
 }
 
 
@@ -108,16 +113,19 @@ def _parse_mode(raw: Any) -> str:
 def _parse_aggressiveness(raw: Any) -> str:
     value = str(raw or "balanced").strip().lower()
     if value not in {"safe", "balanced", "aggressive"}:
-        raise RuntimeSettingsError("trading_aggressiveness must be one of: safe, balanced, aggressive")
+        raise RuntimeSettingsError(
+            "trading_aggressiveness must be one of: safe, balanced, aggressive"
+        )
     return value
 
 
 # Profile agresywności — nadpisują domyślne progi w collectorze
+# UWAGA: demo_min_entry_score jest w skali 0–100 (nowy scoring wielokategoryjny)
 AGGRESSIVENESS_PROFILES = {
     "safe": {
         "max_open_positions": 2,
         "demo_min_signal_confidence": 0.70,
-        "demo_min_entry_score": 7.0,
+        "demo_min_entry_score": 70.0,
         "pending_order_cooldown_seconds": 900,
         "risk_per_trade": 0.005,
         "demo_allow_soft_buy_entries": False,
@@ -125,15 +133,15 @@ AGGRESSIVENESS_PROFILES = {
     "balanced": {
         "max_open_positions": 3,
         "demo_min_signal_confidence": 0.55,
-        "demo_min_entry_score": 5.5,
+        "demo_min_entry_score": 50.0,
         "pending_order_cooldown_seconds": 300,
         "risk_per_trade": 0.01,
         "demo_allow_soft_buy_entries": True,
     },
     "aggressive": {
         "max_open_positions": 5,
-        "demo_min_signal_confidence": 0.50,
-        "demo_min_entry_score": 4.5,
+        "demo_min_signal_confidence": 0.48,
+        "demo_min_entry_score": 45.0,
         "pending_order_cooldown_seconds": 300,
         "risk_per_trade": 0.02,
         "demo_allow_soft_buy_entries": True,
@@ -155,7 +163,14 @@ def parse_watchlist(raw: Any) -> list[str]:
         items = [s.strip() for s in str(raw or "").split(",") if s.strip()]
     wl: list[str] = []
     for item in items:
-        sym = (item or "").strip().replace(" ", "").replace("/", "").replace("-", "").upper()
+        sym = (
+            (item or "")
+            .strip()
+            .replace(" ", "")
+            .replace("/", "")
+            .replace("-", "")
+            .upper()
+        )
         if sym and sym not in wl:
             wl.append(sym)
     return wl
@@ -171,6 +186,21 @@ def _parse_str_list(raw: Any) -> list[str]:
     values: list[str] = []
     for item in items:
         normalized = item.strip().lower()
+        if normalized and normalized not in values:
+            values.append(normalized)
+    return values
+
+
+def _parse_upper_str_list(raw: Any) -> list[str]:
+    if raw is None:
+        return []
+    if isinstance(raw, (list, tuple, set)):
+        items = [str(s).strip() for s in raw if str(s).strip()]
+    else:
+        items = [s.strip() for s in str(raw or "").split(",") if s.strip()]
+    values: list[str] = []
+    for item in items:
+        normalized = item.strip().upper()
         if normalized and normalized not in values:
             values.append(normalized)
     return values
@@ -194,6 +224,10 @@ def _serialize_text(value: Any) -> str:
 
 def _serialize_str_list(value: Any) -> str:
     return ",".join(_parse_str_list(value))
+
+
+def _serialize_upper_str_list(value: Any) -> str:
+    return ",".join(_parse_upper_str_list(value))
 
 
 def _serialize_watchlist(value: Any) -> str:
@@ -467,6 +501,15 @@ _SETTINGS: Dict[str, SettingSpec] = {
         env_var="MIN_ORDER_NOTIONAL",
         validators=(_validate_positive("min_order_notional"),),
     ),
+    "min_buy_eur": SettingSpec(
+        key="min_buy_eur",
+        section="execution",
+        parser=_parse_positive_float,
+        serializer=_serialize_float,
+        default=60.0,
+        env_var="MIN_BUY_EUR",
+        validators=(_validate_positive("min_buy_eur"),),
+    ),
     # --- Trading core: ATR / TP-SL ---
     "atr_stop_mult": SettingSpec(
         key="atr_stop_mult",
@@ -609,7 +652,7 @@ _SETTINGS: Dict[str, SettingSpec] = {
         section="execution",
         parser=_parse_positive_float,
         serializer=_serialize_float,
-        default=5.5,
+        default=5.0,
         env_var="DEMO_MIN_ENTRY_SCORE",
         validators=(_validate_positive("demo_min_entry_score"),),
     ),
@@ -657,6 +700,89 @@ _SETTINGS: Dict[str, SettingSpec] = {
         default=True,
         env_var="AI_ENABLED",
     ),
+    "local_model_enabled": SettingSpec(
+        key="local_model_enabled",
+        section="ai",
+        parser=_parse_required_bool,
+        serializer=_serialize_bool,
+        default=True,
+        env_var="LOCAL_MODEL_ENABLED",
+    ),
+    "use_openai": SettingSpec(
+        key="use_openai",
+        section="ai",
+        parser=_parse_required_bool,
+        serializer=_serialize_bool,
+        default=False,
+        env_var="USE_OPENAI",
+    ),
+    "openai_enabled": SettingSpec(
+        key="openai_enabled",
+        section="ai",
+        parser=_parse_required_bool,
+        serializer=_serialize_bool,
+        default=False,
+        env_var="OPENAI_ENABLED",
+    ),
+    "use_groq": SettingSpec(
+        key="use_groq",
+        section="ai",
+        parser=_parse_required_bool,
+        serializer=_serialize_bool,
+        default=True,
+        env_var="USE_GROQ",
+    ),
+    "use_gemini": SettingSpec(
+        key="use_gemini",
+        section="ai",
+        parser=_parse_required_bool,
+        serializer=_serialize_bool,
+        default=True,
+        env_var="USE_GEMINI",
+    ),
+    "external_ai_daily_limit": SettingSpec(
+        key="external_ai_daily_limit",
+        section="ai",
+        parser=_parse_positive_int,
+        serializer=_serialize_int,
+        default=3,
+        env_var="EXTERNAL_AI_DAILY_LIMIT",
+        validators=(_validate_positive("external_ai_daily_limit"),),
+    ),
+    "ai_cache_ttl_seconds": SettingSpec(
+        key="ai_cache_ttl_seconds",
+        section="ai",
+        parser=_parse_positive_int,
+        serializer=_serialize_int,
+        default=21600,
+        env_var="AI_CACHE_TTL_SECONDS",
+        validators=(_validate_positive("ai_cache_ttl_seconds"),),
+    ),
+    "ai_symbol_cooldown_seconds": SettingSpec(
+        key="ai_symbol_cooldown_seconds",
+        section="ai",
+        parser=_parse_positive_int,
+        serializer=_serialize_int,
+        default=1800,
+        env_var="AI_SYMBOL_COOLDOWN_SECONDS",
+        validators=(_validate_positive("ai_symbol_cooldown_seconds"),),
+    ),
+    "enable_ai_batching": SettingSpec(
+        key="enable_ai_batching",
+        section="ai",
+        parser=_parse_required_bool,
+        serializer=_serialize_bool,
+        default=True,
+        env_var="ENABLE_AI_BATCHING",
+    ),
+    "enable_ai_cache": SettingSpec(
+        key="enable_ai_cache",
+        section="ai",
+        parser=_parse_required_bool,
+        serializer=_serialize_bool,
+        default=True,
+        env_var="ENABLE_AI_CACHE",
+    ),
     "market_data_timeout_seconds": SettingSpec(
         key="market_data_timeout_seconds",
         section="data",
@@ -678,11 +804,26 @@ _SETTINGS: Dict[str, SettingSpec] = {
     "symbol_tiers": SettingSpec(
         key="symbol_tiers",
         section="trading",
-        parser=lambda raw: json.loads(raw) if isinstance(raw, str) else (raw if isinstance(raw, dict) else {}),
-        serializer=lambda v: json.dumps(v, ensure_ascii=False) if isinstance(v, dict) else str(v or "{}"),
+        parser=lambda raw: (
+            json.loads(raw)
+            if isinstance(raw, str)
+            else (raw if isinstance(raw, dict) else {})
+        ),
+        serializer=lambda v: (
+            json.dumps(v, ensure_ascii=False) if isinstance(v, dict) else str(v or "{}")
+        ),
         default={
             "CORE": {
-                "symbols": ["BTCEUR", "BTCUSDC", "ETHEUR", "ETHUSDC", "SOLEUR", "SOLUSDC", "BNBEUR", "BNBUSDC"],
+                "symbols": [
+                    "BTCEUR",
+                    "BTCUSDC",
+                    "ETHEUR",
+                    "ETHUSDC",
+                    "SOLEUR",
+                    "SOLUSDC",
+                    "BNBEUR",
+                    "BNBUSDC",
+                ],
                 "min_confidence_add": 0.0,
                 "min_edge_multiplier_add": 0.0,
                 "risk_scale": 1.0,
@@ -705,6 +846,161 @@ _SETTINGS: Dict[str, SettingSpec] = {
         },
         env_var="SYMBOL_TIERS",
         clearable=True,
+    ),
+    # --- Quote Currency Mode ---
+    "quote_currency_mode": SettingSpec(
+        key="quote_currency_mode",
+        section="trading",
+        parser=lambda raw: str(raw or "USDC").strip().upper(),
+        serializer=_serialize_text,
+        default="USDC",
+        env_var="QUOTE_CURRENCY_MODE",
+    ),
+    "primary_quote": SettingSpec(
+        key="primary_quote",
+        section="trading",
+        parser=lambda raw: str(raw or "USDC").strip().upper(),
+        serializer=_serialize_text,
+        default="USDC",
+        env_var="PRIMARY_QUOTE",
+    ),
+    "allow_auto_convert_eur_to_usdc": SettingSpec(
+        key="allow_auto_convert_eur_to_usdc",
+        section="trading",
+        parser=_parse_required_bool,
+        serializer=_serialize_bool,
+        default=False,
+        env_var="ALLOW_AUTO_CONVERT_EUR_TO_USDC",
+    ),
+    "min_eur_reserve": SettingSpec(
+        key="min_eur_reserve",
+        section="trading",
+        parser=_parse_positive_float,
+        serializer=_serialize_float,
+        default=10.0,
+        env_var="MIN_EUR_RESERVE",
+        validators=(_validate_non_negative("min_eur_reserve"),),
+    ),
+    "min_usdc_reserve": SettingSpec(
+        key="min_usdc_reserve",
+        section="trading",
+        parser=_parse_positive_float,
+        serializer=_serialize_float,
+        default=10.0,
+        env_var="MIN_USDC_RESERVE",
+        validators=(_validate_non_negative("min_usdc_reserve"),),
+    ),
+    "min_conversion_notional": SettingSpec(
+        key="min_conversion_notional",
+        section="trading",
+        parser=_parse_positive_float,
+        serializer=_serialize_float,
+        default=20.0,
+        env_var="MIN_CONVERSION_NOTIONAL",
+        validators=(_validate_positive("min_conversion_notional"),),
+    ),
+    "conversion_cooldown_minutes": SettingSpec(
+        key="conversion_cooldown_minutes",
+        section="trading",
+        parser=_parse_positive_int,
+        serializer=_serialize_int,
+        default=60,
+        env_var="CONVERSION_COOLDOWN_MINUTES",
+        validators=(_validate_positive("conversion_cooldown_minutes"),),
+    ),
+    "target_usdc_buffer": SettingSpec(
+        key="target_usdc_buffer",
+        section="trading",
+        parser=_parse_positive_float,
+        serializer=_serialize_float,
+        default=50.0,
+        env_var="TARGET_USDC_BUFFER",
+        validators=(_validate_non_negative("target_usdc_buffer"),),
+    ),
+    "max_conversion_per_hour": SettingSpec(
+        key="max_conversion_per_hour",
+        section="trading",
+        parser=_parse_positive_int,
+        serializer=_serialize_int,
+        default=2,
+        env_var="MAX_CONVERSION_PER_HOUR",
+        validators=(_validate_positive("max_conversion_per_hour"),),
+    ),
+    "enable_dynamic_universe": SettingSpec(
+        key="enable_dynamic_universe",
+        section="trading",
+        parser=_parse_required_bool,
+        serializer=_serialize_bool,
+        default=True,
+        env_var="ENABLE_DYNAMIC_UNIVERSE",
+    ),
+    "allowed_quotes": SettingSpec(
+        key="allowed_quotes",
+        section="trading",
+        parser=_parse_upper_str_list,
+        serializer=_serialize_upper_str_list,
+        default=["USDC", "USDT", "EUR"],
+        env_var="ALLOWED_QUOTES",
+        clearable=True,
+    ),
+    "max_symbol_scan_per_cycle": SettingSpec(
+        key="max_symbol_scan_per_cycle",
+        section="trading",
+        parser=_parse_positive_int,
+        serializer=_serialize_int,
+        default=100,
+        env_var="MAX_SYMBOL_SCAN_PER_CYCLE",
+        validators=(_validate_positive("max_symbol_scan_per_cycle"),),
+    ),
+    "enable_auto_execute": SettingSpec(
+        key="enable_auto_execute",
+        section="execution",
+        parser=_parse_required_bool,
+        serializer=_serialize_bool,
+        default=True,
+        env_var="ENABLE_AUTO_EXECUTE",
+    ),
+    "require_manual_confirmation": SettingSpec(
+        key="require_manual_confirmation",
+        section="execution",
+        parser=_parse_required_bool,
+        serializer=_serialize_bool,
+        default=False,
+        env_var="REQUIRE_MANUAL_CONFIRMATION",
+    ),
+    "execution_enabled": SettingSpec(
+        key="execution_enabled",
+        section="execution",
+        parser=_parse_required_bool,
+        serializer=_serialize_bool,
+        default=True,
+        env_var="EXECUTION_ENABLED",
+    ),
+    "telegram_alert_dedup_seconds": SettingSpec(
+        key="telegram_alert_dedup_seconds",
+        section="logging",
+        parser=_parse_positive_int,
+        serializer=_serialize_int,
+        default=300,
+        env_var="TELEGRAM_ALERT_DEDUP_SECONDS",
+        validators=(_validate_positive("telegram_alert_dedup_seconds"),),
+    ),
+    "queue_backpressure_threshold": SettingSpec(
+        key="queue_backpressure_threshold",
+        section="execution",
+        parser=_parse_positive_int,
+        serializer=_serialize_int,
+        default=10,
+        env_var="QUEUE_BACKPRESSURE_THRESHOLD",
+        validators=(_validate_positive("queue_backpressure_threshold"),),
+    ),
+    "force_local_only_on_queue_pressure": SettingSpec(
+        key="force_local_only_on_queue_pressure",
+        section="execution",
+        parser=_parse_required_bool,
+        serializer=_serialize_bool,
+        default=True,
+        env_var="FORCE_LOCAL_ONLY_ON_QUEUE_PRESSURE",
     ),
 }
 
@@ -809,10 +1105,20 @@ def _cross_validate(config: Dict[str, Any]) -> None:
         "atr_take_mult must be > atr_stop_mult (otherwise R:R < 1)",
     )
     if config["trading_mode"] == "live":
-        _require(config["allow_live_trading"], "Live mode requires allow_live_trading=true")
-        _require(config["kill_switch_enabled"], "Live mode requires kill_switch_enabled=true")
-        _require(config["min_edge_multiplier"] >= 2.0, "Live mode requires min_edge_multiplier >= 2.0")
-        _require(config["max_open_positions"] <= 10, "Live mode max_open_positions must be <= 10")
+        _require(
+            config["allow_live_trading"], "Live mode requires allow_live_trading=true"
+        )
+        _require(
+            config["kill_switch_enabled"], "Live mode requires kill_switch_enabled=true"
+        )
+        _require(
+            config["min_edge_multiplier"] >= 2.0,
+            "Live mode requires min_edge_multiplier >= 2.0",
+        )
+        _require(
+            config["max_open_positions"] <= 10,
+            "Live mode max_open_positions must be <= 10",
+        )
 
 
 def _build_effective_flat_config(overrides: Mapping[str, str]) -> Dict[str, Any]:
@@ -966,10 +1272,22 @@ def build_runtime_state(
     overrides = _get_all_overrides(db)
     effective = _build_effective_flat_config(overrides)
     sections = _build_sections(effective)
-    watchlist_override_items = parse_watchlist(overrides["watchlist"]) if "watchlist" in overrides else None
-    effective_watchlist = watchlist_override_items if watchlist_override_items is not None else (collector_watchlist or effective["watchlist"])
-    watchlist_source = "override" if watchlist_override_items is not None else ("collector" if collector_watchlist else "env")
-    live_guard_issues = get_live_guard_issues(effective, active_position_count=active_position_count)
+    watchlist_override_items = (
+        parse_watchlist(overrides["watchlist"]) if "watchlist" in overrides else None
+    )
+    effective_watchlist = (
+        watchlist_override_items
+        if watchlist_override_items is not None
+        else (collector_watchlist or effective["watchlist"])
+    )
+    watchlist_source = (
+        "override"
+        if watchlist_override_items is not None
+        else ("collector" if collector_watchlist else "env")
+    )
+    live_guard_issues = get_live_guard_issues(
+        effective, active_position_count=active_position_count
+    )
     snapshot = ensure_runtime_snapshot(
         db,
         sections=sections,
@@ -981,11 +1299,23 @@ def build_runtime_state(
         "trading_mode": effective["trading_mode"],
         "allow_live_trading": effective["allow_live_trading"],
         "demo_trading_enabled": effective["demo_trading_enabled"],
+        "execution_enabled": effective["execution_enabled"],
+        "enable_auto_execute": effective["enable_auto_execute"],
+        "require_manual_confirmation": effective["require_manual_confirmation"],
         "ws_enabled": effective["ws_enabled"],
         "max_certainty_mode": effective["max_certainty_mode"],
+        "local_model_enabled": effective["local_model_enabled"],
+        "external_ai_daily_limit": effective["external_ai_daily_limit"],
+        "queue_backpressure_threshold": effective["queue_backpressure_threshold"],
+        "force_local_only_on_queue_pressure": effective[
+            "force_local_only_on_queue_pressure"
+        ],
         "watchlist": effective_watchlist,
         "watchlist_override": watchlist_override_items,
         "watchlist_source": watchlist_source,
+        "allowed_quotes": effective["allowed_quotes"],
+        "enable_dynamic_universe": effective["enable_dynamic_universe"],
+        "max_symbol_scan_per_cycle": effective["max_symbol_scan_per_cycle"],
         "enabled_strategies": effective["enabled_strategies"],
         "active_position_count": active_position_count,
         "config_sections": sections,
@@ -1004,15 +1334,22 @@ def get_runtime_config(db: Session) -> Dict[str, Any]:
     return _build_effective_flat_config(overrides)
 
 
-def get_live_guard_issues(config: Mapping[str, Any], active_position_count: int = 0) -> list[str]:
+def get_live_guard_issues(
+    config: Mapping[str, Any], active_position_count: int = 0
+) -> list[str]:
     issues: list[str] = []
     if config["trading_mode"] == "live":
-        if not os.getenv("BINANCE_API_KEY", "").strip() or not os.getenv("BINANCE_API_SECRET", "").strip():
+        if (
+            not os.getenv("BINANCE_API_KEY", "").strip()
+            or not os.getenv("BINANCE_API_SECRET", "").strip()
+        ):
             issues.append("Live mode requires BINANCE_API_KEY and BINANCE_API_SECRET")
         if not os.getenv("ADMIN_TOKEN", "").strip():
             issues.append("Live mode requires ADMIN_TOKEN to be configured")
         if active_position_count > 0 and not config["kill_switch_enabled"]:
-            issues.append("Open positions require kill_switch_enabled=true in live mode")
+            issues.append(
+                "Open positions require kill_switch_enabled=true in live mode"
+            )
     if config["allow_live_trading"] and config["trading_mode"] != "live":
         # Dual mode — demo + live mogą działać równolegle
         pass
@@ -1037,9 +1374,19 @@ def apply_runtime_updates(
     existing_overrides = _get_all_overrides(db)
     before = _build_effective_flat_config(existing_overrides)
     before_sections = _build_sections(before)
-    before_watchlist_override_items = parse_watchlist(existing_overrides["watchlist"]) if "watchlist" in existing_overrides else None
-    before_effective_watchlist = before_watchlist_override_items if before_watchlist_override_items is not None else before["watchlist"]
-    before_watchlist_source = "override" if before_watchlist_override_items is not None else "env"
+    before_watchlist_override_items = (
+        parse_watchlist(existing_overrides["watchlist"])
+        if "watchlist" in existing_overrides
+        else None
+    )
+    before_effective_watchlist = (
+        before_watchlist_override_items
+        if before_watchlist_override_items is not None
+        else before["watchlist"]
+    )
+    before_watchlist_source = (
+        "override" if before_watchlist_override_items is not None else "env"
+    )
     previous_snapshot = ensure_runtime_snapshot(
         db,
         sections=before_sections,
@@ -1055,7 +1402,9 @@ def apply_runtime_updates(
             candidate_overrides[key] = value
 
     after = _build_effective_flat_config(candidate_overrides)
-    changed_keys = [key for key in override_updates.keys() if before.get(key) != after.get(key)]
+    changed_keys = [
+        key for key in override_updates.keys() if before.get(key) != after.get(key)
+    ]
     if not changed_keys:
         state = build_runtime_state(db, active_position_count=active_position_count)
         return {
@@ -1065,21 +1414,33 @@ def apply_runtime_updates(
             "snapshot": state.get("config_snapshot"),
         }
 
-    if active_position_count > 0 and any(key in _LIVE_GUARD_KEYS for key in changed_keys):
+    if active_position_count > 0 and any(
+        key in _LIVE_GUARD_KEYS for key in changed_keys
+    ):
         raise RuntimeSettingsError(
             "Cannot change live-critical risk/cost/mode settings while positions are open",
             status_code=409,
         )
 
-    live_guard_issues = get_live_guard_issues(after, active_position_count=active_position_count)
+    live_guard_issues = get_live_guard_issues(
+        after, active_position_count=active_position_count
+    )
     if live_guard_issues and after["trading_mode"] == "live":
         raise RuntimeSettingsError("; ".join(live_guard_issues), status_code=409)
 
     upsert_overrides(db, override_updates)
 
     sections = _build_sections(after)
-    watchlist_override_items = parse_watchlist(candidate_overrides["watchlist"]) if "watchlist" in candidate_overrides else None
-    effective_watchlist = watchlist_override_items if watchlist_override_items is not None else after["watchlist"]
+    watchlist_override_items = (
+        parse_watchlist(candidate_overrides["watchlist"])
+        if "watchlist" in candidate_overrides
+        else None
+    )
+    effective_watchlist = (
+        watchlist_override_items
+        if watchlist_override_items is not None
+        else after["watchlist"]
+    )
     watchlist_source = "override" if watchlist_override_items is not None else "env"
     snapshot = ensure_runtime_snapshot(
         db,

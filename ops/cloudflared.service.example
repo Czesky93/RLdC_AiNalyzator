@@ -1,0 +1,20 @@
+[Unit]
+Description=Cloudflare Tunnel (RLdC)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=rldc
+Group=rldc
+ExecStart=/home/rldc/.local/bin/cloudflared --config /home/rldc/.cloudflared/config.yml tunnel run
+Restart=always
+RestartSec=5
+# hardening basics
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target

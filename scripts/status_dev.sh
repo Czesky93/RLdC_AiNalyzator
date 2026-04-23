@@ -3,7 +3,7 @@
 # status_dev.sh — sprawdza stan backendu i frontendu
 # ============================================================
 
-LAN_IP="192.168.0.109"
+LAN_IP=$(hostname -I | awk '{print $1}')
 
 echo "============================================"
 echo "  RLdC AiNalyzator — status środowiska"
@@ -31,8 +31,23 @@ else
 fi
 
 telegram_count=$(pgrep -fc "telegram_bot.bot" || true)
+service_active="false"
+service_pid=""
+if systemctl --user is-active --quiet rldc-telegram 2>/dev/null; then
+    service_active="true"
+    service_pid=$(systemctl --user show -p MainPID --value rldc-telegram 2>/dev/null || echo "")
+fi
+
+if [[ "$service_active" == "true" && -n "$service_pid" ]]; then
+    echo "  ℹ️  Źródło Telegram: systemd rldc-telegram.service (PID $service_pid)"
+fi
+
 if [[ "${telegram_count:-0}" -gt 1 ]]; then
-    echo "  ⚠️  Wykryto ${telegram_count} procesy Telegram bota (możliwy konflikt komend)"
+    if [[ "$service_active" == "true" && -n "$service_pid" ]]; then
+        echo "  ⚠️  Wykryto ${telegram_count} procesy Telegram bota (service + lokalny duplikat)"
+    else
+        echo "  ⚠️  Wykryto ${telegram_count} procesy Telegram bota (możliwy konflikt komend)"
+    fi
 fi
 
 # HTTP health-check

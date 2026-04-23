@@ -51,10 +51,24 @@ htmlcov/
 
 # Logs
 *.log
+logs/dev/*.pid
+logs/dev/*.log
+logs/
+
+# Next.js build output
+web_portal/.next/
+web_portal/out/
+
+# PID files
+*.pid
+
+# Nested repo copy (accidental)
+telegram_bot/RLdC_AiNalyzator/
 
 # Environment variables
 .env
 .env.local
+.env_backups/
 
 # Terraform
 *.tfstate

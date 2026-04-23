@@ -156,6 +156,10 @@ class Order(Base):
     config_snapshot_id = Column(String(64), index=True)
     entry_reason_code = Column(String(80))
     exit_reason_code = Column(String(80))
+    strategy_name = Column(String(80))
+    source = Column(String(40))
+    execution_mode = Column(String(20))
+    notes = Column(Text)
     timestamp = Column(DateTime, default=utc_now_naive, index=True)
 
 
@@ -351,6 +355,9 @@ class PendingOrder(Base):
     reason = Column(Text)
     config_snapshot_id = Column(String(64), index=True)
     strategy_name = Column(String(80))
+    source = Column(String(40))
+    pending_type = Column(String(40))
+    expires_at = Column(DateTime, index=True)
     created_at = Column(DateTime, default=utc_now_naive, index=True)
     confirmed_at = Column(DateTime)
 
@@ -765,6 +772,67 @@ class GoalAssessment(Base):
     created_at = Column(DateTime, default=utc_now_naive, index=True)
 
 
+class ReconciliationRun(Base):
+    """Przebieg reconcylacji DB ↔ Binance."""
+
+    __tablename__ = "reconciliation_runs"
+
+    id = Column(Integer, primary_key=True, index=True)
+    mode = Column(String(10), nullable=False, index=True)  # demo, live, both
+    trigger = Column(String(40), nullable=False, default="scheduled")
+    # startup | scheduled | post_fill | post_error | manual | telegram
+    status = Column(String(20), nullable=False, default="running", index=True)
+    # running | completed | failed
+    events_count = Column(Integer, default=0)
+    repairs_count = Column(Integer, default=0)
+    manual_trades_detected = Column(Integer, default=0)
+    error = Column(Text)
+    summary_json = Column(Text)
+    started_at = Column(DateTime, default=utc_now_naive, index=True)
+    finished_at = Column(DateTime)
+
+
+class ReconciliationEvent(Base):
+    """Pojedyncze zdarzenie naprawcze wykryte podczas reconcylacji."""
+
+    __tablename__ = "reconciliation_events"
+
+    id = Column(Integer, primary_key=True, index=True)
+    run_id = Column(Integer, nullable=False, index=True)
+    event_type = Column(String(60), nullable=False, index=True)
+    # missing_position | orphan_position | pending_filled | pending_cancelled
+    # qty_mismatch | avg_price_mismatch | balance_mismatch | manual_trade_detected
+    symbol = Column(String(20), index=True)
+    mode = Column(String(10))
+    before_json = Column(Text)  # stan przed naprawą
+    after_json = Column(Text)  # stan po naprawie
+    source_of_truth = Column(String(20), default="binance")
+    action_taken = Column(String(60))  # db_updated | db_created | db_closed | skipped
+    reason = Column(Text)
+    repaired = Column(Boolean, default=False, index=True)
+    created_at = Column(DateTime, default=utc_now_naive, index=True)
+
+
+class ManualTradeDetection(Base):
+    """Wykryta manualna transakcja wykonana bezpośrednio na Binance."""
+
+    __tablename__ = "manual_trade_detections"
+
+    id = Column(Integer, primary_key=True, index=True)
+    symbol = Column(String(20), nullable=False, index=True)
+    mode = Column(String(10), nullable=False, default="live")
+    side = Column(String(10))  # BUY | SELL
+    quantity = Column(Float)
+    price = Column(Float)
+    notional_eur = Column(Float)
+    binance_order_id = Column(String(50), index=True)
+    detection_source = Column(String(40), default="reconcile")
+    db_synced = Column(Boolean, default=False, index=True)
+    telegram_notified = Column(Boolean, default=False)
+    detected_at = Column(DateTime, default=utc_now_naive, index=True)
+    synced_at = Column(DateTime)
+
+
 # Database initialization
 def init_db():
     """Inicjalizacja bazy danych - tworzenie tabel"""
@@ -816,6 +884,10 @@ def _ensure_schema():
         _ensure_column(table_name, "config_snapshot_id", "VARCHAR(64)")
         _ensure_column(table_name, "entry_reason_code", "VARCHAR(80)")
         _ensure_column(table_name, "exit_reason_code", "VARCHAR(80)")
+    _ensure_column("orders", "strategy_name", "VARCHAR(80)")
+    _ensure_column("orders", "source", "VARCHAR(40)")
+    _ensure_column("orders", "execution_mode", "VARCHAR(20)")
+    _ensure_column("orders", "notes", "TEXT")
     # Exit quality tracking — pozycje
     for col, ddl in [
         ("planned_tp", "FLOAT"),
@@ -833,6 +905,9 @@ def _ensure_schema():
         _ensure_column("positions", col, ddl)
 
     _ensure_column("pending_orders", "config_snapshot_id", "VARCHAR(64)")
+    _ensure_column("pending_orders", "source", "VARCHAR(40)")
+    _ensure_column("pending_orders", "pending_type", "VARCHAR(40)")
+    _ensure_column("pending_orders", "expires_at", "DATETIME")
     _ensure_column(
         "config_rollbacks", "execution_status", "VARCHAR(20) DEFAULT 'pending'"
     )
@@ -856,6 +931,17 @@ def _ensure_schema():
     _ensure_column("telegram_messages", "parsed_payload_json", "TEXT")
     _ensure_column("telegram_messages", "linked_order_id", "INTEGER")
     _ensure_column("telegram_messages", "linked_position_id", "INTEGER")
+    # Reconciliation tables — dodatkowe kolumny jeśli tabela istnieje ale jest stara
+    _ensure_column("reconciliation_runs", "trigger", "VARCHAR(40) DEFAULT 'scheduled'")
+    _ensure_column("reconciliation_runs", "repairs_count", "INTEGER DEFAULT 0")
+    _ensure_column("reconciliation_runs", "manual_trades_detected", "INTEGER DEFAULT 0")
+    _ensure_column(
+        "reconciliation_events", "source_of_truth", "VARCHAR(20) DEFAULT 'binance'"
+    )
+    _ensure_column("reconciliation_events", "action_taken", "VARCHAR(60)")
+    _ensure_column(
+        "manual_trade_detections", "detection_source", "VARCHAR(40) DEFAULT 'reconcile'"
+    )
 
 
 def get_db():
@@ -903,6 +989,9 @@ def reset_database(scope: str = "full"):
         "user_expectations",
         "decision_audit",
         "goal_assessments",
+        "reconciliation_runs",
+        "reconciliation_events",
+        "manual_trade_detections",
     ]
     tables_demo = [
         "signals",

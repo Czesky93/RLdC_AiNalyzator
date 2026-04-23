@@ -2,6 +2,8 @@
 Portfolio API Router - endpoints dla portfolio
 """
 
+import threading
+import time
 from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional
 
@@ -22,6 +24,12 @@ from backend.database import (
 
 router = APIRouter()
 
+# ─── Cache TTL dla _build_live_spot_portfolio (30s) ──────────────────────────
+_portfolio_cache: Dict = {}
+_portfolio_cache_ts: float = 0.0
+_portfolio_cache_ttl: float = 120.0
+_portfolio_cache_lock = threading.Lock()
+
 
 def _build_live_spot_portfolio(db: Session) -> Dict:
     """
@@ -29,6 +37,12 @@ def _build_live_spot_portfolio(db: Session) -> Dict:
     Używa cen z MarketData (ostatni tick z DB) i fallback na Binance API.
     Zwraca słownik z: spot_positions, unpriced_assets, total_equity_eur, free_cash_eur, error
     """
+    global _portfolio_cache, _portfolio_cache_ts
+    now = time.monotonic()
+    with _portfolio_cache_lock:
+        if _portfolio_cache and (now - _portfolio_cache_ts) < _portfolio_cache_ttl:
+            return _portfolio_cache
+
     binance = get_binance_client()
     if not binance.api_key or not binance.api_secret:
         return {
@@ -50,6 +64,9 @@ def _build_live_spot_portfolio(db: Session) -> Dict:
         }
 
     # ─── Pobierz ceny EUR z DB (najnowszy tick dla każdego symbolu kończącego się na EUR)
+    # Ceny starsze niż 30 min uznajemy za nieaktualne — wymagają odświeżenia z Binance API
+    _PRICE_STALE_SECONDS = 1800  # 30 min
+    _now_utc = utc_now_naive()
     latest_ts_subq = (
         db.query(MarketData.symbol, func.max(MarketData.timestamp).label("ts"))
         .filter(MarketData.symbol.like("%EUR"))
@@ -65,13 +82,16 @@ def _build_live_spot_portfolio(db: Session) -> Dict:
         )
         .all()
     )
-    eur_prices: Dict[str, float] = {}  # asset -> cena w EUR
+    eur_prices: Dict[str, float] = {}  # asset -> cena w EUR (tylko świeże)
     for md in md_eur_rows:
         asset = md.symbol[:-3]  # BTCEUR -> BTC
         if md.price and md.price > 0:
-            eur_prices[asset] = float(md.price)
+            age_s = (_now_utc - md.timestamp).total_seconds() if md.timestamp else 9999
+            if age_s < _PRICE_STALE_SECONDS:
+                eur_prices[asset] = float(md.price)
+            # Stale (> 30 min) → pomijamy, fallback do Binance API poniżej
 
-    # ─── Kurs USDT/EUR z DB lub Binance
+    # ─── Kurs USDT/EUR z DB lub Binance (z testem świeżości)
     eur_per_usdt: Optional[float] = None
     eurusdt_md = (
         db.query(MarketData)
@@ -79,7 +99,13 @@ def _build_live_spot_portfolio(db: Session) -> Dict:
         .order_by(MarketData.timestamp.desc())
         .first()
     )
-    if eurusdt_md and (eurusdt_md.price or 0) > 0:
+    _eurusdt_fresh = (
+        eurusdt_md
+        and (eurusdt_md.price or 0) > 0
+        and eurusdt_md.timestamp
+        and (_now_utc - eurusdt_md.timestamp).total_seconds() < _PRICE_STALE_SECONDS
+    )
+    if _eurusdt_fresh:
         eur_per_usdt = round(1.0 / float(eurusdt_md.price), 6)
     else:
         try:
@@ -89,7 +115,7 @@ def _build_live_spot_portfolio(db: Session) -> Dict:
         except Exception:
             eur_per_usdt = None
 
-    # ─── Fallback: pobierz brakujące ceny z Binance API (tylko 1 request per asset)
+    # ─── Fallback: pobierz brakujące/przeterminowane ceny z Binance API (1 request per asset)
     stable_stable = {"EUR", "BUSD"}
     stable_usdt = {"USDT", "USDC"}
     for b in balances:
@@ -113,12 +139,24 @@ def _build_live_spot_portfolio(db: Session) -> Dict:
                     continue
             except Exception:
                 pass
+    # Oznacz jako binance_live te, które nie były w DB (lub były stale)
+    _db_symbols = {md.symbol[:-3] for md in md_eur_rows if md.price and md.price > 0}
+    _stale_db_symbols = {
+        md.symbol[:-3]
+        for md in md_eur_rows
+        if md.price
+        and md.price > 0
+        and md.timestamp
+        and (_now_utc - md.timestamp).total_seconds() >= _PRICE_STALE_SECONDS
+    }
 
     # ─── Zbuduj listę pozycji
     spot_positions: List[Dict] = []
     unpriced_assets: List[Dict] = []
     total_equity_eur = 0.0
     free_cash_eur = 0.0
+    free_eur_native = 0.0  # tylko EUR (natywne)
+    free_usdc_native = 0.0  # tylko USDC (natywne, bez przeliczenia)
 
     for b in balances:
         asset = b["asset"]
@@ -136,7 +174,15 @@ def _build_live_spot_portfolio(db: Session) -> Dict:
             price_source = "usdt_conv"
         else:
             price_eur = eur_prices.get(asset)
-            price_source = "market_data" if asset in eur_prices else None
+            if asset in _stale_db_symbols and asset not in eur_prices:
+                price_source = "binance_live"  # zastąpiło stale DB
+            elif asset in eur_prices:
+                # jeśli było w DB ale stale → odświeżono z Binance
+                price_source = (
+                    "binance_live" if asset in _stale_db_symbols else "market_data"
+                )
+            else:
+                price_source = None
 
         if price_eur and price_eur > 0:
             value_eur = round(total_qty * price_eur, 4)
@@ -144,6 +190,11 @@ def _build_live_spot_portfolio(db: Session) -> Dict:
             total_equity_eur += value_eur
             if asset in stable_stable or asset in stable_usdt:
                 free_cash_eur += free_value_eur
+            # Śledź natywne salda EUR i USDC osobno
+            if asset == "EUR":
+                free_eur_native = round(free_qty, 4)
+            elif asset == "USDC":
+                free_usdc_native = round(free_qty, 4)
             spot_positions.append(
                 {
                     "asset": asset,
@@ -167,29 +218,39 @@ def _build_live_spot_portfolio(db: Session) -> Dict:
             (p["value_eur"] / total_equity_eur * 100) if total_equity_eur > 0 else 0, 1
         )
 
-    return {
+    result = {
         "error": None,
         "spot_positions": spot_positions,
         "unpriced_assets": unpriced_assets,
         "total_equity_eur": round(total_equity_eur, 2),
         "free_cash_eur": round(free_cash_eur, 2),
+        "free_eur": round(free_eur_native, 4),
+        "free_usdc": round(free_usdc_native, 4),
         "assets_count": len(spot_positions),
         "unpriced_count": len(unpriced_assets),
         "eur_per_usdt": eur_per_usdt,
-        "data_age_seconds": None,  # można dodać póżniej
+        "data_age_seconds": None,
     }
+    with _portfolio_cache_lock:
+        _portfolio_cache = result
+        _portfolio_cache_ts = time.monotonic()
+    return result
 
 
 @router.get("")
 def get_portfolio(
-    mode: str = Query("demo", description="Tryb: demo lub live"),
+    mode: str = Query("live", description="Tryb: demo lub live"),
     db: Session = Depends(get_db),
 ):
     """
     Pobierz portfolio (otwarte pozycje)
     """
     try:
-        positions = db.query(Position).filter(Position.mode == mode).all()
+        positions = (
+            db.query(Position)
+            .filter(Position.mode == mode, Position.exit_reason_code.is_(None))
+            .all()
+        )
 
         # Jeśli brak pozycji w demo, zwracamy pusty wynik
 
@@ -263,14 +324,18 @@ def get_portfolio(
 
 @router.get("/summary")
 def get_portfolio_summary(
-    mode: str = Query("demo", description="Tryb: demo lub live"),
+    mode: str = Query("live", description="Tryb: demo lub live"),
     db: Session = Depends(get_db),
 ):
     """
     Podsumowanie portfolio
     """
     try:
-        positions = db.query(Position).filter(Position.mode == mode).all()
+        positions = (
+            db.query(Position)
+            .filter(Position.mode == mode, Position.exit_reason_code.is_(None))
+            .all()
+        )
         summary = summarize_positions(positions, db=db, label=f"{mode}_portfolio")
         total_positions = int(summary.get("positions") or 0)
         winning = sum(1 for pos in positions if float(pos.unrealized_pnl or 0.0) > 0.0)
@@ -306,7 +371,7 @@ def get_portfolio_summary(
 
 @router.get("/wealth")
 def get_portfolio_wealth(
-    mode: str = Query("demo", description="Tryb: demo lub live"),
+    mode: str = Query("live", description="Tryb: demo lub live"),
     db: Session = Depends(get_db),
 ):
     """
@@ -314,7 +379,11 @@ def get_portfolio_wealth(
     Obsługuje zarówno tryb demo jak i live (z graceful fallback).
     """
     try:
-        positions = db.query(Position).filter(Position.mode == mode).all()
+        positions = (
+            db.query(Position)
+            .filter(Position.mode == mode, Position.exit_reason_code.is_(None))
+            .all()
+        )
 
         total_positions_value = 0.0
         items = []
@@ -353,18 +422,34 @@ def get_portfolio_wealth(
                 1,
             )
 
-        # Historia equity (ostatnie 48h, max 60 punktów) — do wykresu portfela
+        # Historia equity (ostatnie 48h, równomierne próbkowanie → do wykresu portfela)
         cutoff = utc_now_naive() - timedelta(hours=48)
-        snapshots = (
+        _all_snaps = (
             db.query(AccountSnapshot)
             .filter(AccountSnapshot.mode == mode, AccountSnapshot.timestamp >= cutoff)
             .order_by(AccountSnapshot.timestamp)
-            .limit(60)
             .all()
         )
+        # Równomierne próbkowanie max 60 punktów rozłożonych na PEŁNE 48h
+        # (bez limitu 60 przed próbkowaniem — bo z 894 punktów limit=60 daje tylko pierwsze 1.5h)
+        _MAX_CHART_POINTS = 60
+        if len(_all_snaps) <= _MAX_CHART_POINTS:
+            _sampled = _all_snaps
+        else:
+            # Wygeneruj _MAX_CHART_POINTS równomiernie rozłożonych indeksów (zawsze zawiera ostatni)
+            _n = len(_all_snaps)
+            _indices = sorted(
+                set(
+                    [
+                        int(round(i * (_n - 1) / (_MAX_CHART_POINTS - 1)))
+                        for i in range(_MAX_CHART_POINTS)
+                    ]
+                )
+            )
+            _sampled = [_all_snaps[i] for i in _indices]
         equity_history = [
             {"t": s.timestamp.strftime("%d.%m %H:%M"), "equity": round(s.equity, 2)}
-            for s in snapshots
+            for s in _sampled
         ]
 
         free_cash = 0.0
@@ -483,13 +568,33 @@ def get_portfolio_wealth(
 
         total_pnl = round(sum(i.get("pnl_eur", 0) for i in items), 2)
 
+        _DUST_THRESHOLD_EUR = 0.50
+        _CASH_ASSETS = {"EUR", "USDT", "USDC", "BUSD", "DAI", "USDP", "TUSD"}
+
+        def _is_dust_item(it: dict) -> bool:
+            return float(it.get("value_eur") or 0) < _DUST_THRESHOLD_EUR
+
+        def _is_cash_item(it: dict) -> bool:
+            return (
+                str(it.get("asset") or it.get("symbol") or "").upper() in _CASH_ASSETS
+            )
+
+        active_items = [
+            i for i in items if not _is_dust_item(i) and not _is_cash_item(i)
+        ]
+        dust_items = [i for i in items if _is_dust_item(i) and not _is_cash_item(i)]
+        cash_items = [i for i in items if _is_cash_item(i)]
+
         response: Dict = {
             "success": True,
             "mode": mode,
             "total_equity": round(total_equity, 2),
             "free_cash": round(free_cash, 2),
             "positions_value": round(total_positions_value, 2),
-            "positions_count": len(items),
+            "positions_count": len(active_items),
+            "dust_positions_count": len(dust_items),
+            "cash_assets_count": len(cash_items),
+            "all_assets_count": len(items),
             "total_pnl": total_pnl,
             "unrealized_pnl": total_pnl,  # alias dla kompatybilności
             "equity_change": equity_change,
@@ -558,7 +663,7 @@ def get_live_sync(db: Session = Depends(get_db)):
 
 @router.get("/forecast")
 def get_portfolio_forecast(
-    mode: str = Query("demo", description="Tryb: demo lub live"),
+    mode: str = Query("live", description="Tryb: demo lub live"),
     db: Session = Depends(get_db),
 ):
     """
@@ -567,7 +672,11 @@ def get_portfolio_forecast(
     7d = ekstrapolacja z prognozy 24h (szacunkowa).
     """
     try:
-        positions = db.query(Position).filter(Position.mode == mode).all()
+        positions = (
+            db.query(Position)
+            .filter(Position.mode == mode, Position.exit_reason_code.is_(None))
+            .all()
+        )
         if not positions:
             return {
                 "success": True,

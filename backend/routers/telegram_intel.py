@@ -29,7 +29,7 @@ router = APIRouter()
 
 @router.get("/state")
 async def get_intelligence_state(
-    mode: str = Query("demo", enum=["demo", "live"]),
+    mode: str = Query("live", enum=["live", "demo"]),
     db=Depends(get_db),
 ):
     """

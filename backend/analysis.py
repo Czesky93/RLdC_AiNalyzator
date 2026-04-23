@@ -1,20 +1,21 @@
 """
 Moduł analizy technicznej i generacji bloga.
 """
+
 from __future__ import annotations
 
-from typing import List, Dict, Optional
-from datetime import datetime, timedelta, timezone
 import json
 import os
-import requests
 import re
+from datetime import datetime, timedelta, timezone
+from typing import Dict, List, Optional
 
 import pandas as pd
 import pandas_ta as ta
+import requests
 
-from backend.database import Kline, Signal, BlogPost, utc_now_naive
-from backend.system_logger import log_to_db, log_exception
+from backend.database import BlogPost, Kline, Signal, utc_now_naive
+from backend.system_logger import log_exception, log_to_db
 
 _last_openai_error_ts: Optional[datetime] = None
 _last_gemini_error_ts: Optional[datetime] = None
@@ -24,8 +25,8 @@ _last_ollama_error_ts: Optional[datetime] = None
 # Cache dla zewnętrznych źródeł danych (bez klucza API)
 _fear_greed_cache: dict = {"value": None, "ts": None}
 _coingecko_cache: dict = {"data": None, "ts": None}
-_FEAR_GREED_TTL = 300   # 5 min
-_COINGECKO_TTL = 600    # 10 min
+_FEAR_GREED_TTL = 300  # 5 min
+_COINGECKO_TTL = 600  # 10 min
 
 
 def _fetch_fear_greed_index() -> Optional[int]:
@@ -37,7 +38,11 @@ def _fetch_fear_greed_index() -> Optional[int]:
     global _fear_greed_cache
     now = datetime.now(timezone.utc)
     ts = _fear_greed_cache.get("ts")
-    if ts and (now - ts).total_seconds() < _FEAR_GREED_TTL and _fear_greed_cache["value"] is not None:
+    if (
+        ts
+        and (now - ts).total_seconds() < _FEAR_GREED_TTL
+        and _fear_greed_cache["value"] is not None
+    ):
         return _fear_greed_cache["value"]
     try:
         resp = requests.get("https://api.alternative.me/fng/?limit=1", timeout=4)
@@ -60,7 +65,11 @@ def _fetch_coingecko_global() -> Optional[dict]:
     global _coingecko_cache
     now = datetime.now(timezone.utc)
     ts = _coingecko_cache.get("ts")
-    if ts and (now - ts).total_seconds() < _COINGECKO_TTL and _coingecko_cache["data"] is not None:
+    if (
+        ts
+        and (now - ts).total_seconds() < _COINGECKO_TTL
+        and _coingecko_cache["data"] is not None
+    ):
         return _coingecko_cache["data"]
     try:
         resp = requests.get("https://api.coingecko.com/api/v3/global", timeout=4)
@@ -68,7 +77,9 @@ def _fetch_coingecko_global() -> Optional[dict]:
             raw = resp.json().get("data", {})
             result = {
                 "btc_dominance": raw.get("btc_dominance"),
-                "market_cap_change_24h": raw.get("market_cap_change_percentage_24h_usd"),
+                "market_cap_change_24h": raw.get(
+                    "market_cap_change_percentage_24h_usd"
+                ),
                 "total_market_cap_usd": (raw.get("total_market_cap") or {}).get("usd"),
             }
             _coingecko_cache = {"data": result, "ts": now}
@@ -81,7 +92,9 @@ def _fetch_coingecko_global() -> Optional[dict]:
 def _get_openai_api_key() -> str:
     key = (os.getenv("OPENAI_API_KEY", "") or "").strip()
     # Support keys accidentally wrapped in quotes in `.env`.
-    if (key.startswith('"') and key.endswith('"')) or (key.startswith("'") and key.endswith("'")):
+    if (key.startswith('"') and key.endswith('"')) or (
+        key.startswith("'") and key.endswith("'")
+    ):
         key = key[1:-1].strip()
     return key
 
@@ -142,7 +155,9 @@ def _compute_indicators(df: pd.DataFrame) -> Dict[str, float]:
     try:
         stoch = ta.stoch(df["high"], df["low"], df["close"], k=14, d=3)
         if stoch is not None and not stoch.empty:
-            k_col = next((c for c in stoch.columns if "STOCHk" in c or c.startswith("K_")), None)
+            k_col = next(
+                (c for c in stoch.columns if "STOCHk" in c or c.startswith("K_")), None
+            )
             if k_col:
                 df["stoch_k"] = stoch[k_col]
     except Exception:
@@ -188,10 +203,9 @@ def _compute_indicators(df: pd.DataFrame) -> Dict[str, float]:
     if "volume" in df.columns and len(df) >= 24:
         try:
             typical = (df["high"] + df["low"] + df["close"]) / 3
-            df["vwap_24"] = (
-                (typical * df["volume"]).rolling(24).sum()
-                / df["volume"].rolling(24).sum()
-            )
+            df["vwap_24"] = (typical * df["volume"]).rolling(24).sum() / df[
+                "volume"
+            ].rolling(24).sum()
         except Exception:
             pass
 
@@ -258,9 +272,19 @@ def _compute_indicators(df: pd.DataFrame) -> Dict[str, float]:
             curr_bullish = float(curr["close"]) > float(curr["open"])
             prev_bullish = float(prev["close"]) > float(prev["open"])
             curr_bearish = float(curr["close"]) < float(curr["open"])
-            if prev_bearish and curr_bullish and curr_body_lo < prev_body_lo and curr_body_hi > prev_body_hi:
-                df.loc[df.index[-1], "engulfing"] = 1.0   # bycze
-            elif prev_bullish and curr_bearish and curr_body_lo < prev_body_lo and curr_body_hi > prev_body_hi:
+            if (
+                prev_bearish
+                and curr_bullish
+                and curr_body_lo < prev_body_lo
+                and curr_body_hi > prev_body_hi
+            ):
+                df.loc[df.index[-1], "engulfing"] = 1.0  # bycze
+            elif (
+                prev_bullish
+                and curr_bearish
+                and curr_body_lo < prev_body_lo
+                and curr_body_hi > prev_body_hi
+            ):
                 df.loc[df.index[-1], "engulfing"] = -1.0  # niedźwiedzie
             else:
                 df.loc[df.index[-1], "engulfing"] = 0.0
@@ -282,8 +306,12 @@ def _compute_indicators(df: pd.DataFrame) -> Dict[str, float]:
     # SQZ_ON=1: niska zmienność (konsolidacja), SQZ_OFF=1: po wyjściu ze squeeze
     try:
         sq = ta.squeeze(
-            df["high"], df["low"], df["close"],
-            bb_length=20, kc_length=20, asint=True,
+            df["high"],
+            df["low"],
+            df["close"],
+            bb_length=20,
+            kc_length=20,
+            asint=True,
         )
         if sq is not None and not sq.empty:
             if "SQZ_ON" in sq.columns:
@@ -291,8 +319,15 @@ def _compute_indicators(df: pd.DataFrame) -> Dict[str, float]:
             if "SQZ_OFF" in sq.columns:
                 df["squeeze_off"] = sq["SQZ_OFF"]
             # Histogram momentum Squeeze (kierunek wybicia)
-            hist_col = next((c for c in sq.columns if sq[c].dtype in ['float64','float32']
-                             and c not in ('SQZ_ON','SQZ_OFF','SQZ_NO')), None)
+            hist_col = next(
+                (
+                    c
+                    for c in sq.columns
+                    if sq[c].dtype in ["float64", "float32"]
+                    and c not in ("SQZ_ON", "SQZ_OFF", "SQZ_NO")
+                ),
+                None,
+            )
             if hist_col:
                 df["squeeze_hist"] = sq[hist_col]
     except Exception:
@@ -329,12 +364,35 @@ def _compute_indicators(df: pd.DataFrame) -> Dict[str, float]:
 
     last = df.iloc[-1]
     for key in [
-        "ema_20", "ema_50", "rsi_14", "atr_14", "macd", "macd_hist",
-        "bb_upper", "bb_lower", "adx", "stoch_k", "volume_ratio",
-        "price_change_1h", "price_change_24h",
-        "doji_signal", "inside_bar", "vwap_24", "donchian_lower", "donchian_upper",
-        "mfi_14", "obv_trend", "fib_382", "fib_618", "fib_236", "engulfing",
-        "supertrend_dir", "squeeze_on", "squeeze_off", "squeeze_hist", "rsi_divergence",
+        "ema_20",
+        "ema_50",
+        "rsi_14",
+        "atr_14",
+        "macd",
+        "macd_hist",
+        "bb_upper",
+        "bb_lower",
+        "adx",
+        "stoch_k",
+        "volume_ratio",
+        "price_change_1h",
+        "price_change_24h",
+        "doji_signal",
+        "inside_bar",
+        "vwap_24",
+        "donchian_lower",
+        "donchian_upper",
+        "mfi_14",
+        "obv_trend",
+        "fib_382",
+        "fib_618",
+        "fib_236",
+        "engulfing",
+        "supertrend_dir",
+        "squeeze_on",
+        "squeeze_off",
+        "squeeze_hist",
+        "rsi_divergence",
     ]:
         if key in df.columns and pd.notna(last.get(key)):
             indicators[key] = float(last[key])
@@ -362,17 +420,21 @@ def _insight_from_indicators(indicators: Dict[str, float]) -> Dict[str, str]:
     stoch_k = indicators.get("stoch_k")
     volume_ratio = indicators.get("volume_ratio")
     pct_1h = indicators.get("price_change_1h")
-    doji_signal = indicators.get("doji_signal")    # != 0 → doji pattern
-    inside_bar = indicators.get("inside_bar")      # 100 → inside bar (konsolidacja)
-    vwap_24 = indicators.get("vwap_24")            # rolling VWAP 24-period
-    mfi_14 = indicators.get("mfi_14")              # Money Flow Index (volume-weighted RSI)
-    obv_trend = indicators.get("obv_trend")        # +1 akumulacja, -1 dystrybucja
-    engulfing = indicators.get("engulfing")        # +1 bycze, -1 niedźwiedzie
+    doji_signal = indicators.get("doji_signal")  # != 0 → doji pattern
+    inside_bar = indicators.get("inside_bar")  # 100 → inside bar (konsolidacja)
+    vwap_24 = indicators.get("vwap_24")  # rolling VWAP 24-period
+    mfi_14 = indicators.get("mfi_14")  # Money Flow Index (volume-weighted RSI)
+    obv_trend = indicators.get("obv_trend")  # +1 akumulacja, -1 dystrybucja
+    engulfing = indicators.get("engulfing")  # +1 bycze, -1 niedźwiedzie
     supertrend_dir = indicators.get("supertrend_dir")  # +1 bycze, -1 niedźwiedzie
-    squeeze_on = indicators.get("squeeze_on")      # 1 = squeeze aktywny (niska zmienność)
-    squeeze_off = indicators.get("squeeze_off")    # 1 = właśnie wyszedł ze squeeze
-    squeeze_hist = indicators.get("squeeze_hist")  # momentum kierunek po wyjściu ze squeeze
-    rsi_divergence = indicators.get("rsi_divergence")  # +1 bycza, -1 niedźwiedzia dywergencja
+    squeeze_on = indicators.get("squeeze_on")  # 1 = squeeze aktywny (niska zmienność)
+    squeeze_off = indicators.get("squeeze_off")  # 1 = właśnie wyszedł ze squeeze
+    squeeze_hist = indicators.get(
+        "squeeze_hist"
+    )  # momentum kierunek po wyjściu ze squeeze
+    rsi_divergence = indicators.get(
+        "rsi_divergence"
+    )  # +1 bycza, -1 niedźwiedzia dywergencja
 
     reasons = []
     score = 0  # >0 = BUY, <0 = SELL
@@ -414,7 +476,9 @@ def _insight_from_indicators(indicators: Dict[str, float]) -> Dict[str, str]:
             score -= 1
             reasons.append(f"MACD histogram={macd_hist:.4f} — momentum spadkowe")
         elif macd_hist > 0:
-            reasons.append(f"MACD hist rosnący ({macd_hist:.4f}), ale MACD ujemny — wczesny sygnał")
+            reasons.append(
+                f"MACD hist rosnący ({macd_hist:.4f}), ale MACD ujemny — wczesny sygnał"
+            )
         else:
             reasons.append(f"MACD hist malejący ({macd_hist:.4f})")
 
@@ -491,10 +555,14 @@ def _insight_from_indicators(indicators: Dict[str, float]) -> Dict[str, str]:
         vwap_diff_pct = (close - vwap_24) / vwap_24 * 100
         if close > vwap_24 * 1.005:
             score += 1
-            reasons.append(f"Cena +{vwap_diff_pct:.1f}% powyżej VWAP(24) — kupujący dominują")
+            reasons.append(
+                f"Cena +{vwap_diff_pct:.1f}% powyżej VWAP(24) — kupujący dominują"
+            )
         elif close < vwap_24 * 0.995:
             score -= 1
-            reasons.append(f"Cena {vwap_diff_pct:.1f}% poniżej VWAP(24) — sprzedający dominują")
+            reasons.append(
+                f"Cena {vwap_diff_pct:.1f}% poniżej VWAP(24) — sprzedający dominują"
+            )
         else:
             reasons.append(f"Cena ≈VWAP(24) ({vwap_diff_pct:+.1f}%) — równowaga")
 
@@ -551,10 +619,14 @@ def _insight_from_indicators(indicators: Dict[str, float]) -> Dict[str, str]:
     if supertrend_dir is not None:
         if supertrend_dir > 0:
             score += 2
-            reasons.append("Supertrend ↑ — trend wzrostowy (silny ATR-based sygnał BUY)")
+            reasons.append(
+                "Supertrend ↑ — trend wzrostowy (silny ATR-based sygnał BUY)"
+            )
         else:
             score -= 2
-            reasons.append("Supertrend ↓ — trend spadkowy (silny ATR-based sygnał SELL)")
+            reasons.append(
+                "Supertrend ↓ — trend spadkowy (silny ATR-based sygnał SELL)"
+            )
 
     # ---- Squeeze Momentum — wybicie ze squeeze (waga: 1) ----
     if squeeze_off is not None and squeeze_off == 1 and squeeze_hist is not None:
@@ -577,7 +649,9 @@ def _insight_from_indicators(indicators: Dict[str, float]) -> Dict[str, str]:
             reasons.append("Bycza dywergencja RSI — cena niższy dół, RSI wyższy dół")
         else:
             score -= 2
-            reasons.append("Niedźwiedzia dywergencja RSI — cena wyższy szczyt, RSI niższy szczyt")
+            reasons.append(
+                "Niedźwiedzia dywergencja RSI — cena wyższy szczyt, RSI niższy szczyt"
+            )
 
     # ---- Wyznacz sygnał i pewność ----
     if score >= 3:
@@ -613,10 +687,12 @@ def _insight_from_indicators(indicators: Dict[str, float]) -> Dict[str, str]:
     }
 
 
-def get_live_context(db, symbol: str, timeframe: str = "1h", limit: int = 200) -> Optional[Dict[str, float]]:
+def get_live_context(
+    db, symbol: str, timeframe: str = "1h", limit: int = 200
+) -> Optional[Dict[str, float]]:
     """
-    Dynamiczny kontekst rynkowy na podstawie live danych:
-    EMA20/EMA50, RSI, ATR, progi RSI (percentyle).
+    Dynamiczny kontekst rynkowy na podstawie live danych.
+    Zwraca: EMA20/21/50/200, RSI14, ATR14, MACD hist, volume_ratio, progi RSI.
     """
     klines = (
         db.query(Kline)
@@ -631,9 +707,38 @@ def get_live_context(db, symbol: str, timeframe: str = "1h", limit: int = 200) -
 
     df = df.copy()
     df["ema_20"] = ta.ema(df["close"], length=20)
+    df["ema_21"] = ta.ema(df["close"], length=21)
     df["ema_50"] = ta.ema(df["close"], length=50)
     df["rsi_14"] = ta.rsi(df["close"], length=14)
     df["atr_14"] = ta.atr(df["high"], df["low"], df["close"], length=14)
+
+    # EMA200 tylko gdy wystarczająco danych
+    if len(df) >= 200:
+        df["ema_200"] = ta.ema(df["close"], length=200)
+    else:
+        df["ema_200"] = None
+
+    # MACD histogram
+    try:
+        macd_df = ta.macd(df["close"], fast=12, slow=26, signal=9)
+        if macd_df is not None and "MACDh_12_26_9" in macd_df.columns:
+            df["macd_hist"] = macd_df["MACDh_12_26_9"]
+        else:
+            df["macd_hist"] = None
+    except Exception:
+        df["macd_hist"] = None
+
+    # Volume ratio: bieżący wolumen / SMA20 wolumenu
+    vol_ratio: Optional[float] = None
+    if "volume" in df.columns:
+        try:
+            vol_sma = df["volume"].rolling(20).mean()
+            last_vol = df["volume"].iloc[-1]
+            last_sma = vol_sma.iloc[-1]
+            if pd.notna(last_vol) and pd.notna(last_sma) and last_sma > 0:
+                vol_ratio = float(last_vol / last_sma)
+        except Exception:
+            pass
 
     rsi_series = df["rsi_14"].dropna()
     if rsi_series.empty:
@@ -643,18 +748,96 @@ def get_live_context(db, symbol: str, timeframe: str = "1h", limit: int = 200) -
     rsi_sell = float(rsi_series.quantile(0.8))
 
     last = df.iloc[-1]
+
+    def _f(col: str) -> Optional[float]:
+        v = (
+            last.get(col)
+            if hasattr(last, "get")
+            else last[col] if col in df.columns else None
+        )
+        if v is None:
+            return None
+        try:
+            fv = float(v)
+            return fv if pd.notna(fv) else None
+        except Exception:
+            return None
+
     return {
-        "ema_20": float(last["ema_20"]) if pd.notna(last["ema_20"]) else None,
-        "ema_50": float(last["ema_50"]) if pd.notna(last["ema_50"]) else None,
-        "rsi": float(last["rsi_14"]) if pd.notna(last["rsi_14"]) else None,
-        "atr": float(last["atr_14"]) if pd.notna(last["atr_14"]) else None,
+        "ema_20": _f("ema_20"),
+        "ema_21": _f("ema_21"),
+        "ema_50": _f("ema_50"),
+        "ema_200": _f("ema_200"),
+        "rsi": _f("rsi_14"),
+        "atr": _f("atr_14"),
+        "macd_hist": _f("macd_hist"),
+        "volume_ratio": vol_ratio,
         "rsi_buy": rsi_buy,
         "rsi_sell": rsi_sell,
         "close": float(last["close"]),
     }
 
 
-def _compute_quantum_weights(db, symbols: List[str], timeframe: str = "1h", limit: int = 200) -> Dict[str, Dict[str, float]]:
+def get_regime_indicators(db, symbol: str) -> Optional[Dict]:
+    """
+    Zbiera wskaźniki z 15m i 1h do wykrywania reżimu rynkowego.
+    Zwraca słownik gotowy do przekazania do risk.detect_regime().
+    Graceful fallback: jeśli brak 15m, używa 1h dla obu zestawów.
+    """
+    ctx_15m = get_live_context(db, symbol, timeframe="15m", limit=300)
+    ctx_1h = get_live_context(db, symbol, timeframe="1h", limit=300)
+
+    if not ctx_1h and not ctx_15m:
+        return None
+
+    c15 = ctx_15m or {}
+    c1h = ctx_1h or {}
+
+    price = c1h.get("close") or c15.get("close")
+    if not price:
+        return None
+
+    # 15m indicators — fallback na 1h gdy brak danych 15m
+    ema21_15m = (
+        c15.get("ema_21") or c15.get("ema_20") or c1h.get("ema_21") or c1h.get("ema_20")
+    )
+    ema50_15m = c15.get("ema_50") or c1h.get("ema_50")
+    rsi_15m = c15.get("rsi") or c1h.get("rsi")
+    macd_hist_15m = c15.get("macd_hist") or c1h.get("macd_hist")
+    volume_ratio_15m = c15.get("volume_ratio") or c1h.get("volume_ratio")
+
+    # 1h indicators
+    ema21_1h = c1h.get("ema_21") or c1h.get("ema_20")
+    ema50_1h = c1h.get("ema_50")
+    ema200_1h = c1h.get("ema_200") or ema50_1h  # fallback na EMA50 gdy brak danych
+    atr_1h = c1h.get("atr") or c15.get("atr")
+
+    return {
+        "price": float(price),
+        "ema21_15m": float(ema21_15m) if ema21_15m is not None else None,
+        "ema50_15m": float(ema50_15m) if ema50_15m is not None else None,
+        "ema21_1h": float(ema21_1h) if ema21_1h is not None else None,
+        "ema50_1h": float(ema50_1h) if ema50_1h is not None else None,
+        "ema200_1h": float(ema200_1h) if ema200_1h is not None else None,
+        "rsi_15m": float(rsi_15m) if rsi_15m is not None else None,
+        "macd_hist_15m": float(macd_hist_15m) if macd_hist_15m is not None else None,
+        "volume_ratio_15m": (
+            float(volume_ratio_15m) if volume_ratio_15m is not None else None
+        ),
+        "atr_1h": float(atr_1h) if atr_1h is not None else None,
+        # Proxies dla wait-status i scoring
+        "rsi_1h": c1h.get("rsi"),
+        "ema_20_1h": c1h.get("ema_20"),
+        "ema_50_1h": ema50_1h,
+        "rsi_buy_1h": c1h.get("rsi_buy"),
+        "rsi_sell_1h": c1h.get("rsi_sell"),
+        "close": float(price),
+    }
+
+
+def _compute_quantum_weights(
+    db, symbols: List[str], timeframe: str = "1h", limit: int = 200
+) -> Dict[str, Dict[str, float]]:
     """
     Prosta analiza 'kwantowa' (proxy): risk-parity/volatility weights na podstawie zwrotów.
     """
@@ -729,7 +912,9 @@ def _get_htf_bias(db, symbol: str, htf: str = "4h", limit: int = 60) -> float:
         return 0.0
 
 
-def generate_market_insights(db, symbols: List[str], timeframe: str = "1h", limit: int = 200) -> List[Dict]:
+def generate_market_insights(
+    db, symbols: List[str], timeframe: str = "1h", limit: int = 200
+) -> List[Dict]:
     """Generuje listę insightów na bazie danych z DB."""
     insights: List[Dict] = []
     quantum = _compute_quantum_weights(db, symbols, timeframe=timeframe, limit=limit)
@@ -811,7 +996,9 @@ def generate_market_insights(db, symbols: List[str], timeframe: str = "1h", limi
             if btc_dom is not None:
                 dom = float(btc_dom)
                 # Wysoka dominacja BTC → altcoiny pod presją
-                sym_norm = (symbol or "").strip().upper().replace("/", "").replace("-", "")
+                sym_norm = (
+                    (symbol or "").strip().upper().replace("/", "").replace("-", "")
+                )
                 is_btc = sym_norm.startswith("BTC")
                 if dom > 60 and not is_btc:
                     insight["confidence"] = max(0.50, insight["confidence"] - 0.02)
@@ -835,6 +1022,15 @@ def generate_market_insights(db, symbols: List[str], timeframe: str = "1h", limi
         if online_notes:
             insight["reason"] = insight["reason"] + " | " + " ".join(online_notes)
 
+        close_series = [
+            float(v) for v in df["close"].tail(30).tolist() if v is not None
+        ]
+        trend_label = (
+            "UP"
+            if indicators.get("ema_20", 0) >= indicators.get("ema_50", 0)
+            else "DOWN"
+        )
+
         insights.append(
             {
                 "symbol": symbol,
@@ -842,6 +1038,8 @@ def generate_market_insights(db, symbols: List[str], timeframe: str = "1h", limi
                 "signal_type": insight["signal"],
                 "confidence": insight["confidence"],
                 "price": indicators.get("close"),
+                "candles": close_series,
+                "trend": trend_label,
                 "indicators": indicators,
                 "reason": insight["reason"],
                 "quantum": quantum.get(symbol),
@@ -884,13 +1082,19 @@ def _apply_action_logic(insight: Dict, r: Dict) -> Dict:
     - jeśli cena w BUY range -> KUP TERAZ
     - w przeciwnym razie CZEKAJ i pokazuj cel (buy_high / sell_low)
     """
+
     def _to_float(v):
         try:
             return float(v)
         except Exception:
             return None
 
-    price = _to_float(insight.get("price") or insight.get("indicators", {}).get("close") or 0) or 0.0
+    price = (
+        _to_float(
+            insight.get("price") or insight.get("indicators", {}).get("close") or 0
+        )
+        or 0.0
+    )
     buy_low = _to_float(r.get("buy_low"))
     buy_high = _to_float(r.get("buy_high"))
     sell_low = _to_float(r.get("sell_low"))
@@ -926,18 +1130,20 @@ def _fallback_ranges(insights: List[Dict]) -> List[Dict]:
         sell_action = "SPRZEDAJ TERAZ" if sell_low <= price <= sell_high else "CZEKAJ"
         buy_target = round(buy_high, 6)
         sell_target = round(sell_low, 6)
-        ranges.append({
-            "symbol": ins.get("symbol"),
-            "buy_low": round(buy_low, 6),
-            "buy_high": round(buy_high, 6),
-            "sell_low": round(sell_low, 6),
-            "sell_high": round(sell_high, 6),
-            "buy_action": buy_action,
-            "buy_target": buy_target,
-            "sell_action": sell_action,
-            "sell_target": sell_target,
-            "comment": "Zakresy wyliczone automatycznie na bazie ceny"
-        })
+        ranges.append(
+            {
+                "symbol": ins.get("symbol"),
+                "buy_low": round(buy_low, 6),
+                "buy_high": round(buy_high, 6),
+                "sell_low": round(sell_low, 6),
+                "sell_high": round(sell_high, 6),
+                "buy_action": buy_action,
+                "buy_target": buy_target,
+                "sell_action": sell_action,
+                "sell_target": sell_target,
+                "comment": "Zakresy wyliczone automatycznie na bazie ceny",
+            }
+        )
     return ranges
 
 
@@ -971,7 +1177,7 @@ def _heuristic_ranges(insights: List[Dict]) -> List[Dict]:
         donchian_upper = _to_float(ind.get("donchian_upper"))
         signal = ins.get("signal_type", "HOLD")
 
-        trend_up = (ema_20 is not None and ema_50 is not None and ema_20 > ema_50)
+        trend_up = ema_20 is not None and ema_50 is not None and ema_20 > ema_50
         strong_trend = adx is not None and adx > 25
 
         # ADX-aware mnożniki ATR:
@@ -1069,7 +1275,9 @@ def _heuristic_ranges(insights: List[Dict]) -> List[Dict]:
         vwap_24 = _to_float(ind.get("vwap_24"))
         parts = ["AI Techniczny"]
         if adx is not None:
-            parts.append(f"ADX={adx:.0f}({'silny' if strong_trend else 'boczny' if adx < 20 else 'umiar.'})")
+            parts.append(
+                f"ADX={adx:.0f}({'silny' if strong_trend else 'boczny' if adx < 20 else 'umiar.'})"
+            )
         if rsi is not None:
             parts.append(f"RSI={rsi:.0f}")
         if stoch_k is not None:
@@ -1077,7 +1285,11 @@ def _heuristic_ranges(insights: List[Dict]) -> List[Dict]:
         if volume_ratio is not None:
             parts.append(f"Vol={volume_ratio:.1f}x")
         if vwap_24 is not None and price > 0:
-            vwap_bias = "↑" if price > vwap_24 * 1.002 else "↓" if price < vwap_24 * 0.998 else "≈"
+            vwap_bias = (
+                "↑"
+                if price > vwap_24 * 1.002
+                else "↓" if price < vwap_24 * 0.998 else "≈"
+            )
             parts.append(f"VWAP{vwap_bias}")
         if donchian_lower is not None and donchian_upper is not None:
             dc_range = donchian_upper - donchian_lower
@@ -1171,7 +1383,9 @@ def _parse_ranges_response(text: str, provider: str) -> List[Dict]:
     """Parsuje JSON z odpowiedzi LLM, zwraca listę zakresów."""
     extracted = _extract_json_from_text(text)
     if not extracted:
-        log_to_db("ERROR", "analysis", f"{provider}: brak JSON do parsowania w odpowiedzi")
+        log_to_db(
+            "ERROR", "analysis", f"{provider}: brak JSON do parsowania w odpowiedzi"
+        )
         return []
     try:
         ranges = json.loads(extracted)
@@ -1182,9 +1396,108 @@ def _parse_ranges_response(text: str, provider: str) -> List[Dict]:
     return []
 
 
+def _build_ai_input_payload(insights: List[Dict]) -> List[Dict]:
+    """Buduje jawny payload dla AI z kluczowymi polami rynkowymi."""
+    payload: List[Dict] = []
+    for ins in insights or []:
+        indicators = ins.get("indicators") or {}
+        candles = ins.get("candles") or []
+        payload.append(
+            {
+                "symbol": ins.get("symbol"),
+                "timeframe": ins.get("timeframe"),
+                "signal_type": ins.get("signal_type"),
+                "confidence": ins.get("confidence"),
+                "price": ins.get("price"),
+                "candles": candles,
+                "rsi": indicators.get("rsi_14"),
+                "ema20": indicators.get("ema_20"),
+                "ema50": indicators.get("ema_50"),
+                "volume": indicators.get("volume"),
+                "volume_ratio": indicators.get("volume_ratio"),
+                "trend": ins.get("trend"),
+                "reason": ins.get("reason"),
+            }
+        )
+    return payload
+
+
+# ---------------------------------------------------------------------------
+# Provider: Local Ollama (local-first — zero cost, max privacy)
+# ---------------------------------------------------------------------------
+
+
+def _ollama_ranges(insights: List[Dict], force: bool = False) -> List[Dict]:
+    """Generuj zakresy buy/sell za pomocą lokalnego Ollama (local-first)."""
+    from backend.ai_orchestrator import _ollama_base_url, _ollama_model  # lazy import
+
+    base_url = _ollama_base_url()
+    model = _ollama_model()
+    timeout_s = float(
+        os.getenv("OLLAMA_TIMEOUT_SECONDS")
+        or os.getenv("AI_LOCAL_TIMEOUT_SECONDS")
+        or os.getenv("AI_PROVIDER_TIMEOUT_SECONDS", "90")
+        or "90"
+    )
+    backoff_seconds = int(os.getenv("AI_BACKOFF_SECONDS", "120"))
+
+    global _last_ollama_error_ts
+    if (
+        (not force)
+        and _last_ollama_error_ts
+        and (utc_now_naive() - _last_ollama_error_ts).total_seconds() < backoff_seconds
+    ):
+        return []
+
+    ai_payload = _build_ai_input_payload(insights)
+    try:
+        resp = requests.post(
+            f"{base_url}/api/chat",
+            json={
+                "model": model,
+                "messages": [
+                    {"role": "system", "content": _RANGES_SYSTEM_PROMPT},
+                    {
+                        "role": "user",
+                        "content": "Dane:\n"
+                        + json.dumps(ai_payload, ensure_ascii=False),
+                    },
+                ],
+                "stream": False,
+                "keep_alive": "10m",
+                "options": {"num_predict": 4096, "temperature": 0.2},
+            },
+            timeout=timeout_s,
+        )
+        if resp.status_code >= 400:
+            _last_ollama_error_ts = utc_now_naive()
+            log_to_db(
+                "ERROR",
+                "analysis",
+                f"Ollama HTTP {resp.status_code}: {resp.text[:200]}",
+            )
+            return []
+        data = resp.json()
+        text = (data.get("message") or {}).get("content") or ""
+        if not text:
+            _last_ollama_error_ts = utc_now_naive()
+            log_to_db("ERROR", "analysis", "Ollama: pusta odpowiedź")
+            return []
+        result = _parse_ranges_response(text, "Ollama")
+        if result:
+            for r in result:
+                r["comment"] = r.get("comment", "") + " [Ollama-local]"
+        return result
+    except Exception as exc:
+        _last_ollama_error_ts = utc_now_naive()
+        log_exception("analysis", "Błąd zapytania Ollama", exc)
+        return []
+
+
 # ---------------------------------------------------------------------------
 # Provider: Google Gemini (darmowy tier)
 # ---------------------------------------------------------------------------
+
 
 def _gemini_ranges(insights: List[Dict], force: bool = False) -> List[Dict]:
     """Generuj zakresy buy/sell za pomocą Google Gemini (darmowy tier)."""
@@ -1195,11 +1508,20 @@ def _gemini_ranges(insights: List[Dict], force: bool = False) -> List[Dict]:
     model = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
     backoff_seconds = int(os.getenv("AI_BACKOFF_SECONDS", "600"))
     global _last_gemini_error_ts
-    if (not force) and _last_gemini_error_ts and (utc_now_naive() - _last_gemini_error_ts).total_seconds() < backoff_seconds:
+    if (
+        (not force)
+        and _last_gemini_error_ts
+        and (utc_now_naive() - _last_gemini_error_ts).total_seconds() < backoff_seconds
+    ):
         return []
 
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
-    user_text = _RANGES_SYSTEM_PROMPT + "\n\nDane:\n" + json.dumps(insights, ensure_ascii=False)
+    ai_payload = _build_ai_input_payload(insights)
+    user_text = (
+        _RANGES_SYSTEM_PROMPT
+        + "\n\nDane:\n"
+        + json.dumps(ai_payload, ensure_ascii=False)
+    )
     payload = {
         "contents": [{"parts": [{"text": user_text}]}],
         "generationConfig": {
@@ -1212,7 +1534,11 @@ def _gemini_ranges(insights: List[Dict], force: bool = False) -> List[Dict]:
         resp = requests.post(url, json=payload, timeout=30)
         if resp.status_code >= 400:
             _last_gemini_error_ts = utc_now_naive()
-            log_to_db("ERROR", "analysis", f"Gemini HTTP {resp.status_code}: {_sanitize_api_keys(resp.text or '')[:220]}")
+            log_to_db(
+                "ERROR",
+                "analysis",
+                f"Gemini HTTP {resp.status_code}: {_sanitize_api_keys(resp.text or '')[:220]}",
+            )
             return []
         data = resp.json()
         candidates = data.get("candidates", [])
@@ -1239,6 +1565,7 @@ def _gemini_ranges(insights: List[Dict], force: bool = False) -> List[Dict]:
 # Provider: Groq (darmowy tier — Llama / Mixtral)
 # ---------------------------------------------------------------------------
 
+
 def _groq_ranges(insights: List[Dict], force: bool = False) -> List[Dict]:
     """Generuj zakresy buy/sell za pomocą Groq (darmowy tier, szybkie LLM)."""
     api_key = (os.getenv("GROQ_API_KEY", "") or "").strip()
@@ -1248,15 +1575,23 @@ def _groq_ranges(insights: List[Dict], force: bool = False) -> List[Dict]:
     model = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
     backoff_seconds = int(os.getenv("AI_BACKOFF_SECONDS", "600"))
     global _last_groq_error_ts
-    if (not force) and _last_groq_error_ts and (utc_now_naive() - _last_groq_error_ts).total_seconds() < backoff_seconds:
+    if (
+        (not force)
+        and _last_groq_error_ts
+        and (utc_now_naive() - _last_groq_error_ts).total_seconds() < backoff_seconds
+    ):
         return []
 
+    ai_payload = _build_ai_input_payload(insights)
     url = "https://api.groq.com/openai/v1/chat/completions"
     payload = {
         "model": model,
         "messages": [
             {"role": "system", "content": _RANGES_SYSTEM_PROMPT},
-            {"role": "user", "content": "Dane:\n" + json.dumps(insights, ensure_ascii=False)},
+            {
+                "role": "user",
+                "content": "Dane:\n" + json.dumps(ai_payload, ensure_ascii=False),
+            },
         ],
         "temperature": 0.2,
         "max_tokens": 4096,
@@ -1265,13 +1600,20 @@ def _groq_ranges(insights: List[Dict], force: bool = False) -> List[Dict]:
     try:
         resp = requests.post(
             url,
-            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
             json=payload,
             timeout=30,
         )
         if resp.status_code >= 400:
             _last_groq_error_ts = utc_now_naive()
-            log_to_db("ERROR", "analysis", f"Groq HTTP {resp.status_code}: {_sanitize_api_keys(resp.text or '')[:220]}")
+            log_to_db(
+                "ERROR",
+                "analysis",
+                f"Groq HTTP {resp.status_code}: {_sanitize_api_keys(resp.text or '')[:220]}",
+            )
             return []
         data = resp.json()
         text = ""
@@ -1297,6 +1639,7 @@ def _groq_ranges(insights: List[Dict], force: bool = False) -> List[Dict]:
 # Provider: Ollama (lokalne LLM — całkowicie darmowe, bez klucza API)
 # ---------------------------------------------------------------------------
 
+
 def _ollama_ranges(insights: List[Dict], force: bool = False) -> List[Dict]:
     """Generuj zakresy buy/sell za pomocą Ollama (lokalne LLM, brak klucza API).
 
@@ -1306,22 +1649,31 @@ def _ollama_ranges(insights: List[Dict], force: bool = False) -> List[Dict]:
     na maszynach z GPU lub jako jednorazowa analiza.
     """
     model = os.getenv("OLLAMA_MODEL", "qwen2.5:1.5b")
-    base_url = (os.getenv("OLLAMA_BASE_URL", "http://localhost:11434") or "").rstrip("/")
+    base_url = (os.getenv("OLLAMA_BASE_URL", "http://localhost:11434") or "").rstrip(
+        "/"
+    )
     backoff_seconds = int(os.getenv("AI_BACKOFF_SECONDS", "600"))
     per_symbol_timeout = int(os.getenv("OLLAMA_TIMEOUT_SECONDS", "90"))
     global _last_ollama_error_ts
-    if (not force) and _last_ollama_error_ts and (utc_now_naive() - _last_ollama_error_ts).total_seconds() < backoff_seconds:
+    if (
+        (not force)
+        and _last_ollama_error_ts
+        and (utc_now_naive() - _last_ollama_error_ts).total_seconds() < backoff_seconds
+    ):
         return []
 
     url = f"{base_url}/v1/chat/completions"
     all_results: List[Dict] = []
 
-    for insight in insights:
+    for insight in _build_ai_input_payload(insights):
         payload = {
             "model": model,
             "messages": [
                 {"role": "system", "content": _RANGES_SYSTEM_PROMPT},
-                {"role": "user", "content": "Dane:\n" + json.dumps([insight], ensure_ascii=False)},
+                {
+                    "role": "user",
+                    "content": "Dane:\n" + json.dumps([insight], ensure_ascii=False),
+                },
             ],
             "temperature": 0.1,
             "max_tokens": 512,
@@ -1335,7 +1687,11 @@ def _ollama_ranges(insights: List[Dict], force: bool = False) -> List[Dict]:
             )
             if resp.status_code >= 400:
                 _last_ollama_error_ts = utc_now_naive()
-                log_to_db("ERROR", "analysis", f"Ollama HTTP {resp.status_code}: {resp.text[:200]}")
+                log_to_db(
+                    "ERROR",
+                    "analysis",
+                    f"Ollama HTTP {resp.status_code}: {resp.text[:200]}",
+                )
                 return all_results
             data = resp.json()
             choices = data.get("choices", [])
@@ -1347,11 +1703,19 @@ def _ollama_ranges(insights: List[Dict], force: bool = False) -> List[Dict]:
                 r["comment"] = r.get("comment", "") + f" [Ollama/{model}]"
             all_results.extend(result)
         except requests.exceptions.Timeout:
-            log_to_db("WARNING", "analysis", f"Ollama timeout ({per_symbol_timeout}s) dla {insight.get('symbol')} — pomijam symbol")
+            log_to_db(
+                "WARNING",
+                "analysis",
+                f"Ollama timeout ({per_symbol_timeout}s) dla {insight.get('symbol')} — pomijam symbol",
+            )
             continue
         except requests.exceptions.ConnectionError:
             _last_ollama_error_ts = utc_now_naive()
-            log_to_db("WARNING", "analysis", f"Ollama niedostępna ({base_url}) — fallback do heurystyki")
+            log_to_db(
+                "WARNING",
+                "analysis",
+                f"Ollama niedostępna ({base_url}) — fallback do heurystyki",
+            )
             return all_results
         except Exception as exc:
             _last_ollama_error_ts = utc_now_naive()
@@ -1365,6 +1729,7 @@ def _ollama_ranges(insights: List[Dict], force: bool = False) -> List[Dict]:
 # Provider: OpenAI (płatny)
 # ---------------------------------------------------------------------------
 
+
 def _openai_ranges(insights: List[Dict], force: bool = False) -> List[Dict]:
     api_key = _get_openai_api_key()
     if not api_key:
@@ -1373,19 +1738,29 @@ def _openai_ranges(insights: List[Dict], force: bool = False) -> List[Dict]:
     model = os.getenv("OPENAI_MODEL", "gpt-5-mini")
     backoff_seconds = int(os.getenv("OPENAI_BACKOFF_SECONDS", "600"))
     global _last_openai_error_ts
-    if (not force) and _last_openai_error_ts and (utc_now_naive() - _last_openai_error_ts).total_seconds() < backoff_seconds:
+    if (
+        (not force)
+        and _last_openai_error_ts
+        and (utc_now_naive() - _last_openai_error_ts).total_seconds() < backoff_seconds
+    ):
         return []
+    ai_payload = _build_ai_input_payload(insights)
     payload = {
         "model": model,
         "input": (
-            _RANGES_SYSTEM_PROMPT + "\nDane: " + json.dumps(insights, ensure_ascii=False)
+            _RANGES_SYSTEM_PROMPT
+            + "\nDane: "
+            + json.dumps(ai_payload, ensure_ascii=False)
         ),
     }
 
     try:
         resp = requests.post(
             "https://api.openai.com/v1/responses",
-            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
             json=payload,
             timeout=25,
         )
@@ -1396,9 +1771,17 @@ def _openai_ranges(insights: List[Dict], force: bool = False) -> List[Dict]:
                 err = (data or {}).get("error") or {}
                 msg = _sanitize_api_keys(str(err.get("message") or resp.text or ""))
                 code = err.get("code") or err.get("type") or "openai_error"
-                log_to_db("ERROR", "analysis", f"OpenAI HTTP {resp.status_code} ({code}): {msg[:220]}")
+                log_to_db(
+                    "ERROR",
+                    "analysis",
+                    f"OpenAI HTTP {resp.status_code} ({code}): {msg[:220]}",
+                )
             except Exception:
-                log_to_db("ERROR", "analysis", f"OpenAI HTTP {resp.status_code}: {_sanitize_api_keys(resp.text or '')[:220]}")
+                log_to_db(
+                    "ERROR",
+                    "analysis",
+                    f"OpenAI HTTP {resp.status_code}: {_sanitize_api_keys(resp.text or '')[:220]}",
+                )
             return []
         data = resp.json()
         text = data.get("output_text")
@@ -1456,9 +1839,7 @@ def generate_blog_post(db, insights: List[Dict]) -> Optional[BlogPost]:
         summary_lines.append(
             f"{ins['symbol']}: {ins['signal_type']} (pewność {int(ins['confidence']*100)}%)"
         )
-        content_lines.append(
-            f"### {ins['symbol']} ({ins['timeframe']})"
-        )
+        content_lines.append(f"### {ins['symbol']} ({ins['timeframe']})")
         content_lines.append(f"Sygnał: **{ins['signal_type']}**")
         content_lines.append(f"Pewność: **{int(ins['confidence']*100)}%**")
         content_lines.append(f"Uzasadnienie: {ins['reason']}")
@@ -1514,7 +1895,11 @@ def maybe_generate_insights_and_blog(db, symbols: List[str], force: bool = False
 
             backoff_seconds = int(os.getenv("OPENAI_BACKOFF_SECONDS", "600"))
             global _last_openai_error_ts
-            if _last_openai_error_ts and (utc_now_naive() - _last_openai_error_ts).total_seconds() < backoff_seconds:
+            if (
+                _last_openai_error_ts
+                and (utc_now_naive() - _last_openai_error_ts).total_seconds()
+                < backoff_seconds
+            ):
                 return None
 
         insights = generate_market_insights(db, symbols, timeframe="1h")
@@ -1525,13 +1910,19 @@ def maybe_generate_insights_and_blog(db, symbols: List[str], force: bool = False
         if provider in ("heuristic", "offline"):
             ranges = _heuristic_ranges(insights)
         elif provider == "gemini":
-            ranges = _gemini_ranges(insights, force=force) or _heuristic_ranges(insights)
+            ranges = _gemini_ranges(insights, force=force) or _heuristic_ranges(
+                insights
+            )
         elif provider == "groq":
             ranges = _groq_ranges(insights, force=force) or _heuristic_ranges(insights)
         elif provider == "ollama":
-            ranges = _ollama_ranges(insights, force=force) or _heuristic_ranges(insights)
+            ranges = _ollama_ranges(insights, force=force) or _heuristic_ranges(
+                insights
+            )
         elif provider == "openai":
-            ranges = _openai_ranges(insights, force=force) or _heuristic_ranges(insights)
+            ranges = _openai_ranges(insights, force=force) or _heuristic_ranges(
+                insights
+            )
         else:
             # auto (default): próbuj kolejno Ollama → Gemini → Groq → OpenAI → heurystyka
             ranges = (
@@ -1546,7 +1937,12 @@ def maybe_generate_insights_and_blog(db, symbols: List[str], force: bool = False
 
         persist_insights_as_signals(db, insights)
         post = generate_blog_post(db, insights)
-        log_to_db("INFO", "analysis", f"Wygenerowano Market Insights i wpis bloga (provider={provider})", db=db)
+        log_to_db(
+            "INFO",
+            "analysis",
+            f"Wygenerowano Market Insights i wpis bloga (provider={provider})",
+            db=db,
+        )
         # Telegram: automatyczna wysyłka tylko jeśli włączona w .env (domyślnie OFF).
         if os.getenv("TELEGRAM_AUTO_INSIGHTS", "false").lower() == "true":
             header = "AI – analiza rynku i decyzje"
@@ -1575,3 +1971,56 @@ def maybe_generate_insights_and_blog(db, symbols: List[str], force: bool = False
     except Exception as exc:
         log_exception("analysis", "Błąd generacji insights/blog", exc, db=db)
         return None
+
+
+def get_ai_providers_status() -> List[Dict]:
+    """Zwraca aktualny status każdego AI providera (backoff / ok / unconfigured).
+
+    Używane przez /api/account/ai-status i panel diagnostyczny.
+    """
+    backoff_seconds = int(os.getenv("AI_BACKOFF_SECONDS", "600"))
+    now = utc_now_naive()
+
+    def _provider_status(name: str, env_key: str, last_error_ts) -> Dict:
+        has_key = bool(os.getenv(env_key, "").strip())
+        if not has_key:
+            return {"name": name, "status": "unconfigured", "label": "brak klucza"}
+        if last_error_ts and (now - last_error_ts).total_seconds() < backoff_seconds:
+            remaining = int(backoff_seconds - (now - last_error_ts).total_seconds())
+            return {
+                "name": name,
+                "status": "backoff",
+                "label": f"backoff {remaining}s",
+                "last_error": last_error_ts.isoformat() if last_error_ts else None,
+            }
+        return {"name": name, "status": "ok", "label": "aktywny"}
+
+    ollama_url = os.getenv("OLLAMA_URL", "") or os.getenv("OLLAMA_BASE_URL", "")
+    ollama_configured = (
+        bool(ollama_url.strip()) or os.getenv("USE_OLLAMA", "false").lower() == "true"
+    )
+    if not ollama_configured:
+        ollama_entry: Dict = {
+            "name": "ollama",
+            "status": "unconfigured",
+            "label": "brak konfiguracji",
+        }
+    elif (
+        _last_ollama_error_ts
+        and (now - _last_ollama_error_ts).total_seconds() < backoff_seconds
+    ):
+        remaining = int(backoff_seconds - (now - _last_ollama_error_ts).total_seconds())
+        ollama_entry = {
+            "name": "ollama",
+            "status": "backoff",
+            "label": f"backoff {remaining}s",
+        }
+    else:
+        ollama_entry = {"name": "ollama", "status": "ok", "label": "aktywny"}
+
+    return [
+        _provider_status("openai", "OPENAI_API_KEY", _last_openai_error_ts),
+        _provider_status("gemini", "GEMINI_API_KEY", _last_gemini_error_ts),
+        _provider_status("groq", "GROQ_API_KEY", _last_groq_error_ts),
+        ollama_entry,
+    ]

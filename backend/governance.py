@@ -35,6 +35,7 @@ logger = logging.getLogger(__name__)
 # Wyjątek freeze
 # ---------------------------------------------------------------------------
 
+
 class PipelineFreezeError(Exception):
     """Operacja zablokowana przez aktywne policy actions (governance freeze)."""
 
@@ -59,6 +60,7 @@ class PipelineFreezeError(Exception):
             "blockers_count": len(self.blocking_actions),
         }
 
+
 # ---------------------------------------------------------------------------
 # Stałe
 # ---------------------------------------------------------------------------
@@ -69,8 +71,8 @@ INCIDENT_STATUSES = {"open", "acknowledged", "in_progress", "escalated", "resolv
 SLA_MINUTES = {
     "critical": 15,
     "high": 60,
-    "medium": 0,   # brak auto-eskalacji
-    "low": 0,       # brak auto-eskalacji
+    "medium": 0,  # brak auto-eskalacji
+    "low": 0,  # brak auto-eskalacji
 }
 
 # Dozwolone przejścia stanu incydentu
@@ -86,13 +88,16 @@ _TRANSITIONS = {
 # Serializacja rekordu
 # ---------------------------------------------------------------------------
 
+
 def _incident_dict(row: Incident) -> Dict[str, Any]:
     return {
         "id": int(row.id),
         "policy_action_id": int(row.policy_action_id),
         "status": row.status,
         "priority": row.priority,
-        "acknowledged_at": row.acknowledged_at.isoformat() if row.acknowledged_at else None,
+        "acknowledged_at": (
+            row.acknowledged_at.isoformat() if row.acknowledged_at else None
+        ),
         "acknowledged_by": row.acknowledged_by,
         "escalated_at": row.escalated_at.isoformat() if row.escalated_at else None,
         "resolved_at": row.resolved_at.isoformat() if row.resolved_at else None,
@@ -106,6 +111,7 @@ def _incident_dict(row: Incident) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 # I. Freeze Enforcement
 # ---------------------------------------------------------------------------
+
 
 def check_pipeline_permission(
     db: Session,
@@ -123,11 +129,7 @@ def check_pipeline_permission(
     if operation not in valid_ops:
         raise ValueError(f"Nieznana operacja: {operation}. Dozwolone: {valid_ops}")
 
-    open_actions = (
-        db.query(PolicyAction)
-        .filter(PolicyAction.status == "open")
-        .all()
-    )
+    open_actions = db.query(PolicyAction).filter(PolicyAction.status == "open").all()
 
     blocking = []
     for pa in open_actions:
@@ -142,14 +144,16 @@ def check_pipeline_permission(
             blocked = True
 
         if blocked:
-            blocking.append({
-                "policy_action_id": int(pa.id),
-                "policy_action": pa.policy_action,
-                "priority": pa.priority,
-                "source_type": pa.source_type,
-                "source_id": int(pa.source_id),
-                "summary": pa.summary,
-            })
+            blocking.append(
+                {
+                    "policy_action_id": int(pa.id),
+                    "policy_action": pa.policy_action,
+                    "priority": pa.priority,
+                    "source_type": pa.source_type,
+                    "source_id": int(pa.source_id),
+                    "summary": pa.summary,
+                }
+            )
 
     return {
         "allowed": len(blocking) == 0,
@@ -166,7 +170,8 @@ def enforce_pipeline_permission(db: Session, operation: str) -> None:
     if not result["allowed"]:
         logger.warning(
             "Pipeline freeze: operacja '%s' zablokowana przez %d policy actions",
-            operation, len(result["blocking_actions"]),
+            operation,
+            len(result["blocking_actions"]),
         )
         try:
             notify_pipeline_blocked(operation, result["blocking_actions"])
@@ -201,6 +206,7 @@ def get_pipeline_status(db: Session) -> Dict[str, Any]:
 # II. Incident Lifecycle
 # ---------------------------------------------------------------------------
 
+
 def create_incident(
     db: Session,
     *,
@@ -224,7 +230,9 @@ def create_incident(
         .first()
     )
     if existing is not None:
-        raise ValueError(f"Otwarty incydent dla policy_action_id={policy_action_id} już istnieje (id={existing.id})")
+        raise ValueError(
+            f"Otwarty incydent dla policy_action_id={policy_action_id} już istnieje (id={existing.id})"
+        )
 
     priority = pa.priority or "low"
     sla_mins = SLA_MINUTES.get(priority, 0)
@@ -244,7 +252,10 @@ def create_incident(
 
     logger.info(
         "Incident created: id=%s, policy_action_id=%s, priority=%s, sla_deadline=%s",
-        incident.id, policy_action_id, priority, sla_deadline,
+        incident.id,
+        policy_action_id,
+        priority,
+        sla_deadline,
     )
 
     inc_dict = _incident_dict(incident)
@@ -274,7 +285,9 @@ def transition_incident(
     Przejście stanu incydentu z walidacją.
     """
     if new_status not in INCIDENT_STATUSES:
-        raise ValueError(f"Nieznany status: {new_status}. Dozwolone: {INCIDENT_STATUSES}")
+        raise ValueError(
+            f"Nieznany status: {new_status}. Dozwolone: {INCIDENT_STATUSES}"
+        )
 
     row = db.query(Incident).filter(Incident.id == incident_id).first()
     if row is None:
@@ -306,7 +319,10 @@ def transition_incident(
 
     logger.info(
         "Incident transition: id=%s, %s → %s, operator=%s",
-        incident_id, row.status, new_status, operator,
+        incident_id,
+        row.status,
+        new_status,
+        operator,
     )
     return _incident_dict(row)
 
@@ -340,6 +356,48 @@ def list_incidents(
 _PRIORITY_ORDER = {"critical": 0, "high": 1, "medium": 2, "low": 3}
 
 
+def summarize_operator_queue(queue_items: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Agregaty backlog/SLA dla kolejki operatora (bez utraty listy itemów)."""
+    now = utc_now_naive()
+    by_priority = {"critical": 0, "high": 0, "medium": 0, "low": 0, "unknown": 0}
+    incidents_open = 0
+    policy_actions_review = 0
+    sla_breached_count = 0
+    sla_due_15m = 0
+
+    for item in queue_items:
+        pr = str(item.get("priority") or "unknown").lower()
+        by_priority[pr if pr in by_priority else "unknown"] += 1
+
+        if item.get("type") == "incident":
+            incidents_open += 1
+        elif item.get("type") == "policy_action":
+            policy_actions_review += 1
+
+        if item.get("sla_breached"):
+            sla_breached_count += 1
+
+        deadline_iso = item.get("sla_deadline")
+        if deadline_iso and not item.get("sla_breached"):
+            try:
+                deadline = datetime.fromisoformat(deadline_iso)
+                remaining = (deadline - now).total_seconds()
+                if 0 <= remaining <= 900:
+                    sla_due_15m += 1
+            except Exception:
+                pass
+
+    return {
+        "generated_at": now.isoformat(),
+        "backlog_total": len(queue_items),
+        "incidents_open": incidents_open,
+        "policy_actions_review": policy_actions_review,
+        "sla_breached_count": sla_breached_count,
+        "sla_due_15m_count": sla_due_15m,
+        "by_priority": by_priority,
+    }
+
+
 def get_operator_queue(db: Session) -> List[Dict[str, Any]]:
     """
     Kolejka operatora: otwarte incydenty + niezaksjęte policy actions wymagające review.
@@ -347,9 +405,7 @@ def get_operator_queue(db: Session) -> List[Dict[str, Any]]:
     """
     # Incydenty niefinalne
     active_incidents = (
-        db.query(Incident)
-        .filter(Incident.status.notin_(["resolved"]))
-        .all()
+        db.query(Incident).filter(Incident.status.notin_(["resolved"])).all()
     )
 
     # Policy actions wymagające review, które nie mają jeszcze incydentu
@@ -367,7 +423,11 @@ def get_operator_queue(db: Session) -> List[Dict[str, Any]]:
     queue_items = []
 
     for inc in active_incidents:
-        pa = db.query(PolicyAction).filter(PolicyAction.id == inc.policy_action_id).first()
+        pa = (
+            db.query(PolicyAction)
+            .filter(PolicyAction.id == inc.policy_action_id)
+            .first()
+        )
         now = utc_now_naive()
         sla_remaining = None
         sla_breached = False
@@ -376,52 +436,92 @@ def get_operator_queue(db: Session) -> List[Dict[str, Any]]:
             sla_remaining = max(0, int(delta))
             sla_breached = delta < 0
 
-        queue_items.append({
-            "type": "incident",
-            "incident_id": int(inc.id),
-            "policy_action_id": int(inc.policy_action_id),
-            "incident_status": inc.status,
-            "priority": inc.priority,
-            "policy_action": pa.policy_action if pa else None,
-            "source_type": pa.source_type if pa else None,
-            "source_id": int(pa.source_id) if pa else None,
-            "summary": pa.summary if pa else None,
-            "created_at": inc.created_at.isoformat() if inc.created_at else None,
-            "sla_deadline": inc.sla_deadline.isoformat() if inc.sla_deadline else None,
-            "sla_remaining_seconds": sla_remaining,
-            "sla_breached": sla_breached,
-        })
+        queue_items.append(
+            {
+                "type": "incident",
+                "incident_id": int(inc.id),
+                "policy_action_id": int(inc.policy_action_id),
+                "trade_id": (
+                    int(pa.source_id) if pa and pa.source_type == "trade" else None
+                ),
+                "incident_status": inc.status,
+                "priority": inc.priority,
+                "policy_action": pa.policy_action if pa else None,
+                "source_type": pa.source_type if pa else None,
+                "source_id": int(pa.source_id) if pa else None,
+                "id_map": {
+                    "incident_id": int(inc.id),
+                    "policy_action_id": int(inc.policy_action_id),
+                    "source_type": pa.source_type if pa else None,
+                    "source_entity_id": int(pa.source_id) if pa else None,
+                    "trade_id": (
+                        int(pa.source_id) if pa and pa.source_type == "trade" else None
+                    ),
+                },
+                "summary": pa.summary if pa else None,
+                "created_at": inc.created_at.isoformat() if inc.created_at else None,
+                "sla_deadline": (
+                    inc.sla_deadline.isoformat() if inc.sla_deadline else None
+                ),
+                "sla_remaining_seconds": sla_remaining,
+                "sla_breached": sla_breached,
+            }
+        )
 
     for pa in review_actions:
         if pa.id in incident_pa_ids:
             continue
-        queue_items.append({
-            "type": "policy_action",
-            "incident_id": None,
-            "policy_action_id": int(pa.id),
-            "incident_status": None,
-            "priority": pa.priority,
-            "policy_action": pa.policy_action,
-            "source_type": pa.source_type,
-            "source_id": int(pa.source_id),
-            "summary": pa.summary,
-            "created_at": pa.created_at.isoformat() if pa.created_at else None,
-            "sla_deadline": None,
-            "sla_remaining_seconds": None,
-            "sla_breached": False,
-        })
+        queue_items.append(
+            {
+                "type": "policy_action",
+                "incident_id": None,
+                "policy_action_id": int(pa.id),
+                "trade_id": int(pa.source_id) if pa.source_type == "trade" else None,
+                "incident_status": None,
+                "priority": pa.priority,
+                "policy_action": pa.policy_action,
+                "source_type": pa.source_type,
+                "source_id": int(pa.source_id),
+                "id_map": {
+                    "incident_id": None,
+                    "policy_action_id": int(pa.id),
+                    "source_type": pa.source_type,
+                    "source_entity_id": int(pa.source_id),
+                    "trade_id": (
+                        int(pa.source_id) if pa.source_type == "trade" else None
+                    ),
+                },
+                "summary": pa.summary,
+                "created_at": pa.created_at.isoformat() if pa.created_at else None,
+                "sla_deadline": None,
+                "sla_remaining_seconds": None,
+                "sla_breached": False,
+            }
+        )
 
-    queue_items.sort(key=lambda x: (
-        _PRIORITY_ORDER.get(x.get("priority", "low"), 3),
-        x.get("created_at", ""),
-    ))
+    queue_items.sort(
+        key=lambda x: (
+            _PRIORITY_ORDER.get(x.get("priority", "low"), 3),
+            x.get("created_at", ""),
+        )
+    )
 
     return queue_items
+
+
+def get_operator_queue_with_summary(db: Session) -> Dict[str, Any]:
+    """Zwraca kolejkę + agregaty backlog/SLA (do API/Telegram)."""
+    items = get_operator_queue(db)
+    return {
+        "items": items,
+        "summary": summarize_operator_queue(items),
+    }
 
 
 # ---------------------------------------------------------------------------
 # IV. Auto-eskalacja SLA
 # ---------------------------------------------------------------------------
+
 
 def escalate_overdue_incidents(db: Session) -> List[Dict[str, Any]]:
     """
@@ -447,7 +547,9 @@ def escalate_overdue_incidents(db: Session) -> List[Dict[str, Any]]:
         escalated.append(_incident_dict(inc))
         logger.warning(
             "Incident auto-escalated: id=%s, policy_action_id=%s, sla_deadline=%s",
-            inc.id, inc.policy_action_id, inc.sla_deadline,
+            inc.id,
+            inc.policy_action_id,
+            inc.sla_deadline,
         )
 
     if escalated:

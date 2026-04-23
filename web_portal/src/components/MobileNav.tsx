@@ -10,7 +10,7 @@ const mobileItems = [
 	{ id: 'trade-desk', label: 'Handel' },
 	{ id: 'portfolio', label: 'Portfel' },
 	{ id: 'telegram-intel', label: 'Telegram' },
-	{ id: 'operator-console', label: 'Operator' },
+	{ id: 'operator-console', label: 'Diagnostyka' },
 ]
 
 export default function MobileNav({ activeView, setActiveView }: MobileNavProps) {

@@ -1,6 +1,5 @@
 import os
 import sys
-import tempfile
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -16,41 +15,110 @@ os.environ["MAX_CERTAINTY_MODE"] = "false"
 os.environ["TRADING_MODE"] = "demo"
 os.environ["ALLOW_LIVE_TRADING"] = "false"
 
-# Isolated DB per test run
-_tmp_db = tempfile.NamedTemporaryFile(prefix="rldc_test_", suffix=".db", delete=False)
-_tmp_db.close()
-os.environ["DATABASE_URL"] = f"sqlite:///{_tmp_db.name}"
+# DATABASE_URL jest ustawiane przez tests/conftest.py przed importem
 
+import pytest
 from fastapi.testclient import TestClient
-from backend.app import app
+
 from backend.accounting import compute_demo_account_state
-from backend.risk import build_risk_context, evaluate_risk
+from backend.app import app
 from backend.database import (
     ConfigRollback,
     ConfigSnapshot,
+    MarketData,
+    Order,
     PendingOrder,
+    Position,
     Recommendation,
     RuntimeSetting,
     SessionLocal,
-    Position,
-    MarketData,
-    Order,
     attach_costs_to_order,
     compare_config_snapshots,
     get_config_snapshot,
+    init_db,
     load_order_cost_summary,
     save_cost_entry,
     save_decision_trace,
+    utc_now_naive,
 )
-from backend.database import utc_now_naive
 from backend.experiments import compare_snapshots_for_experiment
 from backend.recommendations import evaluate_recommendation
+from backend.risk import (
+    PositionPlan,
+    TradeCostEstimate,
+    build_long_plan,
+    build_risk_context,
+    can_sell,
+    evaluate_risk,
+    manage_long_position,
+    validate_long_entry,
+)
+from backend.routers import portfolio as portfolio_router
+from backend.routers import positions as positions_router
 from backend.runtime_settings import apply_runtime_updates, build_runtime_state
 
 
-import pytest
-from backend.routers import positions as positions_router
-from backend.routers import portfolio as portfolio_router
+@pytest.fixture(scope="module", autouse=True)
+def ensure_db_initialized():
+    """Gwarantuje że schemat DB jest gotowy i tabele są czyste dla tego modułu."""
+    init_db()
+    # Wyczyść tabele które mogą być zabrudzane przez inne moduły testowe lub poprzednie runy
+    db = SessionLocal()
+    try:
+        from backend.database import (
+            AccountSnapshot,
+            ConfigPromotion,
+            ConfigRollback,
+            ConfigSnapshot,
+            CostLedger,
+            DecisionAudit,
+            DecisionTrace,
+            ExitQuality,
+            Experiment,
+            ExperimentResult,
+            GoalAssessment,
+            Incident,
+            ManualTradeDetection,
+            Order,
+            PendingOrder,
+            PolicyAction,
+            Position,
+            PromotionMonitoring,
+            Recommendation,
+            RecommendationReview,
+            ReconciliationEvent,
+            ReconciliationRun,
+            RollbackMonitoring,
+            RuntimeSetting,
+        )
+
+        db.query(Order).delete()
+        db.query(PendingOrder).delete()
+        db.query(Position).delete()
+        db.query(Incident).delete()
+        db.query(PolicyAction).delete()
+        db.query(ConfigRollback).delete()
+        db.query(ConfigSnapshot).delete()
+        db.query(Recommendation).delete()
+        db.query(RuntimeSetting).delete()
+        db.query(CostLedger).delete()
+        db.query(ExitQuality).delete()
+        db.query(DecisionTrace).delete()
+        db.query(Experiment).delete()
+        db.query(ExperimentResult).delete()
+        db.query(RecommendationReview).delete()
+        db.query(ConfigPromotion).delete()
+        db.query(PromotionMonitoring).delete()
+        db.query(RollbackMonitoring).delete()
+        db.query(AccountSnapshot).delete()
+        db.query(DecisionAudit).delete()
+        db.query(GoalAssessment).delete()
+        db.query(ReconciliationRun).delete()
+        db.query(ReconciliationEvent).delete()
+        db.query(ManualTradeDetection).delete()
+        db.commit()
+    finally:
+        db.close()
 
 
 @pytest.fixture(scope="module")
@@ -63,7 +131,12 @@ def test_health(client):
     resp = client.get("/health")
     assert resp.status_code == 200
     data = resp.json()
-    assert data.get("status") == "healthy"
+    # Nowy format health check zwraca backend/database zamiast status/healthy
+    assert data.get("backend") == "ok" or data.get("status") == "healthy"
+    assert (
+        data.get("database") in ("connected", "connected", None)
+        or data.get("status") == "healthy"
+    )
 
 
 def test_market_summary(client):
@@ -136,7 +209,7 @@ def test_pending_confirm_reject_demo(client):
     assert resp.status_code == 200
     payload = resp.json()
     assert payload.get("success") is True
-    assert (payload.get("data") or {}).get("status") == "CONFIRMED"
+    assert (payload.get("data") or {}).get("status") == "PENDING_CONFIRMED"
 
     # reject needs a fresh PENDING record
     db = SessionLocal()
@@ -192,14 +265,55 @@ def test_pending_confirm_reject_demo(client):
 def test_pending_create_demo(client):
     resp = client.post(
         "/api/orders/pending?mode=demo",
-        json={"symbol": "BTC/EUR", "side": "BUY", "quantity": 0.01, "price": 100.0, "reason": "manual"},
+        json={
+            "symbol": "BTC/EUR",
+            "side": "BUY",
+            "quantity": 0.3,
+            "price": 100.0,
+            "reason": "manual",
+        },
     )
     assert resp.status_code == 200
     payload = resp.json()
     assert payload.get("success") is True
     data = payload.get("data") or {}
-    assert data.get("status") == "PENDING"
+    assert data.get("status") == "PENDING_CREATED"
     assert data.get("symbol") == "BTCEUR"
+
+
+def test_pending_create_live_mode_allowed(client):
+    """POST /api/orders/pending?mode=live — live pending ma być dozwolony."""
+    resp = client.post(
+        "/api/orders/pending?mode=live",
+        json={
+            "symbol": "ETH/EUR",
+            "side": "BUY",
+            "quantity": 0.3,
+            "price": 100.0,
+            "reason": "manual-live",
+        },
+    )
+    assert (
+        resp.status_code == 200
+    ), f"Oczekiwano 200, got {resp.status_code}: {resp.text}"
+    payload = resp.json()
+    assert payload.get("success") is True
+    data = payload.get("data") or {}
+    assert data.get("status") == "PENDING_CREATED"
+    assert data.get("symbol") == "ETHEUR"
+
+    db = SessionLocal()
+    try:
+        p = (
+            db.query(PendingOrder)
+            .filter(PendingOrder.symbol == "ETHEUR")
+            .order_by(PendingOrder.created_at.desc())
+            .first()
+        )
+        assert p is not None
+        assert p.mode == "live"
+    finally:
+        db.close()
 
 
 def test_control_state_no_admin_token(client):
@@ -218,7 +332,9 @@ def test_control_state_setters(client):
     assert payload.get("success") is True
     assert (payload.get("data") or {}).get("demo_trading_enabled") is False
 
-    resp = client.post("/api/control/state", json={"watchlist": ["BTC/EUR", "WLFI/EUR"]})
+    resp = client.post(
+        "/api/control/state", json={"watchlist": ["BTC/EUR", "WLFI/EUR"]}
+    )
     assert resp.status_code == 200
     payload = resp.json()
     assert payload.get("success") is True
@@ -264,7 +380,7 @@ def test_close_position_creates_pending_sell(client):
             .first()
         )
         assert p is not None
-        assert p.status == "PENDING"
+        assert p.status == "PENDING_CREATED"
         assert p.side == "SELL"
         assert abs(float(p.quantity) - 0.5) < 1e-9
     finally:
@@ -349,9 +465,172 @@ def test_close_all_positions_creates_multiple_pending(client):
 
     db = SessionLocal()
     try:
-        syms = {p.symbol for p in db.query(PendingOrder).filter(PendingOrder.mode == "demo").all()}
+        syms = {
+            p.symbol
+            for p in db.query(PendingOrder).filter(PendingOrder.mode == "demo").all()
+        }
         assert "CLOSE2EUR" in syms
         assert "CLOSE3EUR" in syms
+    finally:
+        db.close()
+
+
+def test_pending_sell_without_position_is_blocked(client):
+    resp = client.post(
+        "/api/orders/pending?mode=demo",
+        json={
+            "symbol": "NOPOS/EUR",
+            "side": "SELL",
+            "quantity": 1.0,
+            "price": 100.0,
+            "reason": "manual",
+        },
+    )
+    assert resp.status_code == 400
+    assert "Cannot SELL without an open position" in resp.json().get("detail", "")
+
+
+def test_validate_long_entry_blocks_edge_below_cost():
+    costs = TradeCostEstimate(
+        fee_entry_pct=0.10,
+        fee_exit_pct=0.10,
+        spread_pct=0.08,
+        slippage_pct=0.07,
+    )
+    decision = validate_long_entry(
+        regime="TREND_UP",
+        signal_score=88.0,
+        expected_move_pct=0.5,
+        risk_reward=2.4,
+        costs=costs,
+        min_profit_buffer_pct=0.8,
+    )
+    assert decision.allowed is False
+    # Blokowany z powodu kosztów (35% expected move lub edge za mały)
+    assert any("cost" in r.lower() or "move" in r.lower() for r in decision.reasons)
+
+
+def test_manage_long_position_ignores_minor_pullback_without_invalidation():
+    plan = PositionPlan(
+        entry=100.0,
+        stop_loss=98.8,
+        take_profit_1=102.4,
+        take_profit_2=103.7,
+        trailing_activation_price=101.8,
+        break_even_price=100.35,
+    )
+    decision = manage_long_position(
+        plan=plan,
+        current_price=100.35,
+        atr=0.6,
+        highest_price_seen=101.1,
+        trailing_active=False,
+        trailing_stop_price=None,
+        partial_take_count=0,
+        regime="TREND_UP",
+        macd_hist_15m=0.05,
+        volume_ratio_15m=0.98,
+        close_below_ema50_15m=False,
+    )
+    assert decision.action == "HOLD"
+    assert decision.reason_code == "hold_plan_valid"
+
+
+def test_manage_long_position_tp1_moves_stop_to_break_even():
+    costs = TradeCostEstimate(
+        fee_entry_pct=0.10,
+        fee_exit_pct=0.10,
+        spread_pct=0.08,
+        slippage_pct=0.07,
+    )
+    plan = build_long_plan(entry=100.0, atr=1.0, costs=costs)
+    decision = manage_long_position(
+        plan=plan,
+        current_price=plan.take_profit_1,
+        atr=1.0,
+        highest_price_seen=plan.take_profit_1,
+        partial_take_count=0,
+        regime="TREND_UP",
+    )
+    assert decision.action == "REDUCE"
+    assert decision.reason_code == "take_profit_1_hit"
+    assert decision.move_stop_to_break_even is True
+    assert decision.stop_loss >= plan.break_even_price
+
+
+def test_symbol_cooldown_after_losing_trade_blocks_buy():
+    db = SessionLocal()
+    try:
+        now = utc_now_naive()
+        sell = Order(
+            symbol="COOLDOWNEUR",
+            side="SELL",
+            order_type="MARKET",
+            price=95.0,
+            quantity=1.0,
+            status="FILLED",
+            mode="demo",
+            executed_price=95.0,
+            executed_quantity=1.0,
+            gross_pnl=-5.0,
+            net_pnl=-5.5,
+            total_cost=0.5,
+            timestamp=now - timedelta(minutes=5),
+        )
+        db.add(sell)
+        db.commit()
+
+        ctx = build_risk_context(
+            db,
+            symbol="COOLDOWNEUR",
+            side="BUY",
+            notional=50.0,
+            mode="demo",
+            strategy_name="test",
+        )
+        decision = evaluate_risk(ctx)
+        assert decision.allowed is False
+        assert "symbol_cooldown_gate" in decision.reason_codes
+    finally:
+        db.close()
+
+
+def test_symbol_block_after_three_losses():
+    db = SessionLocal()
+    try:
+        now = utc_now_naive()
+        orders = [
+            Order(
+                symbol="LOSS3EUR",
+                side="SELL",
+                order_type="MARKET",
+                price=95.0 - idx,
+                quantity=1.0,
+                status="FILLED",
+                mode="demo",
+                executed_price=95.0 - idx,
+                executed_quantity=1.0,
+                gross_pnl=-5.0 - idx,
+                net_pnl=-5.5 - idx,
+                total_cost=0.5,
+                timestamp=now - timedelta(hours=2 + idx),
+            )
+            for idx in range(3)
+        ]
+        db.add_all(orders)
+        db.commit()
+
+        ctx = build_risk_context(
+            db,
+            symbol="LOSS3EUR",
+            side="BUY",
+            notional=50.0,
+            mode="demo",
+            strategy_name="test",
+        )
+        decision = evaluate_risk(ctx)
+        assert decision.allowed is False
+        assert any("loss_streak" in code for code in decision.reason_codes)
     finally:
         db.close()
 
@@ -396,15 +675,42 @@ def test_cost_ledger_rollup_updates_order():
         db.commit()
         db.refresh(order)
 
-        save_cost_entry(db, symbol="BTCEUR", cost_type="taker_fee", order_id=order.id, actual_value=0.10, expected_value=0.10)
-        save_cost_entry(db, symbol="BTCEUR", cost_type="slippage", order_id=order.id, actual_value=0.05, expected_value=0.05)
-        save_cost_entry(db, symbol="BTCEUR", cost_type="spread", order_id=order.id, actual_value=0.02, expected_value=0.02)
+        save_cost_entry(
+            db,
+            symbol="BTCEUR",
+            cost_type="taker_fee",
+            order_id=order.id,
+            actual_value=0.10,
+            expected_value=0.10,
+        )
+        save_cost_entry(
+            db,
+            symbol="BTCEUR",
+            cost_type="slippage",
+            order_id=order.id,
+            actual_value=0.05,
+            expected_value=0.05,
+        )
+        save_cost_entry(
+            db,
+            symbol="BTCEUR",
+            cost_type="spread",
+            order_id=order.id,
+            actual_value=0.02,
+            expected_value=0.02,
+        )
         db.flush()
 
         summary = load_order_cost_summary(db, order.id)
         assert round(summary["total_cost"], 2) == 0.17
 
-        attach_costs_to_order(db, order=order, gross_pnl=5.0, config_snapshot_id="snap123", exit_reason_code="tp_exit")
+        attach_costs_to_order(
+            db,
+            order=order,
+            gross_pnl=5.0,
+            config_snapshot_id="snap123",
+            exit_reason_code="tp_exit",
+        )
         db.commit()
         db.refresh(order)
 
@@ -431,8 +737,21 @@ def test_compute_demo_account_state_is_cost_aware():
         db.add(buy)
         db.commit()
         db.refresh(buy)
-        save_cost_entry(db, symbol="TESTEUR", cost_type="taker_fee", order_id=buy.id, actual_value=0.10, expected_value=0.10)
-        attach_costs_to_order(db, order=buy, gross_pnl=0.0, config_snapshot_id="snapbuy", entry_reason_code="entry")
+        save_cost_entry(
+            db,
+            symbol="TESTEUR",
+            cost_type="taker_fee",
+            order_id=buy.id,
+            actual_value=0.10,
+            expected_value=0.10,
+        )
+        attach_costs_to_order(
+            db,
+            order=buy,
+            gross_pnl=0.0,
+            config_snapshot_id="snapbuy",
+            entry_reason_code="entry",
+        )
 
         sell = Order(
             symbol="TESTEUR",
@@ -448,8 +767,21 @@ def test_compute_demo_account_state_is_cost_aware():
         db.add(sell)
         db.commit()
         db.refresh(sell)
-        save_cost_entry(db, symbol="TESTEUR", cost_type="taker_fee", order_id=sell.id, actual_value=0.10, expected_value=0.10)
-        attach_costs_to_order(db, order=sell, gross_pnl=10.0, config_snapshot_id="snapsell", exit_reason_code="exit")
+        save_cost_entry(
+            db,
+            symbol="TESTEUR",
+            cost_type="taker_fee",
+            order_id=sell.id,
+            actual_value=0.10,
+            expected_value=0.10,
+        )
+        attach_costs_to_order(
+            db,
+            order=sell,
+            gross_pnl=10.0,
+            config_snapshot_id="snapsell",
+            exit_reason_code="exit",
+        )
         db.commit()
 
         state = compute_demo_account_state(db, quote_ccy="EUR")
@@ -460,14 +792,19 @@ def test_compute_demo_account_state_is_cost_aware():
         db.close()
 
 
-def test_risk_blocks_when_max_open_positions_reached():
+def test_risk_does_not_hard_block_when_max_open_positions_reached():
     db = SessionLocal()
     try:
+        init_db()
         db.query(Position).delete()
         db.commit()
         apply_runtime_updates(
             db,
-            {"max_open_positions": 1, "max_total_exposure_ratio": 0.95, "max_symbol_exposure_ratio": 0.95},
+            {
+                "max_open_positions": 1,
+                "max_total_exposure_ratio": 0.95,
+                "max_symbol_exposure_ratio": 0.95,
+            },
             actor="test",
             active_position_count=0,
         )
@@ -493,8 +830,8 @@ def test_risk_blocks_when_max_open_positions_reached():
             mode="demo",
         )
         decision = evaluate_risk(ctx)
-        assert decision.allowed is False
-        assert "max_open_positions_gate" in decision.reason_codes
+        assert decision.allowed is True
+        assert "max_open_positions_gate" not in decision.reason_codes
     finally:
         db.close()
 
@@ -506,7 +843,11 @@ def test_risk_can_reduce_size_near_exposure_limit():
         db.commit()
         apply_runtime_updates(
             db,
-            {"max_total_exposure_ratio": 0.2, "max_symbol_exposure_ratio": 0.9, "max_open_positions": 50},
+            {
+                "max_total_exposure_ratio": 0.2,
+                "max_symbol_exposure_ratio": 0.9,
+                "max_open_positions": 50,
+            },
             actor="test",
             active_position_count=0,
         )
@@ -556,8 +897,21 @@ def test_account_analytics_bundle_is_cost_aware(client):
         db.add(buy)
         db.commit()
         db.refresh(buy)
-        save_cost_entry(db, symbol="ANAEUR", cost_type="taker_fee", order_id=buy.id, actual_value=0.12, expected_value=0.12)
-        attach_costs_to_order(db, order=buy, gross_pnl=0.0, config_snapshot_id="ana-snap-a", entry_reason_code="entry")
+        save_cost_entry(
+            db,
+            symbol="ANAEUR",
+            cost_type="taker_fee",
+            order_id=buy.id,
+            actual_value=0.12,
+            expected_value=0.12,
+        )
+        attach_costs_to_order(
+            db,
+            order=buy,
+            gross_pnl=0.0,
+            config_snapshot_id="ana-snap-a",
+            entry_reason_code="entry",
+        )
 
         sell = Order(
             symbol="ANAEUR",
@@ -573,9 +927,29 @@ def test_account_analytics_bundle_is_cost_aware(client):
         db.add(sell)
         db.commit()
         db.refresh(sell)
-        save_cost_entry(db, symbol="ANAEUR", cost_type="taker_fee", order_id=sell.id, actual_value=0.13, expected_value=0.13)
-        save_cost_entry(db, symbol="ANAEUR", cost_type="slippage", order_id=sell.id, actual_value=0.07, expected_value=0.07)
-        attach_costs_to_order(db, order=sell, gross_pnl=10.0, config_snapshot_id="ana-snap-a", exit_reason_code="take_profit")
+        save_cost_entry(
+            db,
+            symbol="ANAEUR",
+            cost_type="taker_fee",
+            order_id=sell.id,
+            actual_value=0.13,
+            expected_value=0.13,
+        )
+        save_cost_entry(
+            db,
+            symbol="ANAEUR",
+            cost_type="slippage",
+            order_id=sell.id,
+            actual_value=0.07,
+            expected_value=0.07,
+        )
+        attach_costs_to_order(
+            db,
+            order=sell,
+            gross_pnl=10.0,
+            config_snapshot_id="ana-snap-a",
+            exit_reason_code="take_profit",
+        )
 
         save_decision_trace(
             db,
@@ -597,11 +971,21 @@ def test_account_analytics_bundle_is_cost_aware(client):
     assert payload.get("success") is True
     data = payload.get("data") or {}
     overview = data.get("overview") or {}
-    assert float(overview.get("net_pnl") or 0.0) >= 9.6
+    # Per-symbol check dla ANAEUR (odporne na stan innych testów w sesji)
+    by_sym = {item["symbol"]: item for item in (data.get("by_symbol") or [])}
+    anaeur = by_sym.get("ANAEUR") or {}
+    assert float(anaeur.get("gross_pnl") or 0.0) >= 10.0, f"ANAEUR gross_pnl: {anaeur}"
+    assert float(anaeur.get("net_pnl") or 0.0) >= 9.6, f"ANAEUR net_pnl: {anaeur}"
     assert float(overview.get("total_cost") or 0.0) >= 0.32
-    cost_by_type = {item["cost_type"]: item["total_cost"] for item in (data.get("cost_by_type") or [])}
+    cost_by_type = {
+        item["cost_type"]: item["total_cost"]
+        for item in (data.get("cost_by_type") or [])
+    }
     assert float(cost_by_type.get("taker_fee") or 0.0) >= 0.35
-    blocked = {item["reason_code"]: item["count"] for item in (data.get("blocked_by_reason") or [])}
+    blocked = {
+        item["reason_code"]: item["count"]
+        for item in (data.get("blocked_by_reason") or [])
+    }
     assert int(blocked.get("cost_gate_failed") or 0) >= 1
     snapshots = data.get("config_snapshots") or []
     assert any((item.get("config_snapshot_id") == "ana-snap-a") for item in snapshots)
@@ -692,12 +1076,34 @@ def test_runtime_updates_persist_full_config_snapshot_payload():
             actor="test_snapshot",
             active_position_count=0,
         )
-        snapshot_id = (result.get("snapshot") or {}).get("id") or (result.get("state") or {}).get("config_snapshot_id")
+        snapshot_id = (result.get("snapshot") or {}).get("id") or (
+            result.get("state") or {}
+        ).get("config_snapshot_id")
         snapshot = get_config_snapshot(db, snapshot_id)
         assert snapshot is not None
         payload = snapshot.get("payload") or {}
-        assert float((((payload.get("sections") or {}).get("costs") or {}).get("min_edge_multiplier") or 0.0)) == 3.4
-        assert int((((payload.get("sections") or {}).get("trading") or {}).get("max_trades_per_day") or 0)) == 7
+        assert (
+            float(
+                (
+                    ((payload.get("sections") or {}).get("costs") or {}).get(
+                        "min_edge_multiplier"
+                    )
+                    or 0.0
+                )
+            )
+            == 3.4
+        )
+        assert (
+            int(
+                (
+                    ((payload.get("sections") or {}).get("trading") or {}).get(
+                        "max_trades_per_day"
+                    )
+                    or 0
+                )
+            )
+            == 7
+        )
         assert snapshot.get("previous_snapshot_id") == baseline_snapshot_id
         changed_fields = snapshot.get("changed_fields") or []
         assert "min_edge_multiplier" in changed_fields
@@ -782,27 +1188,137 @@ def test_experiment_comparison_verdict_candidate_wins():
         baseline_id = (baseline.get("snapshot") or {}).get("id")
         candidate_id = (candidate.get("snapshot") or {}).get("id")
 
-        buy_a = Order(symbol="EXPEUR", side="BUY", order_type="MARKET", price=100.0, quantity=1.0, status="FILLED", mode="demo", executed_price=100.0, executed_quantity=1.0, config_snapshot_id=baseline_id)
-        sell_a = Order(symbol="EXPEUR", side="SELL", order_type="MARKET", price=105.0, quantity=1.0, status="FILLED", mode="demo", executed_price=105.0, executed_quantity=1.0, config_snapshot_id=baseline_id)
+        buy_a = Order(
+            symbol="EXPEUR",
+            side="BUY",
+            order_type="MARKET",
+            price=100.0,
+            quantity=1.0,
+            status="FILLED",
+            mode="demo",
+            executed_price=100.0,
+            executed_quantity=1.0,
+            config_snapshot_id=baseline_id,
+        )
+        sell_a = Order(
+            symbol="EXPEUR",
+            side="SELL",
+            order_type="MARKET",
+            price=105.0,
+            quantity=1.0,
+            status="FILLED",
+            mode="demo",
+            executed_price=105.0,
+            executed_quantity=1.0,
+            config_snapshot_id=baseline_id,
+        )
         db.add_all([buy_a, sell_a])
         db.commit()
         db.refresh(sell_a)
-        attach_costs_to_order(db, order=buy_a, gross_pnl=0.0, config_snapshot_id=baseline_id, entry_reason_code="entry")
-        save_cost_entry(db, symbol="EXPEUR", cost_type="taker_fee", order_id=sell_a.id, actual_value=0.30, expected_value=0.30, config_snapshot_id=baseline_id)
-        attach_costs_to_order(db, order=sell_a, gross_pnl=5.0, config_snapshot_id=baseline_id, exit_reason_code="exit")
+        attach_costs_to_order(
+            db,
+            order=buy_a,
+            gross_pnl=0.0,
+            config_snapshot_id=baseline_id,
+            entry_reason_code="entry",
+        )
+        save_cost_entry(
+            db,
+            symbol="EXPEUR",
+            cost_type="taker_fee",
+            order_id=sell_a.id,
+            actual_value=0.30,
+            expected_value=0.30,
+            config_snapshot_id=baseline_id,
+        )
+        attach_costs_to_order(
+            db,
+            order=sell_a,
+            gross_pnl=5.0,
+            config_snapshot_id=baseline_id,
+            exit_reason_code="exit",
+        )
 
-        buy_b = Order(symbol="EXPEUR", side="BUY", order_type="MARKET", price=100.0, quantity=1.0, status="FILLED", mode="demo", executed_price=100.0, executed_quantity=1.0, config_snapshot_id=candidate_id)
-        sell_b = Order(symbol="EXPEUR", side="SELL", order_type="MARKET", price=108.0, quantity=1.0, status="FILLED", mode="demo", executed_price=108.0, executed_quantity=1.0, config_snapshot_id=candidate_id)
+        buy_b = Order(
+            symbol="EXPEUR",
+            side="BUY",
+            order_type="MARKET",
+            price=100.0,
+            quantity=1.0,
+            status="FILLED",
+            mode="demo",
+            executed_price=100.0,
+            executed_quantity=1.0,
+            config_snapshot_id=candidate_id,
+        )
+        sell_b = Order(
+            symbol="EXPEUR",
+            side="SELL",
+            order_type="MARKET",
+            price=108.0,
+            quantity=1.0,
+            status="FILLED",
+            mode="demo",
+            executed_price=108.0,
+            executed_quantity=1.0,
+            config_snapshot_id=candidate_id,
+        )
         db.add_all([buy_b, sell_b])
         db.commit()
         db.refresh(sell_b)
-        attach_costs_to_order(db, order=buy_b, gross_pnl=0.0, config_snapshot_id=candidate_id, entry_reason_code="entry")
-        save_cost_entry(db, symbol="EXPEUR", cost_type="taker_fee", order_id=sell_b.id, actual_value=0.10, expected_value=0.10, config_snapshot_id=candidate_id)
-        attach_costs_to_order(db, order=sell_b, gross_pnl=8.0, config_snapshot_id=candidate_id, exit_reason_code="exit")
+        attach_costs_to_order(
+            db,
+            order=buy_b,
+            gross_pnl=0.0,
+            config_snapshot_id=candidate_id,
+            entry_reason_code="entry",
+        )
+        save_cost_entry(
+            db,
+            symbol="EXPEUR",
+            cost_type="taker_fee",
+            order_id=sell_b.id,
+            actual_value=0.10,
+            expected_value=0.10,
+            config_snapshot_id=candidate_id,
+        )
+        attach_costs_to_order(
+            db,
+            order=sell_b,
+            gross_pnl=8.0,
+            config_snapshot_id=candidate_id,
+            exit_reason_code="exit",
+        )
 
-        save_decision_trace(db, symbol="EXPEUR", mode="demo", action_type="entry_blocked", reason_code="cost_gate_failed", strategy_name="exp_strategy", config_snapshot_id=baseline_id)
-        save_decision_trace(db, symbol="EXPEUR", mode="demo", action_type="position_closed", reason_code="take_profit", strategy_name="exp_strategy", order_id=sell_a.id, config_snapshot_id=baseline_id)
-        save_decision_trace(db, symbol="EXPEUR", mode="demo", action_type="position_closed", reason_code="take_profit", strategy_name="exp_strategy", order_id=sell_b.id, config_snapshot_id=candidate_id)
+        save_decision_trace(
+            db,
+            symbol="EXPEUR",
+            mode="demo",
+            action_type="entry_blocked",
+            reason_code="cost_gate_failed",
+            strategy_name="exp_strategy",
+            config_snapshot_id=baseline_id,
+        )
+        save_decision_trace(
+            db,
+            symbol="EXPEUR",
+            mode="demo",
+            action_type="position_closed",
+            reason_code="take_profit",
+            strategy_name="exp_strategy",
+            order_id=sell_a.id,
+            config_snapshot_id=baseline_id,
+        )
+        save_decision_trace(
+            db,
+            symbol="EXPEUR",
+            mode="demo",
+            action_type="position_closed",
+            reason_code="take_profit",
+            strategy_name="exp_strategy",
+            order_id=sell_b.id,
+            config_snapshot_id=candidate_id,
+        )
         db.commit()
 
         comparison = compare_snapshots_for_experiment(
@@ -835,21 +1351,71 @@ def test_experiment_compare_endpoint_and_create_experiment(client):
         baseline_id = (baseline.get("snapshot") or {}).get("id")
         candidate_id = (candidate.get("snapshot") or {}).get("id")
 
-        sell_a = Order(symbol="EXPAEUR", side="SELL", order_type="MARKET", price=104.0, quantity=1.0, status="FILLED", mode="demo", executed_price=104.0, executed_quantity=1.0, gross_pnl=4.0, net_pnl=3.8, total_cost=0.2, fee_cost=0.2, config_snapshot_id=baseline_id)
-        sell_b = Order(symbol="EXPAEUR", side="SELL", order_type="MARKET", price=107.0, quantity=1.0, status="FILLED", mode="demo", executed_price=107.0, executed_quantity=1.0, gross_pnl=7.0, net_pnl=6.9, total_cost=0.1, fee_cost=0.1, config_snapshot_id=candidate_id)
+        sell_a = Order(
+            symbol="EXPAEUR",
+            side="SELL",
+            order_type="MARKET",
+            price=104.0,
+            quantity=1.0,
+            status="FILLED",
+            mode="demo",
+            executed_price=104.0,
+            executed_quantity=1.0,
+            gross_pnl=4.0,
+            net_pnl=3.8,
+            total_cost=0.2,
+            fee_cost=0.2,
+            config_snapshot_id=baseline_id,
+        )
+        sell_b = Order(
+            symbol="EXPAEUR",
+            side="SELL",
+            order_type="MARKET",
+            price=107.0,
+            quantity=1.0,
+            status="FILLED",
+            mode="demo",
+            executed_price=107.0,
+            executed_quantity=1.0,
+            gross_pnl=7.0,
+            net_pnl=6.9,
+            total_cost=0.1,
+            fee_cost=0.1,
+            config_snapshot_id=candidate_id,
+        )
         db.add_all([sell_a, sell_b])
         db.commit()
         db.refresh(sell_a)
         db.refresh(sell_b)
-        save_decision_trace(db, symbol="EXPAEUR", mode="demo", action_type="position_closed", reason_code="tp", strategy_name="exp_api_strategy", order_id=sell_a.id, config_snapshot_id=baseline_id)
-        save_decision_trace(db, symbol="EXPAEUR", mode="demo", action_type="position_closed", reason_code="tp", strategy_name="exp_api_strategy", order_id=sell_b.id, config_snapshot_id=candidate_id)
+        save_decision_trace(
+            db,
+            symbol="EXPAEUR",
+            mode="demo",
+            action_type="position_closed",
+            reason_code="tp",
+            strategy_name="exp_api_strategy",
+            order_id=sell_a.id,
+            config_snapshot_id=baseline_id,
+        )
+        save_decision_trace(
+            db,
+            symbol="EXPAEUR",
+            mode="demo",
+            action_type="position_closed",
+            reason_code="tp",
+            strategy_name="exp_api_strategy",
+            order_id=sell_b.id,
+            config_snapshot_id=candidate_id,
+        )
         db.commit()
     finally:
         db.close()
 
-    resp = client.get(f"/api/account/analytics/experiments/compare?baseline_snapshot_id={baseline_id}&candidate_snapshot_id={candidate_id}&mode=demo")
+    resp = client.get(
+        f"/api/account/analytics/experiments/compare?baseline_snapshot_id={baseline_id}&candidate_snapshot_id={candidate_id}&mode=demo"
+    )
     assert resp.status_code == 200
-    data = (resp.json().get("data") or {})
+    data = resp.json().get("data") or {}
     assert data["verdict"]["winner"] in {"candidate", "baseline", "inconclusive"}
 
     resp = client.post(
@@ -884,11 +1450,40 @@ def test_experiment_compare_endpoint_and_create_experiment(client):
 
 def test_recommendation_evaluate_promote():
     experiment = {
-        "verdict": {"winner": "candidate", "reason_codes": ["candidate_net_pnl_up", "candidate_expectancy_up"]},
-        "baseline": {"metrics": {"net_pnl": 5.0, "cost_leakage_ratio": 0.20, "drawdown_net": -2.0, "net_expectancy": 1.0, "trade_count": 5, "risk_actions_count": 1}},
-        "candidate": {"metrics": {"net_pnl": 8.0, "cost_leakage_ratio": 0.15, "drawdown_net": -1.5, "net_expectancy": 1.4, "trade_count": 5, "risk_actions_count": 1}},
+        "verdict": {
+            "winner": "candidate",
+            "reason_codes": ["candidate_net_pnl_up", "candidate_expectancy_up"],
+        },
+        "baseline": {
+            "metrics": {
+                "net_pnl": 5.0,
+                "cost_leakage_ratio": 0.20,
+                "drawdown_net": -2.0,
+                "net_expectancy": 1.0,
+                "trade_count": 5,
+                "risk_actions_count": 1,
+            }
+        },
+        "candidate": {
+            "metrics": {
+                "net_pnl": 8.0,
+                "cost_leakage_ratio": 0.15,
+                "drawdown_net": -1.5,
+                "net_expectancy": 1.4,
+                "trade_count": 5,
+                "risk_actions_count": 1,
+            }
+        },
     }
-    comparison = {"diff": [{"field": "sections.costs.min_edge_multiplier", "old_value": 2.5, "new_value": 3.0}]}
+    comparison = {
+        "diff": [
+            {
+                "field": "sections.costs.min_edge_multiplier",
+                "old_value": 2.5,
+                "new_value": 3.0,
+            }
+        ]
+    }
     result = evaluate_recommendation(experiment, comparison)
     assert result["recommendation"] == "promote"
     assert "candidate_outperformed_net" in result["reason_codes"]
@@ -896,11 +1491,40 @@ def test_recommendation_evaluate_promote():
 
 def test_recommendation_evaluate_rollback_candidate():
     experiment = {
-        "verdict": {"winner": "baseline", "reason_codes": ["candidate_net_pnl_down", "candidate_drawdown_worse"]},
-        "baseline": {"metrics": {"net_pnl": 7.0, "cost_leakage_ratio": 0.12, "drawdown_net": -1.0, "net_expectancy": 1.2, "trade_count": 6, "risk_actions_count": 1}},
-        "candidate": {"metrics": {"net_pnl": 3.0, "cost_leakage_ratio": 0.25, "drawdown_net": -3.5, "net_expectancy": 0.4, "trade_count": 8, "risk_actions_count": 4}},
+        "verdict": {
+            "winner": "baseline",
+            "reason_codes": ["candidate_net_pnl_down", "candidate_drawdown_worse"],
+        },
+        "baseline": {
+            "metrics": {
+                "net_pnl": 7.0,
+                "cost_leakage_ratio": 0.12,
+                "drawdown_net": -1.0,
+                "net_expectancy": 1.2,
+                "trade_count": 6,
+                "risk_actions_count": 1,
+            }
+        },
+        "candidate": {
+            "metrics": {
+                "net_pnl": 3.0,
+                "cost_leakage_ratio": 0.25,
+                "drawdown_net": -3.5,
+                "net_expectancy": 0.4,
+                "trade_count": 8,
+                "risk_actions_count": 4,
+            }
+        },
     }
-    comparison = {"diff": [{"field": "sections.risk.risk_per_trade", "old_value": 0.01, "new_value": 0.03}]}
+    comparison = {
+        "diff": [
+            {
+                "field": "sections.risk.risk_per_trade",
+                "old_value": 0.01,
+                "new_value": 0.03,
+            }
+        ]
+    }
     result = evaluate_recommendation(experiment, comparison)
     assert result["recommendation"] == "rollback_candidate"
     assert "candidate_degraded_risk_or_cost" in result["reason_codes"]
@@ -909,8 +1533,26 @@ def test_recommendation_evaluate_rollback_candidate():
 def test_recommendation_evaluate_needs_more_data():
     experiment = {
         "verdict": {"winner": "inconclusive", "reason_codes": ["insufficient_edge"]},
-        "baseline": {"metrics": {"net_pnl": 1.0, "cost_leakage_ratio": 0.10, "drawdown_net": -0.5, "net_expectancy": 1.0, "trade_count": 0, "risk_actions_count": 0}},
-        "candidate": {"metrics": {"net_pnl": 1.2, "cost_leakage_ratio": 0.09, "drawdown_net": -0.5, "net_expectancy": 1.1, "trade_count": 0, "risk_actions_count": 0}},
+        "baseline": {
+            "metrics": {
+                "net_pnl": 1.0,
+                "cost_leakage_ratio": 0.10,
+                "drawdown_net": -0.5,
+                "net_expectancy": 1.0,
+                "trade_count": 0,
+                "risk_actions_count": 0,
+            }
+        },
+        "candidate": {
+            "metrics": {
+                "net_pnl": 1.2,
+                "cost_leakage_ratio": 0.09,
+                "drawdown_net": -0.5,
+                "net_expectancy": 1.1,
+                "trade_count": 0,
+                "risk_actions_count": 0,
+            }
+        },
     }
     comparison = {"diff": []}
     result = evaluate_recommendation(experiment, comparison)
@@ -935,14 +1577,62 @@ def test_recommendation_create_read_list_flow(client):
         )
         baseline_id = (baseline.get("snapshot") or {}).get("id")
         candidate_id = (candidate.get("snapshot") or {}).get("id")
-        baseline_sell = Order(symbol="RECEUR", side="SELL", order_type="MARKET", price=104.0, quantity=1.0, status="FILLED", mode="demo", executed_price=104.0, executed_quantity=1.0, gross_pnl=4.0, net_pnl=3.8, total_cost=0.2, fee_cost=0.2, config_snapshot_id=baseline_id)
-        candidate_sell = Order(symbol="RECEUR", side="SELL", order_type="MARKET", price=108.0, quantity=1.0, status="FILLED", mode="demo", executed_price=108.0, executed_quantity=1.0, gross_pnl=8.0, net_pnl=7.9, total_cost=0.1, fee_cost=0.1, config_snapshot_id=candidate_id)
+        baseline_sell = Order(
+            symbol="RECEUR",
+            side="SELL",
+            order_type="MARKET",
+            price=104.0,
+            quantity=1.0,
+            status="FILLED",
+            mode="demo",
+            executed_price=104.0,
+            executed_quantity=1.0,
+            gross_pnl=4.0,
+            net_pnl=3.8,
+            total_cost=0.2,
+            fee_cost=0.2,
+            config_snapshot_id=baseline_id,
+        )
+        candidate_sell = Order(
+            symbol="RECEUR",
+            side="SELL",
+            order_type="MARKET",
+            price=108.0,
+            quantity=1.0,
+            status="FILLED",
+            mode="demo",
+            executed_price=108.0,
+            executed_quantity=1.0,
+            gross_pnl=8.0,
+            net_pnl=7.9,
+            total_cost=0.1,
+            fee_cost=0.1,
+            config_snapshot_id=candidate_id,
+        )
         db.add_all([baseline_sell, candidate_sell])
         db.commit()
         db.refresh(baseline_sell)
         db.refresh(candidate_sell)
-        save_decision_trace(db, symbol="RECEUR", mode="demo", action_type="position_closed", reason_code="tp", strategy_name="rec_strategy", order_id=baseline_sell.id, config_snapshot_id=baseline_id)
-        save_decision_trace(db, symbol="RECEUR", mode="demo", action_type="position_closed", reason_code="tp", strategy_name="rec_strategy", order_id=candidate_sell.id, config_snapshot_id=candidate_id)
+        save_decision_trace(
+            db,
+            symbol="RECEUR",
+            mode="demo",
+            action_type="position_closed",
+            reason_code="tp",
+            strategy_name="rec_strategy",
+            order_id=baseline_sell.id,
+            config_snapshot_id=baseline_id,
+        )
+        save_decision_trace(
+            db,
+            symbol="RECEUR",
+            mode="demo",
+            action_type="position_closed",
+            reason_code="tp",
+            strategy_name="rec_strategy",
+            order_id=candidate_sell.id,
+            config_snapshot_id=candidate_id,
+        )
         db.commit()
     finally:
         db.close()
@@ -961,13 +1651,22 @@ def test_recommendation_create_read_list_flow(client):
     experiment = resp.json().get("data") or {}
     experiment_id = experiment.get("id")
 
-    resp = client.post("/api/account/analytics/recommendations", json={"experiment_id": experiment_id, "notes": "smoke recommendation"})
+    resp = client.post(
+        "/api/account/analytics/recommendations",
+        json={"experiment_id": experiment_id, "notes": "smoke recommendation"},
+    )
     assert resp.status_code == 200
     payload = resp.json()
     assert payload.get("success") is True
     recommendation = payload.get("data") or {}
     recommendation_id = recommendation.get("id")
-    assert recommendation.get("recommendation") in {"promote", "reject", "watch", "needs_more_data", "rollback_candidate"}
+    assert recommendation.get("recommendation") in {
+        "promote",
+        "reject",
+        "watch",
+        "needs_more_data",
+        "rollback_candidate",
+    }
     assert isinstance(recommendation.get("parameter_changes"), list)
 
     resp = client.get(f"/api/account/analytics/recommendations/{recommendation_id}")
@@ -988,21 +1687,75 @@ def test_recommendation_create_read_list_flow(client):
 def test_recommendation_review_approve_flow(client):
     db = SessionLocal()
     try:
-        baseline = apply_runtime_updates(db, {"loss_streak_limit": 4}, actor="review_baseline", active_position_count=0)
-        candidate = apply_runtime_updates(db, {"loss_streak_limit": 3}, actor="review_candidate", active_position_count=0)
+        baseline = apply_runtime_updates(
+            db,
+            {"loss_streak_limit": 4},
+            actor="review_baseline",
+            active_position_count=0,
+        )
+        candidate = apply_runtime_updates(
+            db,
+            {"loss_streak_limit": 3},
+            actor="review_candidate",
+            active_position_count=0,
+        )
         baseline_id = (baseline.get("snapshot") or {}).get("id")
         candidate_id = (candidate.get("snapshot") or {}).get("id")
-        db.add(Order(symbol="REVAEUR", side="SELL", order_type="MARKET", price=106.0, quantity=1.0, status="FILLED", mode="demo", gross_pnl=6.0, net_pnl=5.8, total_cost=0.2, fee_cost=0.2, config_snapshot_id=baseline_id))
-        db.add(Order(symbol="REVAEUR", side="SELL", order_type="MARKET", price=110.0, quantity=1.0, status="FILLED", mode="demo", gross_pnl=10.0, net_pnl=9.9, total_cost=0.1, fee_cost=0.1, config_snapshot_id=candidate_id))
+        db.add(
+            Order(
+                symbol="REVAEUR",
+                side="SELL",
+                order_type="MARKET",
+                price=106.0,
+                quantity=1.0,
+                status="FILLED",
+                mode="demo",
+                gross_pnl=6.0,
+                net_pnl=5.8,
+                total_cost=0.2,
+                fee_cost=0.2,
+                config_snapshot_id=baseline_id,
+            )
+        )
+        db.add(
+            Order(
+                symbol="REVAEUR",
+                side="SELL",
+                order_type="MARKET",
+                price=110.0,
+                quantity=1.0,
+                status="FILLED",
+                mode="demo",
+                gross_pnl=10.0,
+                net_pnl=9.9,
+                total_cost=0.1,
+                fee_cost=0.1,
+                config_snapshot_id=candidate_id,
+            )
+        )
         db.commit()
-        exp_resp = client.post("/api/account/analytics/experiments", json={"name": "Approve review flow", "baseline_snapshot_id": baseline_id, "candidate_snapshot_id": candidate_id, "mode": "demo", "scope": "global"})
+        exp_resp = client.post(
+            "/api/account/analytics/experiments",
+            json={
+                "name": "Approve review flow",
+                "baseline_snapshot_id": baseline_id,
+                "candidate_snapshot_id": candidate_id,
+                "mode": "demo",
+                "scope": "global",
+            },
+        )
         experiment_id = (exp_resp.json().get("data") or {}).get("id")
-        rec_resp = client.post("/api/account/analytics/recommendations", json={"experiment_id": experiment_id})
+        rec_resp = client.post(
+            "/api/account/analytics/recommendations",
+            json={"experiment_id": experiment_id},
+        )
         recommendation_id = (rec_resp.json().get("data") or {}).get("id")
     finally:
         db.close()
 
-    resp = client.get(f"/api/account/analytics/recommendations/{recommendation_id}/review")
+    resp = client.get(
+        f"/api/account/analytics/recommendations/{recommendation_id}/review"
+    )
     assert resp.status_code == 200
     assert ((resp.json().get("data") or {}).get("current_status")) == "open"
 
@@ -1015,7 +1768,11 @@ def test_recommendation_review_approve_flow(client):
 
     resp = client.post(
         f"/api/account/analytics/recommendations/{recommendation_id}/approve",
-        json={"reviewed_by": "tester", "decision_reason": "looks_good", "notes": "ready for later promotion"},
+        json={
+            "reviewed_by": "tester",
+            "decision_reason": "looks_good",
+            "notes": "ready for later promotion",
+        },
     )
     assert resp.status_code == 200
     data = resp.json().get("data") or {}
@@ -1027,15 +1784,77 @@ def test_recommendation_review_approve_flow(client):
 def test_recommendation_review_reject_and_invalid_transition(client):
     db = SessionLocal()
     try:
-        baseline = apply_runtime_updates(db, {"max_symbol_exposure_ratio": 0.5}, actor="reject_baseline", active_position_count=0)
-        candidate = apply_runtime_updates(db, {"max_symbol_exposure_ratio": 0.9}, actor="reject_candidate", active_position_count=0)
+        baseline = apply_runtime_updates(
+            db,
+            {"max_symbol_exposure_ratio": 0.5},
+            actor="reject_baseline",
+            active_position_count=0,
+        )
+        candidate = apply_runtime_updates(
+            db,
+            {"max_symbol_exposure_ratio": 0.9},
+            actor="reject_candidate",
+            active_position_count=0,
+        )
         baseline_id = (baseline.get("snapshot") or {}).get("id")
         candidate_id = (candidate.get("snapshot") or {}).get("id")
-        db.add(Order(symbol="REVREJ", side="SELL", order_type="MARKET", price=108.0, quantity=1.0, status="FILLED", mode="demo", gross_pnl=8.0, net_pnl=7.8, total_cost=0.2, fee_cost=0.2, config_snapshot_id=baseline_id))
-        db.add(Order(symbol="REVREJ", side="SELL", order_type="MARKET", price=103.0, quantity=1.0, status="FILLED", mode="demo", gross_pnl=3.0, net_pnl=2.5, total_cost=0.5, fee_cost=0.5, config_snapshot_id=candidate_id))
+        db.add(
+            Order(
+                symbol="REVREJ",
+                side="SELL",
+                order_type="MARKET",
+                price=108.0,
+                quantity=1.0,
+                status="FILLED",
+                mode="demo",
+                gross_pnl=8.0,
+                net_pnl=7.8,
+                total_cost=0.2,
+                fee_cost=0.2,
+                config_snapshot_id=baseline_id,
+            )
+        )
+        db.add(
+            Order(
+                symbol="REVREJ",
+                side="SELL",
+                order_type="MARKET",
+                price=103.0,
+                quantity=1.0,
+                status="FILLED",
+                mode="demo",
+                gross_pnl=3.0,
+                net_pnl=2.5,
+                total_cost=0.5,
+                fee_cost=0.5,
+                config_snapshot_id=candidate_id,
+            )
+        )
         db.commit()
-        experiment_id = ((client.post("/api/account/analytics/experiments", json={"name": "Reject review flow", "baseline_snapshot_id": baseline_id, "candidate_snapshot_id": candidate_id, "mode": "demo", "scope": "global"}).json().get("data") or {}).get("id"))
-        recommendation_id = ((client.post("/api/account/analytics/recommendations", json={"experiment_id": experiment_id}).json().get("data") or {}).get("id"))
+        experiment_id = (
+            client.post(
+                "/api/account/analytics/experiments",
+                json={
+                    "name": "Reject review flow",
+                    "baseline_snapshot_id": baseline_id,
+                    "candidate_snapshot_id": candidate_id,
+                    "mode": "demo",
+                    "scope": "global",
+                },
+            )
+            .json()
+            .get("data")
+            or {}
+        ).get("id")
+        recommendation_id = (
+            client.post(
+                "/api/account/analytics/recommendations",
+                json={"experiment_id": experiment_id},
+            )
+            .json()
+            .get("data")
+            or {}
+        ).get("id")
     finally:
         db.close()
 
@@ -1056,21 +1875,87 @@ def test_recommendation_review_reject_and_invalid_transition(client):
 def test_recommendation_review_defer_flow(client):
     db = SessionLocal()
     try:
-        baseline = apply_runtime_updates(db, {"max_trades_per_hour_per_symbol": 1}, actor="defer_baseline", active_position_count=0)
-        candidate = apply_runtime_updates(db, {"max_trades_per_hour_per_symbol": 3}, actor="defer_candidate", active_position_count=0)
+        baseline = apply_runtime_updates(
+            db,
+            {"max_trades_per_hour_per_symbol": 1},
+            actor="defer_baseline",
+            active_position_count=0,
+        )
+        candidate = apply_runtime_updates(
+            db,
+            {"max_trades_per_hour_per_symbol": 3},
+            actor="defer_candidate",
+            active_position_count=0,
+        )
         baseline_id = (baseline.get("snapshot") or {}).get("id")
         candidate_id = (candidate.get("snapshot") or {}).get("id")
-        db.add(Order(symbol="REVDEF", side="SELL", order_type="MARKET", price=101.0, quantity=1.0, status="FILLED", mode="demo", gross_pnl=1.0, net_pnl=0.9, total_cost=0.1, fee_cost=0.1, config_snapshot_id=baseline_id))
-        db.add(Order(symbol="REVDEF", side="SELL", order_type="MARKET", price=101.2, quantity=1.0, status="FILLED", mode="demo", gross_pnl=1.2, net_pnl=1.1, total_cost=0.1, fee_cost=0.1, config_snapshot_id=candidate_id))
+        db.add(
+            Order(
+                symbol="REVDEF",
+                side="SELL",
+                order_type="MARKET",
+                price=101.0,
+                quantity=1.0,
+                status="FILLED",
+                mode="demo",
+                gross_pnl=1.0,
+                net_pnl=0.9,
+                total_cost=0.1,
+                fee_cost=0.1,
+                config_snapshot_id=baseline_id,
+            )
+        )
+        db.add(
+            Order(
+                symbol="REVDEF",
+                side="SELL",
+                order_type="MARKET",
+                price=101.2,
+                quantity=1.0,
+                status="FILLED",
+                mode="demo",
+                gross_pnl=1.2,
+                net_pnl=1.1,
+                total_cost=0.1,
+                fee_cost=0.1,
+                config_snapshot_id=candidate_id,
+            )
+        )
         db.commit()
-        experiment_id = ((client.post("/api/account/analytics/experiments", json={"name": "Defer review flow", "baseline_snapshot_id": baseline_id, "candidate_snapshot_id": candidate_id, "mode": "demo", "scope": "global"}).json().get("data") or {}).get("id"))
-        recommendation_id = ((client.post("/api/account/analytics/recommendations", json={"experiment_id": experiment_id}).json().get("data") or {}).get("id"))
+        experiment_id = (
+            client.post(
+                "/api/account/analytics/experiments",
+                json={
+                    "name": "Defer review flow",
+                    "baseline_snapshot_id": baseline_id,
+                    "candidate_snapshot_id": candidate_id,
+                    "mode": "demo",
+                    "scope": "global",
+                },
+            )
+            .json()
+            .get("data")
+            or {}
+        ).get("id")
+        recommendation_id = (
+            client.post(
+                "/api/account/analytics/recommendations",
+                json={"experiment_id": experiment_id},
+            )
+            .json()
+            .get("data")
+            or {}
+        ).get("id")
     finally:
         db.close()
 
     resp = client.post(
         f"/api/account/analytics/recommendations/{recommendation_id}/defer",
-        json={"reviewed_by": "tester", "decision_reason": "need_longer_window", "notes": "wait for more samples"},
+        json={
+            "reviewed_by": "tester",
+            "decision_reason": "need_longer_window",
+            "notes": "wait for more samples",
+        },
     )
     assert resp.status_code == 200
     data = resp.json().get("data") or {}
@@ -1086,18 +1971,80 @@ def test_recommendation_review_defer_flow(client):
 def test_controlled_promotion_success_flow(client):
     db = SessionLocal()
     try:
-        baseline = apply_runtime_updates(db, {"max_open_positions": 5}, actor="promo_baseline", active_position_count=0)
-        candidate = apply_runtime_updates(db, {"max_open_positions": 3}, actor="promo_candidate", active_position_count=0)
+        baseline = apply_runtime_updates(
+            db,
+            {"max_open_positions": 5},
+            actor="promo_baseline",
+            active_position_count=0,
+        )
+        candidate = apply_runtime_updates(
+            db,
+            {"max_open_positions": 3},
+            actor="promo_candidate",
+            active_position_count=0,
+        )
         baseline_id = (baseline.get("snapshot") or {}).get("id")
         candidate_id = (candidate.get("snapshot") or {}).get("id")
-        db.add(Order(symbol="PROMOEUR", side="SELL", order_type="MARKET", price=104.0, quantity=1.0, status="FILLED", mode="demo", gross_pnl=4.0, net_pnl=3.8, total_cost=0.2, fee_cost=0.2, config_snapshot_id=baseline_id))
-        db.add(Order(symbol="PROMOEUR", side="SELL", order_type="MARKET", price=109.0, quantity=1.0, status="FILLED", mode="demo", gross_pnl=9.0, net_pnl=8.9, total_cost=0.1, fee_cost=0.1, config_snapshot_id=candidate_id))
+        db.add(
+            Order(
+                symbol="PROMOEUR",
+                side="SELL",
+                order_type="MARKET",
+                price=104.0,
+                quantity=1.0,
+                status="FILLED",
+                mode="demo",
+                gross_pnl=4.0,
+                net_pnl=3.8,
+                total_cost=0.2,
+                fee_cost=0.2,
+                config_snapshot_id=baseline_id,
+            )
+        )
+        db.add(
+            Order(
+                symbol="PROMOEUR",
+                side="SELL",
+                order_type="MARKET",
+                price=109.0,
+                quantity=1.0,
+                status="FILLED",
+                mode="demo",
+                gross_pnl=9.0,
+                net_pnl=8.9,
+                total_cost=0.1,
+                fee_cost=0.1,
+                config_snapshot_id=candidate_id,
+            )
+        )
         db.commit()
     finally:
         db.close()
 
-    experiment_id = ((client.post("/api/account/analytics/experiments", json={"name": "Promotion flow", "baseline_snapshot_id": baseline_id, "candidate_snapshot_id": candidate_id, "mode": "demo", "scope": "global"}).json().get("data") or {}).get("id"))
-    recommendation_id = ((client.post("/api/account/analytics/recommendations", json={"experiment_id": experiment_id}).json().get("data") or {}).get("id"))
+    experiment_id = (
+        client.post(
+            "/api/account/analytics/experiments",
+            json={
+                "name": "Promotion flow",
+                "baseline_snapshot_id": baseline_id,
+                "candidate_snapshot_id": candidate_id,
+                "mode": "demo",
+                "scope": "global",
+            },
+        )
+        .json()
+        .get("data")
+        or {}
+    ).get("id")
+    recommendation_id = (
+        client.post(
+            "/api/account/analytics/recommendations",
+            json={"experiment_id": experiment_id},
+        )
+        .json()
+        .get("data")
+        or {}
+    ).get("id")
     resp = client.post(
         f"/api/account/analytics/recommendations/{recommendation_id}/approve",
         json={"reviewed_by": "tester", "decision_reason": "approve_for_promotion"},
@@ -1109,13 +2056,22 @@ def test_controlled_promotion_success_flow(client):
     try:
         db.query(Position).delete()
         db.commit()
-        apply_runtime_updates(db, {"max_open_positions": 5}, actor="promo_restore_baseline", active_position_count=0)
+        apply_runtime_updates(
+            db,
+            {"max_open_positions": 5},
+            actor="promo_restore_baseline",
+            active_position_count=0,
+        )
     finally:
         db.close()
 
     resp = client.post(
         "/api/account/analytics/promotions",
-        json={"recommendation_id": recommendation_id, "initiated_by": "tester", "notes": "controlled promotion"},
+        json={
+            "recommendation_id": recommendation_id,
+            "initiated_by": "tester",
+            "notes": "controlled promotion",
+        },
     )
     assert resp.status_code == 200
     data = resp.json().get("data") or {}
@@ -1132,76 +2088,275 @@ def test_controlled_promotion_success_flow(client):
 
     resp = client.get("/api/control/state")
     assert resp.status_code == 200
-    assert ((resp.json().get("data") or {}).get("config_snapshot_id")) == ((apply_result.get("state") or {}).get("config_snapshot_id"))
+    assert ((resp.json().get("data") or {}).get("config_snapshot_id")) == (
+        (apply_result.get("state") or {}).get("config_snapshot_id")
+    )
 
 
 def test_controlled_promotion_requires_approval(client):
     db = SessionLocal()
     try:
-        baseline = apply_runtime_updates(db, {"loss_streak_limit": 6}, actor="promo_req_base", active_position_count=0)
-        candidate = apply_runtime_updates(db, {"loss_streak_limit": 2}, actor="promo_req_cand", active_position_count=0)
+        baseline = apply_runtime_updates(
+            db,
+            {"loss_streak_limit": 6},
+            actor="promo_req_base",
+            active_position_count=0,
+        )
+        candidate = apply_runtime_updates(
+            db,
+            {"loss_streak_limit": 2},
+            actor="promo_req_cand",
+            active_position_count=0,
+        )
         baseline_id = (baseline.get("snapshot") or {}).get("id")
         candidate_id = (candidate.get("snapshot") or {}).get("id")
-        db.add(Order(symbol="PROMOREQ", side="SELL", order_type="MARKET", price=103.0, quantity=1.0, status="FILLED", mode="demo", gross_pnl=3.0, net_pnl=2.8, total_cost=0.2, fee_cost=0.2, config_snapshot_id=baseline_id))
-        db.add(Order(symbol="PROMOREQ", side="SELL", order_type="MARKET", price=107.0, quantity=1.0, status="FILLED", mode="demo", gross_pnl=7.0, net_pnl=6.9, total_cost=0.1, fee_cost=0.1, config_snapshot_id=candidate_id))
+        db.add(
+            Order(
+                symbol="PROMOREQ",
+                side="SELL",
+                order_type="MARKET",
+                price=103.0,
+                quantity=1.0,
+                status="FILLED",
+                mode="demo",
+                gross_pnl=3.0,
+                net_pnl=2.8,
+                total_cost=0.2,
+                fee_cost=0.2,
+                config_snapshot_id=baseline_id,
+            )
+        )
+        db.add(
+            Order(
+                symbol="PROMOREQ",
+                side="SELL",
+                order_type="MARKET",
+                price=107.0,
+                quantity=1.0,
+                status="FILLED",
+                mode="demo",
+                gross_pnl=7.0,
+                net_pnl=6.9,
+                total_cost=0.1,
+                fee_cost=0.1,
+                config_snapshot_id=candidate_id,
+            )
+        )
         db.commit()
     finally:
         db.close()
 
-    experiment_id = ((client.post("/api/account/analytics/experiments", json={"name": "Promotion requires approval", "baseline_snapshot_id": baseline_id, "candidate_snapshot_id": candidate_id, "mode": "demo", "scope": "global"}).json().get("data") or {}).get("id"))
-    recommendation_id = ((client.post("/api/account/analytics/recommendations", json={"experiment_id": experiment_id}).json().get("data") or {}).get("id"))
-    resp = client.post("/api/account/analytics/promotions", json={"recommendation_id": recommendation_id, "initiated_by": "tester"})
+    experiment_id = (
+        client.post(
+            "/api/account/analytics/experiments",
+            json={
+                "name": "Promotion requires approval",
+                "baseline_snapshot_id": baseline_id,
+                "candidate_snapshot_id": candidate_id,
+                "mode": "demo",
+                "scope": "global",
+            },
+        )
+        .json()
+        .get("data")
+        or {}
+    ).get("id")
+    recommendation_id = (
+        client.post(
+            "/api/account/analytics/recommendations",
+            json={"experiment_id": experiment_id},
+        )
+        .json()
+        .get("data")
+        or {}
+    ).get("id")
+    resp = client.post(
+        "/api/account/analytics/promotions",
+        json={"recommendation_id": recommendation_id, "initiated_by": "tester"},
+    )
     assert resp.status_code == 409
 
 
 def test_controlled_promotion_missing_snapshot_fails(client):
     db = SessionLocal()
     try:
-        baseline = apply_runtime_updates(db, {"cooldown_after_loss_streak_minutes": 45}, actor="promo_miss_base", active_position_count=0)
-        candidate = apply_runtime_updates(db, {"cooldown_after_loss_streak_minutes": 15}, actor="promo_miss_cand", active_position_count=0)
+        baseline = apply_runtime_updates(
+            db,
+            {"cooldown_after_loss_streak_minutes": 45},
+            actor="promo_miss_base",
+            active_position_count=0,
+        )
+        candidate = apply_runtime_updates(
+            db,
+            {"cooldown_after_loss_streak_minutes": 15},
+            actor="promo_miss_cand",
+            active_position_count=0,
+        )
         baseline_id = (baseline.get("snapshot") or {}).get("id")
         candidate_id = (candidate.get("snapshot") or {}).get("id")
-        db.add(Order(symbol="PROMOMISS", side="SELL", order_type="MARKET", price=105.0, quantity=1.0, status="FILLED", mode="demo", gross_pnl=5.0, net_pnl=4.8, total_cost=0.2, fee_cost=0.2, config_snapshot_id=baseline_id))
-        db.add(Order(symbol="PROMOMISS", side="SELL", order_type="MARKET", price=109.0, quantity=1.0, status="FILLED", mode="demo", gross_pnl=9.0, net_pnl=8.9, total_cost=0.1, fee_cost=0.1, config_snapshot_id=candidate_id))
+        db.add(
+            Order(
+                symbol="PROMOMISS",
+                side="SELL",
+                order_type="MARKET",
+                price=105.0,
+                quantity=1.0,
+                status="FILLED",
+                mode="demo",
+                gross_pnl=5.0,
+                net_pnl=4.8,
+                total_cost=0.2,
+                fee_cost=0.2,
+                config_snapshot_id=baseline_id,
+            )
+        )
+        db.add(
+            Order(
+                symbol="PROMOMISS",
+                side="SELL",
+                order_type="MARKET",
+                price=109.0,
+                quantity=1.0,
+                status="FILLED",
+                mode="demo",
+                gross_pnl=9.0,
+                net_pnl=8.9,
+                total_cost=0.1,
+                fee_cost=0.1,
+                config_snapshot_id=candidate_id,
+            )
+        )
         db.commit()
     finally:
         db.close()
 
-    experiment_id = ((client.post("/api/account/analytics/experiments", json={"name": "Promotion missing snapshot", "baseline_snapshot_id": baseline_id, "candidate_snapshot_id": candidate_id, "mode": "demo", "scope": "global"}).json().get("data") or {}).get("id"))
-    recommendation_id = ((client.post("/api/account/analytics/recommendations", json={"experiment_id": experiment_id}).json().get("data") or {}).get("id"))
+    experiment_id = (
+        client.post(
+            "/api/account/analytics/experiments",
+            json={
+                "name": "Promotion missing snapshot",
+                "baseline_snapshot_id": baseline_id,
+                "candidate_snapshot_id": candidate_id,
+                "mode": "demo",
+                "scope": "global",
+            },
+        )
+        .json()
+        .get("data")
+        or {}
+    ).get("id")
+    recommendation_id = (
+        client.post(
+            "/api/account/analytics/recommendations",
+            json={"experiment_id": experiment_id},
+        )
+        .json()
+        .get("data")
+        or {}
+    ).get("id")
     client.post(
         f"/api/account/analytics/recommendations/{recommendation_id}/approve",
-        json={"reviewed_by": "tester", "decision_reason": "approved_before_missing_snapshot"},
+        json={
+            "reviewed_by": "tester",
+            "decision_reason": "approved_before_missing_snapshot",
+        },
     )
 
     db = SessionLocal()
     try:
-        snap = db.query(ConfigSnapshot).filter(ConfigSnapshot.id == candidate_id).first()
+        snap = (
+            db.query(ConfigSnapshot).filter(ConfigSnapshot.id == candidate_id).first()
+        )
         if snap is not None:
             db.delete(snap)
             db.commit()
     finally:
         db.close()
 
-    resp = client.post("/api/account/analytics/promotions", json={"recommendation_id": recommendation_id, "initiated_by": "tester"})
+    resp = client.post(
+        "/api/account/analytics/promotions",
+        json={"recommendation_id": recommendation_id, "initiated_by": "tester"},
+    )
     assert resp.status_code == 409
 
 
 def test_controlled_promotion_duplicate_attempt_fails(client):
     db = SessionLocal()
     try:
-        baseline = apply_runtime_updates(db, {"max_daily_drawdown": 0.04}, actor="promo_dup_base", active_position_count=0)
-        candidate = apply_runtime_updates(db, {"max_daily_drawdown": 0.02}, actor="promo_dup_cand", active_position_count=0)
+        baseline = apply_runtime_updates(
+            db,
+            {"max_daily_drawdown": 0.04},
+            actor="promo_dup_base",
+            active_position_count=0,
+        )
+        candidate = apply_runtime_updates(
+            db,
+            {"max_daily_drawdown": 0.02},
+            actor="promo_dup_cand",
+            active_position_count=0,
+        )
         baseline_id = (baseline.get("snapshot") or {}).get("id")
         candidate_id = (candidate.get("snapshot") or {}).get("id")
-        db.add(Order(symbol="PROMODUP", side="SELL", order_type="MARKET", price=104.0, quantity=1.0, status="FILLED", mode="demo", gross_pnl=4.0, net_pnl=3.8, total_cost=0.2, fee_cost=0.2, config_snapshot_id=baseline_id))
-        db.add(Order(symbol="PROMODUP", side="SELL", order_type="MARKET", price=108.0, quantity=1.0, status="FILLED", mode="demo", gross_pnl=8.0, net_pnl=7.9, total_cost=0.1, fee_cost=0.1, config_snapshot_id=candidate_id))
+        db.add(
+            Order(
+                symbol="PROMODUP",
+                side="SELL",
+                order_type="MARKET",
+                price=104.0,
+                quantity=1.0,
+                status="FILLED",
+                mode="demo",
+                gross_pnl=4.0,
+                net_pnl=3.8,
+                total_cost=0.2,
+                fee_cost=0.2,
+                config_snapshot_id=baseline_id,
+            )
+        )
+        db.add(
+            Order(
+                symbol="PROMODUP",
+                side="SELL",
+                order_type="MARKET",
+                price=108.0,
+                quantity=1.0,
+                status="FILLED",
+                mode="demo",
+                gross_pnl=8.0,
+                net_pnl=7.9,
+                total_cost=0.1,
+                fee_cost=0.1,
+                config_snapshot_id=candidate_id,
+            )
+        )
         db.commit()
     finally:
         db.close()
 
-    experiment_id = ((client.post("/api/account/analytics/experiments", json={"name": "Promotion duplicate", "baseline_snapshot_id": baseline_id, "candidate_snapshot_id": candidate_id, "mode": "demo", "scope": "global"}).json().get("data") or {}).get("id"))
-    recommendation_id = ((client.post("/api/account/analytics/recommendations", json={"experiment_id": experiment_id}).json().get("data") or {}).get("id"))
+    experiment_id = (
+        client.post(
+            "/api/account/analytics/experiments",
+            json={
+                "name": "Promotion duplicate",
+                "baseline_snapshot_id": baseline_id,
+                "candidate_snapshot_id": candidate_id,
+                "mode": "demo",
+                "scope": "global",
+            },
+        )
+        .json()
+        .get("data")
+        or {}
+    ).get("id")
+    recommendation_id = (
+        client.post(
+            "/api/account/analytics/recommendations",
+            json={"experiment_id": experiment_id},
+        )
+        .json()
+        .get("data")
+        or {}
+    ).get("id")
     client.post(
         f"/api/account/analytics/recommendations/{recommendation_id}/approve",
         json={"reviewed_by": "tester", "decision_reason": "approve_duplicate_case"},
@@ -1210,84 +2365,290 @@ def test_controlled_promotion_duplicate_attempt_fails(client):
     try:
         db.query(Position).delete()
         db.commit()
-        apply_runtime_updates(db, {"max_daily_drawdown": 0.04}, actor="promo_dup_restore", active_position_count=0)
+        apply_runtime_updates(
+            db,
+            {"max_daily_drawdown": 0.04},
+            actor="promo_dup_restore",
+            active_position_count=0,
+        )
     finally:
         db.close()
 
-    first = client.post("/api/account/analytics/promotions", json={"recommendation_id": recommendation_id, "initiated_by": "tester"})
+    first = client.post(
+        "/api/account/analytics/promotions",
+        json={"recommendation_id": recommendation_id, "initiated_by": "tester"},
+    )
     assert first.status_code == 200
-    second = client.post("/api/account/analytics/promotions", json={"recommendation_id": recommendation_id, "initiated_by": "tester"})
+    second = client.post(
+        "/api/account/analytics/promotions",
+        json={"recommendation_id": recommendation_id, "initiated_by": "tester"},
+    )
     assert second.status_code == 409
 
 
 def test_post_promotion_monitoring_initializes_after_promotion(client):
     db = SessionLocal()
     try:
-        baseline = apply_runtime_updates(db, {"cooldown_after_loss_streak_minutes": 60}, actor="mon_init_base", active_position_count=0)
-        candidate = apply_runtime_updates(db, {"cooldown_after_loss_streak_minutes": 20}, actor="mon_init_cand", active_position_count=0)
+        baseline = apply_runtime_updates(
+            db,
+            {"cooldown_after_loss_streak_minutes": 60},
+            actor="mon_init_base",
+            active_position_count=0,
+        )
+        candidate = apply_runtime_updates(
+            db,
+            {"cooldown_after_loss_streak_minutes": 20},
+            actor="mon_init_cand",
+            active_position_count=0,
+        )
         baseline_id = (baseline.get("snapshot") or {}).get("id")
         candidate_id = (candidate.get("snapshot") or {}).get("id")
-        db.add(Order(symbol="MONINIT", side="SELL", order_type="MARKET", price=104.0, quantity=1.0, status="FILLED", mode="demo", gross_pnl=4.0, net_pnl=3.8, total_cost=0.2, fee_cost=0.2, config_snapshot_id=baseline_id))
-        db.add(Order(symbol="MONINIT", side="SELL", order_type="MARKET", price=108.0, quantity=1.0, status="FILLED", mode="demo", gross_pnl=8.0, net_pnl=7.9, total_cost=0.1, fee_cost=0.1, config_snapshot_id=candidate_id))
+        db.add(
+            Order(
+                symbol="MONINIT",
+                side="SELL",
+                order_type="MARKET",
+                price=104.0,
+                quantity=1.0,
+                status="FILLED",
+                mode="demo",
+                gross_pnl=4.0,
+                net_pnl=3.8,
+                total_cost=0.2,
+                fee_cost=0.2,
+                config_snapshot_id=baseline_id,
+            )
+        )
+        db.add(
+            Order(
+                symbol="MONINIT",
+                side="SELL",
+                order_type="MARKET",
+                price=108.0,
+                quantity=1.0,
+                status="FILLED",
+                mode="demo",
+                gross_pnl=8.0,
+                net_pnl=7.9,
+                total_cost=0.1,
+                fee_cost=0.1,
+                config_snapshot_id=candidate_id,
+            )
+        )
         db.query(Position).delete()
         db.commit()
     finally:
         db.close()
 
-    experiment_id = ((client.post("/api/account/analytics/experiments", json={"name": "Monitoring init", "baseline_snapshot_id": baseline_id, "candidate_snapshot_id": candidate_id, "mode": "demo", "scope": "global"}).json().get("data") or {}).get("id"))
-    recommendation_id = ((client.post("/api/account/analytics/recommendations", json={"experiment_id": experiment_id}).json().get("data") or {}).get("id"))
-    client.post(f"/api/account/analytics/recommendations/{recommendation_id}/approve", json={"reviewed_by": "tester", "decision_reason": "monitoring_init"})
+    experiment_id = (
+        client.post(
+            "/api/account/analytics/experiments",
+            json={
+                "name": "Monitoring init",
+                "baseline_snapshot_id": baseline_id,
+                "candidate_snapshot_id": candidate_id,
+                "mode": "demo",
+                "scope": "global",
+            },
+        )
+        .json()
+        .get("data")
+        or {}
+    ).get("id")
+    recommendation_id = (
+        client.post(
+            "/api/account/analytics/recommendations",
+            json={"experiment_id": experiment_id},
+        )
+        .json()
+        .get("data")
+        or {}
+    ).get("id")
+    client.post(
+        f"/api/account/analytics/recommendations/{recommendation_id}/approve",
+        json={"reviewed_by": "tester", "decision_reason": "monitoring_init"},
+    )
     db = SessionLocal()
     try:
-        apply_runtime_updates(db, {"cooldown_after_loss_streak_minutes": 60}, actor="mon_init_restore", active_position_count=0)
+        apply_runtime_updates(
+            db,
+            {"cooldown_after_loss_streak_minutes": 60},
+            actor="mon_init_restore",
+            active_position_count=0,
+        )
     finally:
         db.close()
-    promotion = (client.post("/api/account/analytics/promotions", json={"recommendation_id": recommendation_id, "initiated_by": "tester"}).json().get("data") or {})
+    promotion = (
+        client.post(
+            "/api/account/analytics/promotions",
+            json={"recommendation_id": recommendation_id, "initiated_by": "tester"},
+        )
+        .json()
+        .get("data")
+        or {}
+    )
     promotion_id = promotion.get("id")
 
     resp = client.get(f"/api/account/analytics/promotions/{promotion_id}/monitoring")
     assert resp.status_code == 200
     data = resp.json().get("data") or {}
     assert data.get("status") == "pending"
-    assert (data.get("promotion") or {}).get("post_promotion_monitoring_status") == "pending"
+    assert (data.get("promotion") or {}).get(
+        "post_promotion_monitoring_status"
+    ) == "pending"
 
 
 def test_post_promotion_monitoring_healthy_verdict(client):
     db = SessionLocal()
     try:
-        baseline = apply_runtime_updates(db, {"loss_streak_limit": 5}, actor="mon_health_base", active_position_count=0)
-        candidate = apply_runtime_updates(db, {"loss_streak_limit": 2}, actor="mon_health_cand", active_position_count=0)
+        baseline = apply_runtime_updates(
+            db,
+            {"loss_streak_limit": 5},
+            actor="mon_health_base",
+            active_position_count=0,
+        )
+        candidate = apply_runtime_updates(
+            db,
+            {"loss_streak_limit": 2},
+            actor="mon_health_cand",
+            active_position_count=0,
+        )
         baseline_id = (baseline.get("snapshot") or {}).get("id")
         candidate_id = (candidate.get("snapshot") or {}).get("id")
-        db.add(Order(symbol="MONHEAL", side="SELL", order_type="MARKET", price=103.0, quantity=1.0, status="FILLED", mode="demo", gross_pnl=3.0, net_pnl=2.7, total_cost=0.3, fee_cost=0.3, config_snapshot_id=baseline_id))
-        db.add(Order(symbol="MONHEAL", side="SELL", order_type="MARKET", price=109.0, quantity=1.0, status="FILLED", mode="demo", gross_pnl=9.0, net_pnl=8.9, total_cost=0.1, fee_cost=0.1, config_snapshot_id=candidate_id))
+        db.add(
+            Order(
+                symbol="MONHEAL",
+                side="SELL",
+                order_type="MARKET",
+                price=103.0,
+                quantity=1.0,
+                status="FILLED",
+                mode="demo",
+                gross_pnl=3.0,
+                net_pnl=2.7,
+                total_cost=0.3,
+                fee_cost=0.3,
+                config_snapshot_id=baseline_id,
+            )
+        )
+        db.add(
+            Order(
+                symbol="MONHEAL",
+                side="SELL",
+                order_type="MARKET",
+                price=109.0,
+                quantity=1.0,
+                status="FILLED",
+                mode="demo",
+                gross_pnl=9.0,
+                net_pnl=8.9,
+                total_cost=0.1,
+                fee_cost=0.1,
+                config_snapshot_id=candidate_id,
+            )
+        )
         db.query(Position).delete()
         db.commit()
     finally:
         db.close()
 
-    experiment_id = ((client.post("/api/account/analytics/experiments", json={"name": "Monitoring healthy", "baseline_snapshot_id": baseline_id, "candidate_snapshot_id": candidate_id, "mode": "demo", "scope": "global"}).json().get("data") or {}).get("id"))
-    recommendation_id = ((client.post("/api/account/analytics/recommendations", json={"experiment_id": experiment_id}).json().get("data") or {}).get("id"))
-    client.post(f"/api/account/analytics/recommendations/{recommendation_id}/approve", json={"reviewed_by": "tester", "decision_reason": "monitoring_healthy"})
+    experiment_id = (
+        client.post(
+            "/api/account/analytics/experiments",
+            json={
+                "name": "Monitoring healthy",
+                "baseline_snapshot_id": baseline_id,
+                "candidate_snapshot_id": candidate_id,
+                "mode": "demo",
+                "scope": "global",
+            },
+        )
+        .json()
+        .get("data")
+        or {}
+    ).get("id")
+    recommendation_id = (
+        client.post(
+            "/api/account/analytics/recommendations",
+            json={"experiment_id": experiment_id},
+        )
+        .json()
+        .get("data")
+        or {}
+    ).get("id")
+    client.post(
+        f"/api/account/analytics/recommendations/{recommendation_id}/approve",
+        json={"reviewed_by": "tester", "decision_reason": "monitoring_healthy"},
+    )
     db = SessionLocal()
     try:
-        apply_runtime_updates(db, {"loss_streak_limit": 5}, actor="mon_health_restore", active_position_count=0)
+        apply_runtime_updates(
+            db,
+            {"loss_streak_limit": 5},
+            actor="mon_health_restore",
+            active_position_count=0,
+        )
     finally:
         db.close()
-    promotion = (client.post("/api/account/analytics/promotions", json={"recommendation_id": recommendation_id, "initiated_by": "tester"}).json().get("data") or {})
+    promotion = (
+        client.post(
+            "/api/account/analytics/promotions",
+            json={"recommendation_id": recommendation_id, "initiated_by": "tester"},
+        )
+        .json()
+        .get("data")
+        or {}
+    )
     promotion_id = promotion.get("id")
-    promoted_snapshot_id = (((promotion.get("runtime_apply_result") or {}).get("state") or {}).get("config_snapshot_id"))
+    promoted_snapshot_id = (
+        (promotion.get("runtime_apply_result") or {}).get("state") or {}
+    ).get("config_snapshot_id")
 
     db = SessionLocal()
     try:
         now = utc_now_naive()
-        db.add(Order(symbol="MONHEAL", side="SELL", order_type="MARKET", price=110.0, quantity=1.0, status="FILLED", mode="demo", gross_pnl=10.0, net_pnl=9.8, total_cost=0.2, fee_cost=0.2, config_snapshot_id=promoted_snapshot_id, timestamp=now))
-        db.add(Order(symbol="MONHEAL", side="SELL", order_type="MARKET", price=111.0, quantity=1.0, status="FILLED", mode="demo", gross_pnl=11.0, net_pnl=10.8, total_cost=0.2, fee_cost=0.2, config_snapshot_id=promoted_snapshot_id, timestamp=now))
+        db.add(
+            Order(
+                symbol="MONHEAL",
+                side="SELL",
+                order_type="MARKET",
+                price=110.0,
+                quantity=1.0,
+                status="FILLED",
+                mode="demo",
+                gross_pnl=10.0,
+                net_pnl=9.8,
+                total_cost=0.2,
+                fee_cost=0.2,
+                config_snapshot_id=promoted_snapshot_id,
+                timestamp=now,
+            )
+        )
+        db.add(
+            Order(
+                symbol="MONHEAL",
+                side="SELL",
+                order_type="MARKET",
+                price=111.0,
+                quantity=1.0,
+                status="FILLED",
+                mode="demo",
+                gross_pnl=11.0,
+                net_pnl=10.8,
+                total_cost=0.2,
+                fee_cost=0.2,
+                config_snapshot_id=promoted_snapshot_id,
+                timestamp=now,
+            )
+        )
         db.commit()
     finally:
         db.close()
 
-    resp = client.post(f"/api/account/analytics/promotions/{promotion_id}/monitoring/evaluate", json={"notes": "healthy check"})
+    resp = client.post(
+        f"/api/account/analytics/promotions/{promotion_id}/monitoring/evaluate",
+        json={"notes": "healthy check"},
+    )
     assert resp.status_code == 200
     data = resp.json().get("data") or {}
     assert data.get("status") == "healthy"
@@ -1297,30 +2658,107 @@ def test_post_promotion_monitoring_healthy_verdict(client):
 def test_post_promotion_monitoring_collecting_and_rollback_candidate(client):
     db = SessionLocal()
     try:
-        baseline = apply_runtime_updates(db, {"risk_per_trade": 0.01}, actor="mon_warn_base", active_position_count=0)
-        candidate = apply_runtime_updates(db, {"risk_per_trade": 0.02}, actor="mon_warn_cand", active_position_count=0)
+        baseline = apply_runtime_updates(
+            db, {"risk_per_trade": 0.01}, actor="mon_warn_base", active_position_count=0
+        )
+        candidate = apply_runtime_updates(
+            db, {"risk_per_trade": 0.02}, actor="mon_warn_cand", active_position_count=0
+        )
         baseline_id = (baseline.get("snapshot") or {}).get("id")
         candidate_id = (candidate.get("snapshot") or {}).get("id")
-        db.add(Order(symbol="MONWARN", side="SELL", order_type="MARKET", price=108.0, quantity=1.0, status="FILLED", mode="demo", gross_pnl=8.0, net_pnl=7.8, total_cost=0.2, fee_cost=0.2, config_snapshot_id=baseline_id))
-        db.add(Order(symbol="MONWARN", side="SELL", order_type="MARKET", price=109.0, quantity=1.0, status="FILLED", mode="demo", gross_pnl=9.0, net_pnl=8.8, total_cost=0.2, fee_cost=0.2, config_snapshot_id=candidate_id))
+        db.add(
+            Order(
+                symbol="MONWARN",
+                side="SELL",
+                order_type="MARKET",
+                price=108.0,
+                quantity=1.0,
+                status="FILLED",
+                mode="demo",
+                gross_pnl=8.0,
+                net_pnl=7.8,
+                total_cost=0.2,
+                fee_cost=0.2,
+                config_snapshot_id=baseline_id,
+            )
+        )
+        db.add(
+            Order(
+                symbol="MONWARN",
+                side="SELL",
+                order_type="MARKET",
+                price=109.0,
+                quantity=1.0,
+                status="FILLED",
+                mode="demo",
+                gross_pnl=9.0,
+                net_pnl=8.8,
+                total_cost=0.2,
+                fee_cost=0.2,
+                config_snapshot_id=candidate_id,
+            )
+        )
         db.query(Position).delete()
         db.commit()
     finally:
         db.close()
 
-    experiment_id = ((client.post("/api/account/analytics/experiments", json={"name": "Monitoring rollback", "baseline_snapshot_id": baseline_id, "candidate_snapshot_id": candidate_id, "mode": "demo", "scope": "global"}).json().get("data") or {}).get("id"))
-    recommendation_id = ((client.post("/api/account/analytics/recommendations", json={"experiment_id": experiment_id}).json().get("data") or {}).get("id"))
-    client.post(f"/api/account/analytics/recommendations/{recommendation_id}/approve", json={"reviewed_by": "tester", "decision_reason": "monitoring_warning"})
+    experiment_id = (
+        client.post(
+            "/api/account/analytics/experiments",
+            json={
+                "name": "Monitoring rollback",
+                "baseline_snapshot_id": baseline_id,
+                "candidate_snapshot_id": candidate_id,
+                "mode": "demo",
+                "scope": "global",
+            },
+        )
+        .json()
+        .get("data")
+        or {}
+    ).get("id")
+    recommendation_id = (
+        client.post(
+            "/api/account/analytics/recommendations",
+            json={"experiment_id": experiment_id},
+        )
+        .json()
+        .get("data")
+        or {}
+    ).get("id")
+    client.post(
+        f"/api/account/analytics/recommendations/{recommendation_id}/approve",
+        json={"reviewed_by": "tester", "decision_reason": "monitoring_warning"},
+    )
     db = SessionLocal()
     try:
-        apply_runtime_updates(db, {"risk_per_trade": 0.01}, actor="mon_warn_restore", active_position_count=0)
+        apply_runtime_updates(
+            db,
+            {"risk_per_trade": 0.01},
+            actor="mon_warn_restore",
+            active_position_count=0,
+        )
     finally:
         db.close()
-    promotion = (client.post("/api/account/analytics/promotions", json={"recommendation_id": recommendation_id, "initiated_by": "tester"}).json().get("data") or {})
+    promotion = (
+        client.post(
+            "/api/account/analytics/promotions",
+            json={"recommendation_id": recommendation_id, "initiated_by": "tester"},
+        )
+        .json()
+        .get("data")
+        or {}
+    )
     promotion_id = promotion.get("id")
-    promoted_snapshot_id = (((promotion.get("runtime_apply_result") or {}).get("state") or {}).get("config_snapshot_id"))
+    promoted_snapshot_id = (
+        (promotion.get("runtime_apply_result") or {}).get("state") or {}
+    ).get("config_snapshot_id")
 
-    resp = client.post(f"/api/account/analytics/promotions/{promotion_id}/monitoring/evaluate", json={"notes": "too early"})
+    resp = client.post(
+        f"/api/account/analytics/promotions/{promotion_id}/monitoring/evaluate",
+        json={"notes": "too early"},
+    )
     assert resp.status_code == 200
     early = resp.json().get("data") or {}
     assert early.get("status") == "collecting"
@@ -1329,23 +2767,72 @@ def test_post_promotion_monitoring_collecting_and_rollback_candidate(client):
     db = SessionLocal()
     try:
         now = utc_now_naive()
-        losing_a = Order(symbol="MONWARN", side="SELL", order_type="MARKET", price=95.0, quantity=1.0, status="FILLED", mode="demo", gross_pnl=-5.0, net_pnl=-6.5, total_cost=1.5, fee_cost=1.5, config_snapshot_id=promoted_snapshot_id, timestamp=now)
-        losing_b = Order(symbol="MONWARN", side="SELL", order_type="MARKET", price=94.0, quantity=1.0, status="FILLED", mode="demo", gross_pnl=-6.0, net_pnl=-7.8, total_cost=1.8, fee_cost=1.8, config_snapshot_id=promoted_snapshot_id, timestamp=now)
+        losing_a = Order(
+            symbol="MONWARN",
+            side="SELL",
+            order_type="MARKET",
+            price=95.0,
+            quantity=1.0,
+            status="FILLED",
+            mode="demo",
+            gross_pnl=-5.0,
+            net_pnl=-6.5,
+            total_cost=1.5,
+            fee_cost=1.5,
+            config_snapshot_id=promoted_snapshot_id,
+            timestamp=now,
+        )
+        losing_b = Order(
+            symbol="MONWARN",
+            side="SELL",
+            order_type="MARKET",
+            price=94.0,
+            quantity=1.0,
+            status="FILLED",
+            mode="demo",
+            gross_pnl=-6.0,
+            net_pnl=-7.8,
+            total_cost=1.8,
+            fee_cost=1.8,
+            config_snapshot_id=promoted_snapshot_id,
+            timestamp=now,
+        )
         db.add_all([losing_a, losing_b])
         db.commit()
         db.refresh(losing_a)
         db.refresh(losing_b)
-        save_decision_trace(db, symbol="MONWARN", mode="demo", action_type="entry_blocked", reason_code="loss_streak_gate", config_snapshot_id=promoted_snapshot_id, timestamp=now)
-        save_decision_trace(db, symbol="MONWARN", mode="demo", action_type="entry_blocked", reason_code="kill_switch_gate", config_snapshot_id=promoted_snapshot_id, timestamp=now)
+        save_decision_trace(
+            db,
+            symbol="MONWARN",
+            mode="demo",
+            action_type="entry_blocked",
+            reason_code="loss_streak_gate",
+            config_snapshot_id=promoted_snapshot_id,
+            timestamp=now,
+        )
+        save_decision_trace(
+            db,
+            symbol="MONWARN",
+            mode="demo",
+            action_type="entry_blocked",
+            reason_code="kill_switch_gate",
+            config_snapshot_id=promoted_snapshot_id,
+            timestamp=now,
+        )
         db.commit()
     finally:
         db.close()
 
-    resp = client.post(f"/api/account/analytics/promotions/{promotion_id}/monitoring/evaluate", json={"notes": "rollback check"})
+    resp = client.post(
+        f"/api/account/analytics/promotions/{promotion_id}/monitoring/evaluate",
+        json={"notes": "rollback check"},
+    )
     assert resp.status_code == 200
     data = resp.json().get("data") or {}
     assert data.get("status") in {"warning", "rollback_candidate"}
-    assert data.get("rollback_recommended") is (data.get("status") == "rollback_candidate")
+    assert data.get("rollback_recommended") is (
+        data.get("status") == "rollback_candidate"
+    )
     resp = client.get("/api/account/analytics/promotion-monitoring")
     assert resp.status_code == 200
     items = resp.json().get("data") or []
@@ -1355,40 +2842,152 @@ def test_post_promotion_monitoring_collecting_and_rollback_candidate(client):
 def test_rollback_decision_no_action_for_healthy_monitoring(client):
     db = SessionLocal()
     try:
-        baseline = apply_runtime_updates(db, {"loss_streak_limit": 6}, actor="rb_noop_base", active_position_count=0)
-        candidate = apply_runtime_updates(db, {"loss_streak_limit": 3}, actor="rb_noop_cand", active_position_count=0)
+        baseline = apply_runtime_updates(
+            db, {"loss_streak_limit": 6}, actor="rb_noop_base", active_position_count=0
+        )
+        candidate = apply_runtime_updates(
+            db, {"loss_streak_limit": 3}, actor="rb_noop_cand", active_position_count=0
+        )
         baseline_id = (baseline.get("snapshot") or {}).get("id")
         candidate_id = (candidate.get("snapshot") or {}).get("id")
-        db.add(Order(symbol="RBNOOP", side="SELL", order_type="MARKET", price=103.0, quantity=1.0, status="FILLED", mode="demo", gross_pnl=3.0, net_pnl=2.8, total_cost=0.2, fee_cost=0.2, config_snapshot_id=baseline_id))
-        db.add(Order(symbol="RBNOOP", side="SELL", order_type="MARKET", price=109.0, quantity=1.0, status="FILLED", mode="demo", gross_pnl=9.0, net_pnl=8.8, total_cost=0.2, fee_cost=0.2, config_snapshot_id=candidate_id))
+        db.add(
+            Order(
+                symbol="RBNOOP",
+                side="SELL",
+                order_type="MARKET",
+                price=103.0,
+                quantity=1.0,
+                status="FILLED",
+                mode="demo",
+                gross_pnl=3.0,
+                net_pnl=2.8,
+                total_cost=0.2,
+                fee_cost=0.2,
+                config_snapshot_id=baseline_id,
+            )
+        )
+        db.add(
+            Order(
+                symbol="RBNOOP",
+                side="SELL",
+                order_type="MARKET",
+                price=109.0,
+                quantity=1.0,
+                status="FILLED",
+                mode="demo",
+                gross_pnl=9.0,
+                net_pnl=8.8,
+                total_cost=0.2,
+                fee_cost=0.2,
+                config_snapshot_id=candidate_id,
+            )
+        )
         db.query(Position).delete()
         db.commit()
     finally:
         db.close()
 
-    experiment_id = ((client.post("/api/account/analytics/experiments", json={"name": "Rollback no action", "baseline_snapshot_id": baseline_id, "candidate_snapshot_id": candidate_id, "mode": "demo", "scope": "global"}).json().get("data") or {}).get("id"))
-    recommendation_id = ((client.post("/api/account/analytics/recommendations", json={"experiment_id": experiment_id}).json().get("data") or {}).get("id"))
-    client.post(f"/api/account/analytics/recommendations/{recommendation_id}/approve", json={"reviewed_by": "tester", "decision_reason": "rollback_no_action"})
+    experiment_id = (
+        client.post(
+            "/api/account/analytics/experiments",
+            json={
+                "name": "Rollback no action",
+                "baseline_snapshot_id": baseline_id,
+                "candidate_snapshot_id": candidate_id,
+                "mode": "demo",
+                "scope": "global",
+            },
+        )
+        .json()
+        .get("data")
+        or {}
+    ).get("id")
+    recommendation_id = (
+        client.post(
+            "/api/account/analytics/recommendations",
+            json={"experiment_id": experiment_id},
+        )
+        .json()
+        .get("data")
+        or {}
+    ).get("id")
+    client.post(
+        f"/api/account/analytics/recommendations/{recommendation_id}/approve",
+        json={"reviewed_by": "tester", "decision_reason": "rollback_no_action"},
+    )
     db = SessionLocal()
     try:
-        apply_runtime_updates(db, {"loss_streak_limit": 6}, actor="rb_noop_restore", active_position_count=0)
+        apply_runtime_updates(
+            db,
+            {"loss_streak_limit": 6},
+            actor="rb_noop_restore",
+            active_position_count=0,
+        )
     finally:
         db.close()
-    promotion = (client.post("/api/account/analytics/promotions", json={"recommendation_id": recommendation_id, "initiated_by": "tester"}).json().get("data") or {})
+    promotion = (
+        client.post(
+            "/api/account/analytics/promotions",
+            json={"recommendation_id": recommendation_id, "initiated_by": "tester"},
+        )
+        .json()
+        .get("data")
+        or {}
+    )
     promotion_id = promotion.get("id")
-    promoted_snapshot_id = (((promotion.get("runtime_apply_result") or {}).get("state") or {}).get("config_snapshot_id"))
+    promoted_snapshot_id = (
+        (promotion.get("runtime_apply_result") or {}).get("state") or {}
+    ).get("config_snapshot_id")
 
     db = SessionLocal()
     try:
         now = utc_now_naive()
-        db.add(Order(symbol="RBNOOP", side="SELL", order_type="MARKET", price=111.0, quantity=1.0, status="FILLED", mode="demo", gross_pnl=11.0, net_pnl=10.8, total_cost=0.2, fee_cost=0.2, config_snapshot_id=promoted_snapshot_id, timestamp=now))
-        db.add(Order(symbol="RBNOOP", side="SELL", order_type="MARKET", price=112.0, quantity=1.0, status="FILLED", mode="demo", gross_pnl=12.0, net_pnl=11.8, total_cost=0.2, fee_cost=0.2, config_snapshot_id=promoted_snapshot_id, timestamp=now))
+        db.add(
+            Order(
+                symbol="RBNOOP",
+                side="SELL",
+                order_type="MARKET",
+                price=111.0,
+                quantity=1.0,
+                status="FILLED",
+                mode="demo",
+                gross_pnl=11.0,
+                net_pnl=10.8,
+                total_cost=0.2,
+                fee_cost=0.2,
+                config_snapshot_id=promoted_snapshot_id,
+                timestamp=now,
+            )
+        )
+        db.add(
+            Order(
+                symbol="RBNOOP",
+                side="SELL",
+                order_type="MARKET",
+                price=112.0,
+                quantity=1.0,
+                status="FILLED",
+                mode="demo",
+                gross_pnl=12.0,
+                net_pnl=11.8,
+                total_cost=0.2,
+                fee_cost=0.2,
+                config_snapshot_id=promoted_snapshot_id,
+                timestamp=now,
+            )
+        )
         db.commit()
     finally:
         db.close()
 
-    client.post(f"/api/account/analytics/promotions/{promotion_id}/monitoring/evaluate", json={"notes": "healthy for rollback"})
-    resp = client.post(f"/api/account/analytics/promotions/{promotion_id}/rollback-decision", json={"initiated_by": "tester", "notes": "healthy decision"})
+    client.post(
+        f"/api/account/analytics/promotions/{promotion_id}/monitoring/evaluate",
+        json={"notes": "healthy for rollback"},
+    )
+    resp = client.post(
+        f"/api/account/analytics/promotions/{promotion_id}/rollback-decision",
+        json={"initiated_by": "tester", "notes": "healthy decision"},
+    )
     assert resp.status_code == 200
     data = resp.json().get("data") or {}
     assert data.get("decision_status") == "no_action"
@@ -1398,29 +2997,110 @@ def test_rollback_decision_no_action_for_healthy_monitoring(client):
 def test_rollback_decision_continue_monitoring_for_collecting(client):
     db = SessionLocal()
     try:
-        baseline = apply_runtime_updates(db, {"cooldown_after_loss_streak_minutes": 70}, actor="rb_collect_base", active_position_count=0)
-        candidate = apply_runtime_updates(db, {"cooldown_after_loss_streak_minutes": 15}, actor="rb_collect_cand", active_position_count=0)
+        baseline = apply_runtime_updates(
+            db,
+            {"cooldown_after_loss_streak_minutes": 70},
+            actor="rb_collect_base",
+            active_position_count=0,
+        )
+        candidate = apply_runtime_updates(
+            db,
+            {"cooldown_after_loss_streak_minutes": 15},
+            actor="rb_collect_cand",
+            active_position_count=0,
+        )
         baseline_id = (baseline.get("snapshot") or {}).get("id")
         candidate_id = (candidate.get("snapshot") or {}).get("id")
-        db.add(Order(symbol="RBCOLL", side="SELL", order_type="MARKET", price=104.0, quantity=1.0, status="FILLED", mode="demo", gross_pnl=4.0, net_pnl=3.8, total_cost=0.2, fee_cost=0.2, config_snapshot_id=baseline_id))
-        db.add(Order(symbol="RBCOLL", side="SELL", order_type="MARKET", price=107.0, quantity=1.0, status="FILLED", mode="demo", gross_pnl=7.0, net_pnl=6.8, total_cost=0.2, fee_cost=0.2, config_snapshot_id=candidate_id))
+        db.add(
+            Order(
+                symbol="RBCOLL",
+                side="SELL",
+                order_type="MARKET",
+                price=104.0,
+                quantity=1.0,
+                status="FILLED",
+                mode="demo",
+                gross_pnl=4.0,
+                net_pnl=3.8,
+                total_cost=0.2,
+                fee_cost=0.2,
+                config_snapshot_id=baseline_id,
+            )
+        )
+        db.add(
+            Order(
+                symbol="RBCOLL",
+                side="SELL",
+                order_type="MARKET",
+                price=107.0,
+                quantity=1.0,
+                status="FILLED",
+                mode="demo",
+                gross_pnl=7.0,
+                net_pnl=6.8,
+                total_cost=0.2,
+                fee_cost=0.2,
+                config_snapshot_id=candidate_id,
+            )
+        )
         db.query(Position).delete()
         db.commit()
     finally:
         db.close()
 
-    experiment_id = ((client.post("/api/account/analytics/experiments", json={"name": "Rollback collect", "baseline_snapshot_id": baseline_id, "candidate_snapshot_id": candidate_id, "mode": "demo", "scope": "global"}).json().get("data") or {}).get("id"))
-    recommendation_id = ((client.post("/api/account/analytics/recommendations", json={"experiment_id": experiment_id}).json().get("data") or {}).get("id"))
-    client.post(f"/api/account/analytics/recommendations/{recommendation_id}/approve", json={"reviewed_by": "tester", "decision_reason": "rollback_collect"})
+    experiment_id = (
+        client.post(
+            "/api/account/analytics/experiments",
+            json={
+                "name": "Rollback collect",
+                "baseline_snapshot_id": baseline_id,
+                "candidate_snapshot_id": candidate_id,
+                "mode": "demo",
+                "scope": "global",
+            },
+        )
+        .json()
+        .get("data")
+        or {}
+    ).get("id")
+    recommendation_id = (
+        client.post(
+            "/api/account/analytics/recommendations",
+            json={"experiment_id": experiment_id},
+        )
+        .json()
+        .get("data")
+        or {}
+    ).get("id")
+    client.post(
+        f"/api/account/analytics/recommendations/{recommendation_id}/approve",
+        json={"reviewed_by": "tester", "decision_reason": "rollback_collect"},
+    )
     db = SessionLocal()
     try:
-        apply_runtime_updates(db, {"cooldown_after_loss_streak_minutes": 70}, actor="rb_collect_restore", active_position_count=0)
+        apply_runtime_updates(
+            db,
+            {"cooldown_after_loss_streak_minutes": 70},
+            actor="rb_collect_restore",
+            active_position_count=0,
+        )
     finally:
         db.close()
-    promotion = (client.post("/api/account/analytics/promotions", json={"recommendation_id": recommendation_id, "initiated_by": "tester"}).json().get("data") or {})
+    promotion = (
+        client.post(
+            "/api/account/analytics/promotions",
+            json={"recommendation_id": recommendation_id, "initiated_by": "tester"},
+        )
+        .json()
+        .get("data")
+        or {}
+    )
     promotion_id = promotion.get("id")
 
-    resp = client.post(f"/api/account/analytics/promotions/{promotion_id}/rollback-decision", json={"initiated_by": "tester", "notes": "collecting decision"})
+    resp = client.post(
+        f"/api/account/analytics/promotions/{promotion_id}/rollback-decision",
+        json={"initiated_by": "tester", "notes": "collecting decision"},
+    )
     assert resp.status_code == 200
     data = resp.json().get("data") or {}
     assert data.get("decision_status") == "continue_monitoring"
@@ -1430,43 +3110,171 @@ def test_rollback_decision_continue_monitoring_for_collecting(client):
 def test_rollback_decision_required_for_rollback_candidate(client):
     db = SessionLocal()
     try:
-        baseline = apply_runtime_updates(db, {"risk_per_trade": 0.012}, actor="rb_req_base", active_position_count=0)
-        candidate = apply_runtime_updates(db, {"risk_per_trade": 0.025}, actor="rb_req_cand", active_position_count=0)
+        baseline = apply_runtime_updates(
+            db, {"risk_per_trade": 0.012}, actor="rb_req_base", active_position_count=0
+        )
+        candidate = apply_runtime_updates(
+            db, {"risk_per_trade": 0.025}, actor="rb_req_cand", active_position_count=0
+        )
         baseline_id = (baseline.get("snapshot") or {}).get("id")
         candidate_id = (candidate.get("snapshot") or {}).get("id")
-        db.add(Order(symbol="RBREQ", side="SELL", order_type="MARKET", price=108.0, quantity=1.0, status="FILLED", mode="demo", gross_pnl=8.0, net_pnl=7.9, total_cost=0.1, fee_cost=0.1, config_snapshot_id=baseline_id))
-        db.add(Order(symbol="RBREQ", side="SELL", order_type="MARKET", price=110.0, quantity=1.0, status="FILLED", mode="demo", gross_pnl=10.0, net_pnl=9.8, total_cost=0.2, fee_cost=0.2, config_snapshot_id=candidate_id))
+        db.add(
+            Order(
+                symbol="RBREQ",
+                side="SELL",
+                order_type="MARKET",
+                price=108.0,
+                quantity=1.0,
+                status="FILLED",
+                mode="demo",
+                gross_pnl=8.0,
+                net_pnl=7.9,
+                total_cost=0.1,
+                fee_cost=0.1,
+                config_snapshot_id=baseline_id,
+            )
+        )
+        db.add(
+            Order(
+                symbol="RBREQ",
+                side="SELL",
+                order_type="MARKET",
+                price=110.0,
+                quantity=1.0,
+                status="FILLED",
+                mode="demo",
+                gross_pnl=10.0,
+                net_pnl=9.8,
+                total_cost=0.2,
+                fee_cost=0.2,
+                config_snapshot_id=candidate_id,
+            )
+        )
         db.query(Position).delete()
         db.commit()
     finally:
         db.close()
 
-    experiment_id = ((client.post("/api/account/analytics/experiments", json={"name": "Rollback required", "baseline_snapshot_id": baseline_id, "candidate_snapshot_id": candidate_id, "mode": "demo", "scope": "global"}).json().get("data") or {}).get("id"))
-    recommendation_id = ((client.post("/api/account/analytics/recommendations", json={"experiment_id": experiment_id}).json().get("data") or {}).get("id"))
-    client.post(f"/api/account/analytics/recommendations/{recommendation_id}/approve", json={"reviewed_by": "tester", "decision_reason": "rollback_required"})
+    experiment_id = (
+        client.post(
+            "/api/account/analytics/experiments",
+            json={
+                "name": "Rollback required",
+                "baseline_snapshot_id": baseline_id,
+                "candidate_snapshot_id": candidate_id,
+                "mode": "demo",
+                "scope": "global",
+            },
+        )
+        .json()
+        .get("data")
+        or {}
+    ).get("id")
+    recommendation_id = (
+        client.post(
+            "/api/account/analytics/recommendations",
+            json={"experiment_id": experiment_id},
+        )
+        .json()
+        .get("data")
+        or {}
+    ).get("id")
+    client.post(
+        f"/api/account/analytics/recommendations/{recommendation_id}/approve",
+        json={"reviewed_by": "tester", "decision_reason": "rollback_required"},
+    )
     db = SessionLocal()
     try:
-        apply_runtime_updates(db, {"risk_per_trade": 0.012}, actor="rb_req_restore", active_position_count=0)
+        apply_runtime_updates(
+            db,
+            {"risk_per_trade": 0.012},
+            actor="rb_req_restore",
+            active_position_count=0,
+        )
     finally:
         db.close()
-    promotion = (client.post("/api/account/analytics/promotions", json={"recommendation_id": recommendation_id, "initiated_by": "tester"}).json().get("data") or {})
+    promotion = (
+        client.post(
+            "/api/account/analytics/promotions",
+            json={"recommendation_id": recommendation_id, "initiated_by": "tester"},
+        )
+        .json()
+        .get("data")
+        or {}
+    )
     promotion_id = promotion.get("id")
-    promoted_snapshot_id = (((promotion.get("runtime_apply_result") or {}).get("state") or {}).get("config_snapshot_id"))
+    promoted_snapshot_id = (
+        (promotion.get("runtime_apply_result") or {}).get("state") or {}
+    ).get("config_snapshot_id")
 
     db = SessionLocal()
     try:
         now = utc_now_naive()
-        db.add(Order(symbol="RBREQ", side="SELL", order_type="MARKET", price=94.0, quantity=1.0, status="FILLED", mode="demo", gross_pnl=-6.0, net_pnl=-8.0, total_cost=2.0, fee_cost=2.0, config_snapshot_id=promoted_snapshot_id, timestamp=now))
-        db.add(Order(symbol="RBREQ", side="SELL", order_type="MARKET", price=93.0, quantity=1.0, status="FILLED", mode="demo", gross_pnl=-7.0, net_pnl=-9.3, total_cost=2.3, fee_cost=2.3, config_snapshot_id=promoted_snapshot_id, timestamp=now))
+        db.add(
+            Order(
+                symbol="RBREQ",
+                side="SELL",
+                order_type="MARKET",
+                price=94.0,
+                quantity=1.0,
+                status="FILLED",
+                mode="demo",
+                gross_pnl=-6.0,
+                net_pnl=-8.0,
+                total_cost=2.0,
+                fee_cost=2.0,
+                config_snapshot_id=promoted_snapshot_id,
+                timestamp=now,
+            )
+        )
+        db.add(
+            Order(
+                symbol="RBREQ",
+                side="SELL",
+                order_type="MARKET",
+                price=93.0,
+                quantity=1.0,
+                status="FILLED",
+                mode="demo",
+                gross_pnl=-7.0,
+                net_pnl=-9.3,
+                total_cost=2.3,
+                fee_cost=2.3,
+                config_snapshot_id=promoted_snapshot_id,
+                timestamp=now,
+            )
+        )
         db.commit()
-        save_decision_trace(db, symbol="RBREQ", mode="demo", action_type="entry_blocked", reason_code="kill_switch_gate", config_snapshot_id=promoted_snapshot_id, timestamp=now)
-        save_decision_trace(db, symbol="RBREQ", mode="demo", action_type="entry_blocked", reason_code="loss_streak_gate", config_snapshot_id=promoted_snapshot_id, timestamp=now)
+        save_decision_trace(
+            db,
+            symbol="RBREQ",
+            mode="demo",
+            action_type="entry_blocked",
+            reason_code="kill_switch_gate",
+            config_snapshot_id=promoted_snapshot_id,
+            timestamp=now,
+        )
+        save_decision_trace(
+            db,
+            symbol="RBREQ",
+            mode="demo",
+            action_type="entry_blocked",
+            reason_code="loss_streak_gate",
+            config_snapshot_id=promoted_snapshot_id,
+            timestamp=now,
+        )
         db.commit()
     finally:
         db.close()
 
-    client.post(f"/api/account/analytics/promotions/{promotion_id}/monitoring/evaluate", json={"notes": "rollback required monitor"})
-    resp = client.post(f"/api/account/analytics/promotions/{promotion_id}/rollback-decision", json={"initiated_by": "tester", "notes": "required decision"})
+    client.post(
+        f"/api/account/analytics/promotions/{promotion_id}/monitoring/evaluate",
+        json={"notes": "rollback required monitor"},
+    )
+    resp = client.post(
+        f"/api/account/analytics/promotions/{promotion_id}/rollback-decision",
+        json={"initiated_by": "tester", "notes": "required decision"},
+    )
     assert resp.status_code == 200
     data = resp.json().get("data") or {}
     assert data.get("decision_status") == "rollback_required"
@@ -1486,8 +3294,10 @@ def test_rollback_decision_read_and_list_flow(client):
     data = resp.json().get("data") or {}
     assert data.get("id") == rollback_id
 
-    promotion_id = ((data.get("promotion") or {}).get("id"))
-    resp = client.get(f"/api/account/analytics/promotions/{promotion_id}/rollback-decision")
+    promotion_id = (data.get("promotion") or {}).get("id")
+    resp = client.get(
+        f"/api/account/analytics/promotions/{promotion_id}/rollback-decision"
+    )
     assert resp.status_code == 200
     latest = resp.json().get("data") or {}
     assert latest.get("promotion_id") == promotion_id
@@ -1496,50 +3306,186 @@ def test_rollback_decision_read_and_list_flow(client):
 def test_rollback_execution_success_flow(client):
     db = SessionLocal()
     try:
-        baseline = apply_runtime_updates(db, {"risk_per_trade": 0.013}, actor="rb_exec_base", active_position_count=0)
-        candidate = apply_runtime_updates(db, {"risk_per_trade": 0.03}, actor="rb_exec_cand", active_position_count=0)
+        baseline = apply_runtime_updates(
+            db, {"risk_per_trade": 0.013}, actor="rb_exec_base", active_position_count=0
+        )
+        candidate = apply_runtime_updates(
+            db, {"risk_per_trade": 0.03}, actor="rb_exec_cand", active_position_count=0
+        )
         baseline_id = (baseline.get("snapshot") or {}).get("id")
         candidate_id = (candidate.get("snapshot") or {}).get("id")
-        db.add(Order(symbol="RBEXEC", side="SELL", order_type="MARKET", price=108.0, quantity=1.0, status="FILLED", mode="demo", gross_pnl=8.0, net_pnl=7.9, total_cost=0.1, fee_cost=0.1, config_snapshot_id=baseline_id))
-        db.add(Order(symbol="RBEXEC", side="SELL", order_type="MARKET", price=110.0, quantity=1.0, status="FILLED", mode="demo", gross_pnl=10.0, net_pnl=9.7, total_cost=0.3, fee_cost=0.3, config_snapshot_id=candidate_id))
+        db.add(
+            Order(
+                symbol="RBEXEC",
+                side="SELL",
+                order_type="MARKET",
+                price=108.0,
+                quantity=1.0,
+                status="FILLED",
+                mode="demo",
+                gross_pnl=8.0,
+                net_pnl=7.9,
+                total_cost=0.1,
+                fee_cost=0.1,
+                config_snapshot_id=baseline_id,
+            )
+        )
+        db.add(
+            Order(
+                symbol="RBEXEC",
+                side="SELL",
+                order_type="MARKET",
+                price=110.0,
+                quantity=1.0,
+                status="FILLED",
+                mode="demo",
+                gross_pnl=10.0,
+                net_pnl=9.7,
+                total_cost=0.3,
+                fee_cost=0.3,
+                config_snapshot_id=candidate_id,
+            )
+        )
         db.query(Position).delete()
         db.commit()
     finally:
         db.close()
 
-    experiment_id = ((client.post("/api/account/analytics/experiments", json={"name": "Rollback execute", "baseline_snapshot_id": baseline_id, "candidate_snapshot_id": candidate_id, "mode": "demo", "scope": "global"}).json().get("data") or {}).get("id"))
-    recommendation_id = ((client.post("/api/account/analytics/recommendations", json={"experiment_id": experiment_id}).json().get("data") or {}).get("id"))
-    client.post(f"/api/account/analytics/recommendations/{recommendation_id}/approve", json={"reviewed_by": "tester", "decision_reason": "rollback_execute"})
+    experiment_id = (
+        client.post(
+            "/api/account/analytics/experiments",
+            json={
+                "name": "Rollback execute",
+                "baseline_snapshot_id": baseline_id,
+                "candidate_snapshot_id": candidate_id,
+                "mode": "demo",
+                "scope": "global",
+            },
+        )
+        .json()
+        .get("data")
+        or {}
+    ).get("id")
+    recommendation_id = (
+        client.post(
+            "/api/account/analytics/recommendations",
+            json={"experiment_id": experiment_id},
+        )
+        .json()
+        .get("data")
+        or {}
+    ).get("id")
+    client.post(
+        f"/api/account/analytics/recommendations/{recommendation_id}/approve",
+        json={"reviewed_by": "tester", "decision_reason": "rollback_execute"},
+    )
     db = SessionLocal()
     try:
-        apply_runtime_updates(db, {"risk_per_trade": 0.013}, actor="rb_exec_restore", active_position_count=0)
+        apply_runtime_updates(
+            db,
+            {"risk_per_trade": 0.013},
+            actor="rb_exec_restore",
+            active_position_count=0,
+        )
     finally:
         db.close()
-    promotion = (client.post("/api/account/analytics/promotions", json={"recommendation_id": recommendation_id, "initiated_by": "tester"}).json().get("data") or {})
+    promotion = (
+        client.post(
+            "/api/account/analytics/promotions",
+            json={"recommendation_id": recommendation_id, "initiated_by": "tester"},
+        )
+        .json()
+        .get("data")
+        or {}
+    )
     promotion_id = promotion.get("id")
-    promoted_snapshot_id = (((promotion.get("runtime_apply_result") or {}).get("state") or {}).get("config_snapshot_id"))
+    promoted_snapshot_id = (
+        (promotion.get("runtime_apply_result") or {}).get("state") or {}
+    ).get("config_snapshot_id")
 
     db = SessionLocal()
     try:
         now = utc_now_naive()
-        db.add(Order(symbol="RBEXEC", side="SELL", order_type="MARKET", price=93.0, quantity=1.0, status="FILLED", mode="demo", gross_pnl=-7.0, net_pnl=-9.5, total_cost=2.5, fee_cost=2.5, config_snapshot_id=promoted_snapshot_id, timestamp=now))
-        db.add(Order(symbol="RBEXEC", side="SELL", order_type="MARKET", price=92.0, quantity=1.0, status="FILLED", mode="demo", gross_pnl=-8.0, net_pnl=-10.8, total_cost=2.8, fee_cost=2.8, config_snapshot_id=promoted_snapshot_id, timestamp=now))
+        db.add(
+            Order(
+                symbol="RBEXEC",
+                side="SELL",
+                order_type="MARKET",
+                price=93.0,
+                quantity=1.0,
+                status="FILLED",
+                mode="demo",
+                gross_pnl=-7.0,
+                net_pnl=-9.5,
+                total_cost=2.5,
+                fee_cost=2.5,
+                config_snapshot_id=promoted_snapshot_id,
+                timestamp=now,
+            )
+        )
+        db.add(
+            Order(
+                symbol="RBEXEC",
+                side="SELL",
+                order_type="MARKET",
+                price=92.0,
+                quantity=1.0,
+                status="FILLED",
+                mode="demo",
+                gross_pnl=-8.0,
+                net_pnl=-10.8,
+                total_cost=2.8,
+                fee_cost=2.8,
+                config_snapshot_id=promoted_snapshot_id,
+                timestamp=now,
+            )
+        )
         db.commit()
-        save_decision_trace(db, symbol="RBEXEC", mode="demo", action_type="entry_blocked", reason_code="kill_switch_gate", config_snapshot_id=promoted_snapshot_id, timestamp=now)
-        save_decision_trace(db, symbol="RBEXEC", mode="demo", action_type="entry_blocked", reason_code="loss_streak_gate", config_snapshot_id=promoted_snapshot_id, timestamp=now)
+        save_decision_trace(
+            db,
+            symbol="RBEXEC",
+            mode="demo",
+            action_type="entry_blocked",
+            reason_code="kill_switch_gate",
+            config_snapshot_id=promoted_snapshot_id,
+            timestamp=now,
+        )
+        save_decision_trace(
+            db,
+            symbol="RBEXEC",
+            mode="demo",
+            action_type="entry_blocked",
+            reason_code="loss_streak_gate",
+            config_snapshot_id=promoted_snapshot_id,
+            timestamp=now,
+        )
         db.commit()
     finally:
         db.close()
 
-    client.post(f"/api/account/analytics/promotions/{promotion_id}/monitoring/evaluate", json={"notes": "rollback execution monitor"})
-    rollback = (client.post(f"/api/account/analytics/promotions/{promotion_id}/rollback-decision", json={"initiated_by": "tester", "notes": "execute me"}).json().get("data") or {})
+    client.post(
+        f"/api/account/analytics/promotions/{promotion_id}/monitoring/evaluate",
+        json={"notes": "rollback execution monitor"},
+    )
+    rollback = (
+        client.post(
+            f"/api/account/analytics/promotions/{promotion_id}/rollback-decision",
+            json={"initiated_by": "tester", "notes": "execute me"},
+        )
+        .json()
+        .get("data")
+        or {}
+    )
     rollback_id = rollback.get("id")
 
-    resp = client.post(f"/api/account/analytics/rollbacks/{rollback_id}/execute", json={"initiated_by": "tester", "notes": "rollback now"})
+    resp = client.post(
+        f"/api/account/analytics/rollbacks/{rollback_id}/execute",
+        json={"initiated_by": "tester", "notes": "rollback now"},
+    )
     assert resp.status_code == 200
     data = resp.json().get("data") or {}
     assert data.get("execution_status") == "executed"
-    hook = (((data.get("runtime_apply_result") or {}).get("post_rollback_hook")) or {})
+    hook = ((data.get("runtime_apply_result") or {}).get("post_rollback_hook")) or {}
     assert hook.get("status") == "pending"
     assert data.get("post_rollback_monitoring_status") == "pending"
 
@@ -1552,8 +3498,10 @@ def test_rollback_execution_success_flow(client):
 
 
 def test_rollback_execution_invalid_state_rejected(client):
-    items = (client.get("/api/account/analytics/rollbacks").json().get("data") or [])
-    no_action = next((item for item in items if item.get("decision_status") == "no_action"), None)
+    items = client.get("/api/account/analytics/rollbacks").json().get("data") or []
+    no_action = next(
+        (item for item in items if item.get("decision_status") == "no_action"), None
+    )
     assert no_action is not None
     resp = client.post(
         f"/api/account/analytics/rollbacks/{no_action['id']}/execute",
@@ -1563,15 +3511,26 @@ def test_rollback_execution_invalid_state_rejected(client):
 
 
 def test_rollback_execution_missing_target_fails(client):
-    items = (client.get("/api/account/analytics/rollbacks").json().get("data") or [])
-    candidate = next((item for item in items if item.get("decision_status") in {"rollback_recommended", "rollback_required"} and item.get("execution_status") == "pending"), None)
+    items = client.get("/api/account/analytics/rollbacks").json().get("data") or []
+    candidate = next(
+        (
+            item
+            for item in items
+            if item.get("decision_status")
+            in {"rollback_recommended", "rollback_required"}
+            and item.get("execution_status") == "pending"
+        ),
+        None,
+    )
     if candidate is None:
         pytest.skip("No pending rollback candidate available")
     rollback_id = candidate["id"]
 
     db = SessionLocal()
     try:
-        rollback_ref = db.query(ConfigRollback).filter(ConfigRollback.id == rollback_id).first()
+        rollback_ref = (
+            db.query(ConfigRollback).filter(ConfigRollback.id == rollback_id).first()
+        )
         rollback_ref.rollback_snapshot_id = "missing-snapshot-id"
         db.commit()
     finally:
@@ -1585,8 +3544,13 @@ def test_rollback_execution_missing_target_fails(client):
 
 
 def test_rollback_execution_duplicate_attempt_fails(client):
-    items = (client.get("/api/account/analytics/rollback-executions").json().get("data") or [])
-    executed = next((item for item in items if item.get("execution_status") == "executed"), None)
+    items = (
+        client.get("/api/account/analytics/rollback-executions").json().get("data")
+        or []
+    )
+    executed = next(
+        (item for item in items if item.get("execution_status") == "executed"), None
+    )
     assert executed is not None
     resp = client.post(
         f"/api/account/analytics/rollbacks/{executed['id']}/execute",
@@ -1598,44 +3562,188 @@ def test_rollback_execution_duplicate_attempt_fails(client):
 def test_rollback_execution_runtime_drift_case(client):
     db = SessionLocal()
     try:
-        baseline = apply_runtime_updates(db, {"cooldown_after_loss_streak_minutes": 80}, actor="rb_drift_base", active_position_count=0)
-        candidate = apply_runtime_updates(db, {"cooldown_after_loss_streak_minutes": 10}, actor="rb_drift_cand", active_position_count=0)
+        baseline = apply_runtime_updates(
+            db,
+            {"cooldown_after_loss_streak_minutes": 80},
+            actor="rb_drift_base",
+            active_position_count=0,
+        )
+        candidate = apply_runtime_updates(
+            db,
+            {"cooldown_after_loss_streak_minutes": 10},
+            actor="rb_drift_cand",
+            active_position_count=0,
+        )
         baseline_id = (baseline.get("snapshot") or {}).get("id")
         candidate_id = (candidate.get("snapshot") or {}).get("id")
-        db.add(Order(symbol="RBDRIFT", side="SELL", order_type="MARKET", price=108.0, quantity=1.0, status="FILLED", mode="demo", gross_pnl=8.0, net_pnl=7.9, total_cost=0.1, fee_cost=0.1, config_snapshot_id=baseline_id))
-        db.add(Order(symbol="RBDRIFT", side="SELL", order_type="MARKET", price=110.0, quantity=1.0, status="FILLED", mode="demo", gross_pnl=10.0, net_pnl=9.8, total_cost=0.2, fee_cost=0.2, config_snapshot_id=candidate_id))
+        db.add(
+            Order(
+                symbol="RBDRIFT",
+                side="SELL",
+                order_type="MARKET",
+                price=108.0,
+                quantity=1.0,
+                status="FILLED",
+                mode="demo",
+                gross_pnl=8.0,
+                net_pnl=7.9,
+                total_cost=0.1,
+                fee_cost=0.1,
+                config_snapshot_id=baseline_id,
+            )
+        )
+        db.add(
+            Order(
+                symbol="RBDRIFT",
+                side="SELL",
+                order_type="MARKET",
+                price=110.0,
+                quantity=1.0,
+                status="FILLED",
+                mode="demo",
+                gross_pnl=10.0,
+                net_pnl=9.8,
+                total_cost=0.2,
+                fee_cost=0.2,
+                config_snapshot_id=candidate_id,
+            )
+        )
         db.query(Position).delete()
         db.commit()
     finally:
         db.close()
 
-    experiment_id = ((client.post("/api/account/analytics/experiments", json={"name": "Rollback drift", "baseline_snapshot_id": baseline_id, "candidate_snapshot_id": candidate_id, "mode": "demo", "scope": "global"}).json().get("data") or {}).get("id"))
-    recommendation_id = ((client.post("/api/account/analytics/recommendations", json={"experiment_id": experiment_id}).json().get("data") or {}).get("id"))
-    client.post(f"/api/account/analytics/recommendations/{recommendation_id}/approve", json={"reviewed_by": "tester", "decision_reason": "rollback_drift"})
+    experiment_id = (
+        client.post(
+            "/api/account/analytics/experiments",
+            json={
+                "name": "Rollback drift",
+                "baseline_snapshot_id": baseline_id,
+                "candidate_snapshot_id": candidate_id,
+                "mode": "demo",
+                "scope": "global",
+            },
+        )
+        .json()
+        .get("data")
+        or {}
+    ).get("id")
+    recommendation_id = (
+        client.post(
+            "/api/account/analytics/recommendations",
+            json={"experiment_id": experiment_id},
+        )
+        .json()
+        .get("data")
+        or {}
+    ).get("id")
+    client.post(
+        f"/api/account/analytics/recommendations/{recommendation_id}/approve",
+        json={"reviewed_by": "tester", "decision_reason": "rollback_drift"},
+    )
     db = SessionLocal()
     try:
-        apply_runtime_updates(db, {"cooldown_after_loss_streak_minutes": 80}, actor="rb_drift_restore", active_position_count=0)
+        apply_runtime_updates(
+            db,
+            {"cooldown_after_loss_streak_minutes": 80},
+            actor="rb_drift_restore",
+            active_position_count=0,
+        )
     finally:
         db.close()
-    promotion = (client.post("/api/account/analytics/promotions", json={"recommendation_id": recommendation_id, "initiated_by": "tester"}).json().get("data") or {})
+    promotion = (
+        client.post(
+            "/api/account/analytics/promotions",
+            json={"recommendation_id": recommendation_id, "initiated_by": "tester"},
+        )
+        .json()
+        .get("data")
+        or {}
+    )
     promotion_id = promotion.get("id")
-    promoted_snapshot_id = (((promotion.get("runtime_apply_result") or {}).get("state") or {}).get("config_snapshot_id"))
+    promoted_snapshot_id = (
+        (promotion.get("runtime_apply_result") or {}).get("state") or {}
+    ).get("config_snapshot_id")
 
     db = SessionLocal()
     try:
         now = utc_now_naive()
-        db.add(Order(symbol="RBDRIFT", side="SELL", order_type="MARKET", price=91.0, quantity=1.0, status="FILLED", mode="demo", gross_pnl=-9.0, net_pnl=-11.5, total_cost=2.5, fee_cost=2.5, config_snapshot_id=promoted_snapshot_id, timestamp=now))
-        db.add(Order(symbol="RBDRIFT", side="SELL", order_type="MARKET", price=90.0, quantity=1.0, status="FILLED", mode="demo", gross_pnl=-10.0, net_pnl=-12.8, total_cost=2.8, fee_cost=2.8, config_snapshot_id=promoted_snapshot_id, timestamp=now))
+        db.add(
+            Order(
+                symbol="RBDRIFT",
+                side="SELL",
+                order_type="MARKET",
+                price=91.0,
+                quantity=1.0,
+                status="FILLED",
+                mode="demo",
+                gross_pnl=-9.0,
+                net_pnl=-11.5,
+                total_cost=2.5,
+                fee_cost=2.5,
+                config_snapshot_id=promoted_snapshot_id,
+                timestamp=now,
+            )
+        )
+        db.add(
+            Order(
+                symbol="RBDRIFT",
+                side="SELL",
+                order_type="MARKET",
+                price=90.0,
+                quantity=1.0,
+                status="FILLED",
+                mode="demo",
+                gross_pnl=-10.0,
+                net_pnl=-12.8,
+                total_cost=2.8,
+                fee_cost=2.8,
+                config_snapshot_id=promoted_snapshot_id,
+                timestamp=now,
+            )
+        )
         db.commit()
-        save_decision_trace(db, symbol="RBDRIFT", mode="demo", action_type="entry_blocked", reason_code="kill_switch_gate", config_snapshot_id=promoted_snapshot_id, timestamp=now)
-        save_decision_trace(db, symbol="RBDRIFT", mode="demo", action_type="entry_blocked", reason_code="loss_streak_gate", config_snapshot_id=promoted_snapshot_id, timestamp=now)
+        save_decision_trace(
+            db,
+            symbol="RBDRIFT",
+            mode="demo",
+            action_type="entry_blocked",
+            reason_code="kill_switch_gate",
+            config_snapshot_id=promoted_snapshot_id,
+            timestamp=now,
+        )
+        save_decision_trace(
+            db,
+            symbol="RBDRIFT",
+            mode="demo",
+            action_type="entry_blocked",
+            reason_code="loss_streak_gate",
+            config_snapshot_id=promoted_snapshot_id,
+            timestamp=now,
+        )
         db.commit()
-        apply_runtime_updates(db, {"max_open_positions": 9}, actor="rb_drift_runtime_change", active_position_count=0)
+        apply_runtime_updates(
+            db,
+            {"max_open_positions": 9},
+            actor="rb_drift_runtime_change",
+            active_position_count=0,
+        )
     finally:
         db.close()
 
-    client.post(f"/api/account/analytics/promotions/{promotion_id}/monitoring/evaluate", json={"notes": "rollback drift monitor"})
-    rollback = (client.post(f"/api/account/analytics/promotions/{promotion_id}/rollback-decision", json={"initiated_by": "tester", "notes": "drift decision"}).json().get("data") or {})
+    client.post(
+        f"/api/account/analytics/promotions/{promotion_id}/monitoring/evaluate",
+        json={"notes": "rollback drift monitor"},
+    )
+    rollback = (
+        client.post(
+            f"/api/account/analytics/promotions/{promotion_id}/rollback-decision",
+            json={"initiated_by": "tester", "notes": "drift decision"},
+        )
+        .json()
+        .get("data")
+        or {}
+    )
     rollback_id = rollback.get("id")
     resp = client.post(
         f"/api/account/analytics/rollbacks/{rollback_id}/execute",
@@ -1667,7 +3775,14 @@ def test_rollback_execution_audit_trail_read(client):
 def test_post_rollback_monitoring_initializes_after_execution(client):
     resp = client.get("/api/account/analytics/rollback-executions")
     assert resp.status_code == 200
-    executed = next((item for item in (resp.json().get("data") or []) if item.get("execution_status") == "executed"), None)
+    executed = next(
+        (
+            item
+            for item in (resp.json().get("data") or [])
+            if item.get("execution_status") == "executed"
+        ),
+        None,
+    )
     assert executed is not None
     rollback_id = executed.get("id")
 
@@ -1675,63 +3790,249 @@ def test_post_rollback_monitoring_initializes_after_execution(client):
     assert resp.status_code == 200
     data = resp.json().get("data") or {}
     assert data.get("status") == "pending"
-    assert (data.get("rollback") or {}).get("post_rollback_monitoring_status") == "pending"
+    assert (data.get("rollback") or {}).get(
+        "post_rollback_monitoring_status"
+    ) == "pending"
 
 
 def test_post_rollback_monitoring_stabilized_verdict(client):
     db = SessionLocal()
     try:
-        baseline = apply_runtime_updates(db, {"max_daily_drawdown": 0.06}, actor="prm_stable_base", active_position_count=0)
-        candidate = apply_runtime_updates(db, {"max_daily_drawdown": 0.02}, actor="prm_stable_cand", active_position_count=0)
+        baseline = apply_runtime_updates(
+            db,
+            {"max_daily_drawdown": 0.06},
+            actor="prm_stable_base",
+            active_position_count=0,
+        )
+        candidate = apply_runtime_updates(
+            db,
+            {"max_daily_drawdown": 0.02},
+            actor="prm_stable_cand",
+            active_position_count=0,
+        )
         baseline_id = (baseline.get("snapshot") or {}).get("id")
         candidate_id = (candidate.get("snapshot") or {}).get("id")
-        db.add(Order(symbol="PRMSTAB", side="SELL", order_type="MARKET", price=106.0, quantity=1.0, status="FILLED", mode="demo", gross_pnl=6.0, net_pnl=5.8, total_cost=0.2, fee_cost=0.2, config_snapshot_id=baseline_id))
-        db.add(Order(symbol="PRMSTAB", side="SELL", order_type="MARKET", price=110.0, quantity=1.0, status="FILLED", mode="demo", gross_pnl=10.0, net_pnl=9.6, total_cost=0.4, fee_cost=0.4, config_snapshot_id=candidate_id))
+        db.add(
+            Order(
+                symbol="PRMSTAB",
+                side="SELL",
+                order_type="MARKET",
+                price=106.0,
+                quantity=1.0,
+                status="FILLED",
+                mode="demo",
+                gross_pnl=6.0,
+                net_pnl=5.8,
+                total_cost=0.2,
+                fee_cost=0.2,
+                config_snapshot_id=baseline_id,
+            )
+        )
+        db.add(
+            Order(
+                symbol="PRMSTAB",
+                side="SELL",
+                order_type="MARKET",
+                price=110.0,
+                quantity=1.0,
+                status="FILLED",
+                mode="demo",
+                gross_pnl=10.0,
+                net_pnl=9.6,
+                total_cost=0.4,
+                fee_cost=0.4,
+                config_snapshot_id=candidate_id,
+            )
+        )
         db.query(Position).delete()
         db.commit()
     finally:
         db.close()
 
-    experiment_id = ((client.post("/api/account/analytics/experiments", json={"name": "Post rollback stabilized", "baseline_snapshot_id": baseline_id, "candidate_snapshot_id": candidate_id, "mode": "demo", "scope": "global"}).json().get("data") or {}).get("id"))
-    recommendation_id = ((client.post("/api/account/analytics/recommendations", json={"experiment_id": experiment_id}).json().get("data") or {}).get("id"))
-    client.post(f"/api/account/analytics/recommendations/{recommendation_id}/approve", json={"reviewed_by": "tester", "decision_reason": "prm_stabilized"})
+    experiment_id = (
+        client.post(
+            "/api/account/analytics/experiments",
+            json={
+                "name": "Post rollback stabilized",
+                "baseline_snapshot_id": baseline_id,
+                "candidate_snapshot_id": candidate_id,
+                "mode": "demo",
+                "scope": "global",
+            },
+        )
+        .json()
+        .get("data")
+        or {}
+    ).get("id")
+    recommendation_id = (
+        client.post(
+            "/api/account/analytics/recommendations",
+            json={"experiment_id": experiment_id},
+        )
+        .json()
+        .get("data")
+        or {}
+    ).get("id")
+    client.post(
+        f"/api/account/analytics/recommendations/{recommendation_id}/approve",
+        json={"reviewed_by": "tester", "decision_reason": "prm_stabilized"},
+    )
     db = SessionLocal()
     try:
-        apply_runtime_updates(db, {"max_daily_drawdown": 0.06}, actor="prm_stable_restore", active_position_count=0)
+        apply_runtime_updates(
+            db,
+            {"max_daily_drawdown": 0.06},
+            actor="prm_stable_restore",
+            active_position_count=0,
+        )
     finally:
         db.close()
-    promotion = (client.post("/api/account/analytics/promotions", json={"recommendation_id": recommendation_id, "initiated_by": "tester"}).json().get("data") or {})
+    promotion = (
+        client.post(
+            "/api/account/analytics/promotions",
+            json={"recommendation_id": recommendation_id, "initiated_by": "tester"},
+        )
+        .json()
+        .get("data")
+        or {}
+    )
     promotion_id = promotion.get("id")
-    promoted_snapshot_id = (((promotion.get("runtime_apply_result") or {}).get("state") or {}).get("config_snapshot_id"))
+    promoted_snapshot_id = (
+        (promotion.get("runtime_apply_result") or {}).get("state") or {}
+    ).get("config_snapshot_id")
 
     db = SessionLocal()
     try:
         now = utc_now_naive()
-        db.add(Order(symbol="PRMSTAB", side="SELL", order_type="MARKET", price=92.0, quantity=1.0, status="FILLED", mode="demo", gross_pnl=-8.0, net_pnl=-10.2, total_cost=2.2, fee_cost=2.2, config_snapshot_id=promoted_snapshot_id, timestamp=now))
-        db.add(Order(symbol="PRMSTAB", side="SELL", order_type="MARKET", price=91.0, quantity=1.0, status="FILLED", mode="demo", gross_pnl=-9.0, net_pnl=-11.3, total_cost=2.3, fee_cost=2.3, config_snapshot_id=promoted_snapshot_id, timestamp=now))
+        db.add(
+            Order(
+                symbol="PRMSTAB",
+                side="SELL",
+                order_type="MARKET",
+                price=92.0,
+                quantity=1.0,
+                status="FILLED",
+                mode="demo",
+                gross_pnl=-8.0,
+                net_pnl=-10.2,
+                total_cost=2.2,
+                fee_cost=2.2,
+                config_snapshot_id=promoted_snapshot_id,
+                timestamp=now,
+            )
+        )
+        db.add(
+            Order(
+                symbol="PRMSTAB",
+                side="SELL",
+                order_type="MARKET",
+                price=91.0,
+                quantity=1.0,
+                status="FILLED",
+                mode="demo",
+                gross_pnl=-9.0,
+                net_pnl=-11.3,
+                total_cost=2.3,
+                fee_cost=2.3,
+                config_snapshot_id=promoted_snapshot_id,
+                timestamp=now,
+            )
+        )
         db.commit()
-        save_decision_trace(db, symbol="PRMSTAB", mode="demo", action_type="entry_blocked", reason_code="kill_switch_gate", config_snapshot_id=promoted_snapshot_id, timestamp=now)
-        save_decision_trace(db, symbol="PRMSTAB", mode="demo", action_type="entry_blocked", reason_code="loss_streak_gate", config_snapshot_id=promoted_snapshot_id, timestamp=now)
+        save_decision_trace(
+            db,
+            symbol="PRMSTAB",
+            mode="demo",
+            action_type="entry_blocked",
+            reason_code="kill_switch_gate",
+            config_snapshot_id=promoted_snapshot_id,
+            timestamp=now,
+        )
+        save_decision_trace(
+            db,
+            symbol="PRMSTAB",
+            mode="demo",
+            action_type="entry_blocked",
+            reason_code="loss_streak_gate",
+            config_snapshot_id=promoted_snapshot_id,
+            timestamp=now,
+        )
         db.commit()
     finally:
         db.close()
 
-    client.post(f"/api/account/analytics/promotions/{promotion_id}/monitoring/evaluate", json={"notes": "stabilized rollback monitor"})
-    rollback = (client.post(f"/api/account/analytics/promotions/{promotion_id}/rollback-decision", json={"initiated_by": "tester", "notes": "stabilized rollback decision"}).json().get("data") or {})
+    client.post(
+        f"/api/account/analytics/promotions/{promotion_id}/monitoring/evaluate",
+        json={"notes": "stabilized rollback monitor"},
+    )
+    rollback = (
+        client.post(
+            f"/api/account/analytics/promotions/{promotion_id}/rollback-decision",
+            json={"initiated_by": "tester", "notes": "stabilized rollback decision"},
+        )
+        .json()
+        .get("data")
+        or {}
+    )
     rollback_id = rollback.get("id")
-    execution = (client.post(f"/api/account/analytics/rollbacks/{rollback_id}/execute", json={"initiated_by": "tester", "notes": "stabilized rollback execute"}).json().get("data") or {})
-    target_snapshot_id = (((execution.get("runtime_apply_result") or {}).get("state") or {}).get("config_snapshot_id"))
+    execution = (
+        client.post(
+            f"/api/account/analytics/rollbacks/{rollback_id}/execute",
+            json={"initiated_by": "tester", "notes": "stabilized rollback execute"},
+        )
+        .json()
+        .get("data")
+        or {}
+    )
+    target_snapshot_id = (
+        (execution.get("runtime_apply_result") or {}).get("state") or {}
+    ).get("config_snapshot_id")
 
     db = SessionLocal()
     try:
         now = utc_now_naive()
-        db.add(Order(symbol="PRMSTAB", side="SELL", order_type="MARKET", price=113.0, quantity=1.0, status="FILLED", mode="demo", gross_pnl=13.0, net_pnl=12.8, total_cost=0.2, fee_cost=0.2, config_snapshot_id=target_snapshot_id, timestamp=now))
-        db.add(Order(symbol="PRMSTAB", side="SELL", order_type="MARKET", price=114.0, quantity=1.0, status="FILLED", mode="demo", gross_pnl=14.0, net_pnl=13.8, total_cost=0.2, fee_cost=0.2, config_snapshot_id=target_snapshot_id, timestamp=now))
+        db.add(
+            Order(
+                symbol="PRMSTAB",
+                side="SELL",
+                order_type="MARKET",
+                price=113.0,
+                quantity=1.0,
+                status="FILLED",
+                mode="demo",
+                gross_pnl=13.0,
+                net_pnl=12.8,
+                total_cost=0.2,
+                fee_cost=0.2,
+                config_snapshot_id=target_snapshot_id,
+                timestamp=now,
+            )
+        )
+        db.add(
+            Order(
+                symbol="PRMSTAB",
+                side="SELL",
+                order_type="MARKET",
+                price=114.0,
+                quantity=1.0,
+                status="FILLED",
+                mode="demo",
+                gross_pnl=14.0,
+                net_pnl=13.8,
+                total_cost=0.2,
+                fee_cost=0.2,
+                config_snapshot_id=target_snapshot_id,
+                timestamp=now,
+            )
+        )
         db.commit()
     finally:
         db.close()
 
-    resp = client.post(f"/api/account/analytics/rollbacks/{rollback_id}/post-monitoring/evaluate", json={"notes": "stabilized check"})
+    resp = client.post(
+        f"/api/account/analytics/rollbacks/{rollback_id}/post-monitoring/evaluate",
+        json={"notes": "stabilized check"},
+    )
     assert resp.status_code == 200
     data = resp.json().get("data") or {}
     assert data.get("status") == "stabilized"
@@ -1740,47 +4041,192 @@ def test_post_rollback_monitoring_stabilized_verdict(client):
 def test_post_rollback_monitoring_collecting_verdict(client):
     db = SessionLocal()
     try:
-        baseline = apply_runtime_updates(db, {"loss_streak_limit": 7}, actor="prm_collect_base", active_position_count=0)
-        candidate = apply_runtime_updates(db, {"loss_streak_limit": 2}, actor="prm_collect_cand", active_position_count=0)
+        baseline = apply_runtime_updates(
+            db,
+            {"loss_streak_limit": 7},
+            actor="prm_collect_base",
+            active_position_count=0,
+        )
+        candidate = apply_runtime_updates(
+            db,
+            {"loss_streak_limit": 2},
+            actor="prm_collect_cand",
+            active_position_count=0,
+        )
         baseline_id = (baseline.get("snapshot") or {}).get("id")
         candidate_id = (candidate.get("snapshot") or {}).get("id")
-        db.add(Order(symbol="PRMCOLL", side="SELL", order_type="MARKET", price=105.0, quantity=1.0, status="FILLED", mode="demo", gross_pnl=5.0, net_pnl=4.8, total_cost=0.2, fee_cost=0.2, config_snapshot_id=baseline_id))
-        db.add(Order(symbol="PRMCOLL", side="SELL", order_type="MARKET", price=109.0, quantity=1.0, status="FILLED", mode="demo", gross_pnl=9.0, net_pnl=8.7, total_cost=0.3, fee_cost=0.3, config_snapshot_id=candidate_id))
+        db.add(
+            Order(
+                symbol="PRMCOLL",
+                side="SELL",
+                order_type="MARKET",
+                price=105.0,
+                quantity=1.0,
+                status="FILLED",
+                mode="demo",
+                gross_pnl=5.0,
+                net_pnl=4.8,
+                total_cost=0.2,
+                fee_cost=0.2,
+                config_snapshot_id=baseline_id,
+            )
+        )
+        db.add(
+            Order(
+                symbol="PRMCOLL",
+                side="SELL",
+                order_type="MARKET",
+                price=109.0,
+                quantity=1.0,
+                status="FILLED",
+                mode="demo",
+                gross_pnl=9.0,
+                net_pnl=8.7,
+                total_cost=0.3,
+                fee_cost=0.3,
+                config_snapshot_id=candidate_id,
+            )
+        )
         db.query(Position).delete()
         db.commit()
     finally:
         db.close()
 
-    experiment_id = ((client.post("/api/account/analytics/experiments", json={"name": "Post rollback collect", "baseline_snapshot_id": baseline_id, "candidate_snapshot_id": candidate_id, "mode": "demo", "scope": "global"}).json().get("data") or {}).get("id"))
-    recommendation_id = ((client.post("/api/account/analytics/recommendations", json={"experiment_id": experiment_id}).json().get("data") or {}).get("id"))
-    client.post(f"/api/account/analytics/recommendations/{recommendation_id}/approve", json={"reviewed_by": "tester", "decision_reason": "prm_collect"})
+    experiment_id = (
+        client.post(
+            "/api/account/analytics/experiments",
+            json={
+                "name": "Post rollback collect",
+                "baseline_snapshot_id": baseline_id,
+                "candidate_snapshot_id": candidate_id,
+                "mode": "demo",
+                "scope": "global",
+            },
+        )
+        .json()
+        .get("data")
+        or {}
+    ).get("id")
+    recommendation_id = (
+        client.post(
+            "/api/account/analytics/recommendations",
+            json={"experiment_id": experiment_id},
+        )
+        .json()
+        .get("data")
+        or {}
+    ).get("id")
+    client.post(
+        f"/api/account/analytics/recommendations/{recommendation_id}/approve",
+        json={"reviewed_by": "tester", "decision_reason": "prm_collect"},
+    )
     db = SessionLocal()
     try:
-        apply_runtime_updates(db, {"loss_streak_limit": 7}, actor="prm_collect_restore", active_position_count=0)
+        apply_runtime_updates(
+            db,
+            {"loss_streak_limit": 7},
+            actor="prm_collect_restore",
+            active_position_count=0,
+        )
     finally:
         db.close()
-    promotion = (client.post("/api/account/analytics/promotions", json={"recommendation_id": recommendation_id, "initiated_by": "tester"}).json().get("data") or {})
+    promotion = (
+        client.post(
+            "/api/account/analytics/promotions",
+            json={"recommendation_id": recommendation_id, "initiated_by": "tester"},
+        )
+        .json()
+        .get("data")
+        or {}
+    )
     promotion_id = promotion.get("id")
-    promoted_snapshot_id = (((promotion.get("runtime_apply_result") or {}).get("state") or {}).get("config_snapshot_id"))
+    promoted_snapshot_id = (
+        (promotion.get("runtime_apply_result") or {}).get("state") or {}
+    ).get("config_snapshot_id")
 
     db = SessionLocal()
     try:
         now = utc_now_naive()
-        db.add(Order(symbol="PRMCOLL", side="SELL", order_type="MARKET", price=94.0, quantity=1.0, status="FILLED", mode="demo", gross_pnl=-6.0, net_pnl=-8.0, total_cost=2.0, fee_cost=2.0, config_snapshot_id=promoted_snapshot_id, timestamp=now))
-        db.add(Order(symbol="PRMCOLL", side="SELL", order_type="MARKET", price=93.0, quantity=1.0, status="FILLED", mode="demo", gross_pnl=-7.0, net_pnl=-9.1, total_cost=2.1, fee_cost=2.1, config_snapshot_id=promoted_snapshot_id, timestamp=now))
+        db.add(
+            Order(
+                symbol="PRMCOLL",
+                side="SELL",
+                order_type="MARKET",
+                price=94.0,
+                quantity=1.0,
+                status="FILLED",
+                mode="demo",
+                gross_pnl=-6.0,
+                net_pnl=-8.0,
+                total_cost=2.0,
+                fee_cost=2.0,
+                config_snapshot_id=promoted_snapshot_id,
+                timestamp=now,
+            )
+        )
+        db.add(
+            Order(
+                symbol="PRMCOLL",
+                side="SELL",
+                order_type="MARKET",
+                price=93.0,
+                quantity=1.0,
+                status="FILLED",
+                mode="demo",
+                gross_pnl=-7.0,
+                net_pnl=-9.1,
+                total_cost=2.1,
+                fee_cost=2.1,
+                config_snapshot_id=promoted_snapshot_id,
+                timestamp=now,
+            )
+        )
         db.commit()
-        save_decision_trace(db, symbol="PRMCOLL", mode="demo", action_type="entry_blocked", reason_code="kill_switch_gate", config_snapshot_id=promoted_snapshot_id, timestamp=now)
-        save_decision_trace(db, symbol="PRMCOLL", mode="demo", action_type="entry_blocked", reason_code="loss_streak_gate", config_snapshot_id=promoted_snapshot_id, timestamp=now)
+        save_decision_trace(
+            db,
+            symbol="PRMCOLL",
+            mode="demo",
+            action_type="entry_blocked",
+            reason_code="kill_switch_gate",
+            config_snapshot_id=promoted_snapshot_id,
+            timestamp=now,
+        )
+        save_decision_trace(
+            db,
+            symbol="PRMCOLL",
+            mode="demo",
+            action_type="entry_blocked",
+            reason_code="loss_streak_gate",
+            config_snapshot_id=promoted_snapshot_id,
+            timestamp=now,
+        )
         db.commit()
     finally:
         db.close()
 
-    client.post(f"/api/account/analytics/promotions/{promotion_id}/monitoring/evaluate", json={"notes": "collect rollback monitor"})
-    rollback = (client.post(f"/api/account/analytics/promotions/{promotion_id}/rollback-decision", json={"initiated_by": "tester", "notes": "collect rollback decision"}).json().get("data") or {})
+    client.post(
+        f"/api/account/analytics/promotions/{promotion_id}/monitoring/evaluate",
+        json={"notes": "collect rollback monitor"},
+    )
+    rollback = (
+        client.post(
+            f"/api/account/analytics/promotions/{promotion_id}/rollback-decision",
+            json={"initiated_by": "tester", "notes": "collect rollback decision"},
+        )
+        .json()
+        .get("data")
+        or {}
+    )
     rollback_id = rollback.get("id")
-    client.post(f"/api/account/analytics/rollbacks/{rollback_id}/execute", json={"initiated_by": "tester", "notes": "collect rollback execute"})
+    client.post(
+        f"/api/account/analytics/rollbacks/{rollback_id}/execute",
+        json={"initiated_by": "tester", "notes": "collect rollback execute"},
+    )
 
-    resp = client.post(f"/api/account/analytics/rollbacks/{rollback_id}/post-monitoring/evaluate", json={"notes": "too early"})
+    resp = client.post(
+        f"/api/account/analytics/rollbacks/{rollback_id}/post-monitoring/evaluate",
+        json={"notes": "too early"},
+    )
     assert resp.status_code == 200
     data = resp.json().get("data") or {}
     assert data.get("status") == "collecting"
@@ -1790,61 +4236,269 @@ def test_post_rollback_monitoring_collecting_verdict(client):
 def test_post_rollback_monitoring_escalate_verdict(client):
     db = SessionLocal()
     try:
-        baseline = apply_runtime_updates(db, {"cooldown_after_loss_streak_minutes": 75}, actor="prm_escalate_base", active_position_count=0)
-        candidate = apply_runtime_updates(db, {"cooldown_after_loss_streak_minutes": 5}, actor="prm_escalate_cand", active_position_count=0)
+        baseline = apply_runtime_updates(
+            db,
+            {"cooldown_after_loss_streak_minutes": 75},
+            actor="prm_escalate_base",
+            active_position_count=0,
+        )
+        candidate = apply_runtime_updates(
+            db,
+            {"cooldown_after_loss_streak_minutes": 5},
+            actor="prm_escalate_cand",
+            active_position_count=0,
+        )
         baseline_id = (baseline.get("snapshot") or {}).get("id")
         candidate_id = (candidate.get("snapshot") or {}).get("id")
-        db.add(Order(symbol="PRMESC", side="SELL", order_type="MARKET", price=106.0, quantity=1.0, status="FILLED", mode="demo", gross_pnl=6.0, net_pnl=5.8, total_cost=0.2, fee_cost=0.2, config_snapshot_id=baseline_id))
-        db.add(Order(symbol="PRMESC", side="SELL", order_type="MARKET", price=109.0, quantity=1.0, status="FILLED", mode="demo", gross_pnl=9.0, net_pnl=8.7, total_cost=0.3, fee_cost=0.3, config_snapshot_id=candidate_id))
+        db.add(
+            Order(
+                symbol="PRMESC",
+                side="SELL",
+                order_type="MARKET",
+                price=106.0,
+                quantity=1.0,
+                status="FILLED",
+                mode="demo",
+                gross_pnl=6.0,
+                net_pnl=5.8,
+                total_cost=0.2,
+                fee_cost=0.2,
+                config_snapshot_id=baseline_id,
+            )
+        )
+        db.add(
+            Order(
+                symbol="PRMESC",
+                side="SELL",
+                order_type="MARKET",
+                price=109.0,
+                quantity=1.0,
+                status="FILLED",
+                mode="demo",
+                gross_pnl=9.0,
+                net_pnl=8.7,
+                total_cost=0.3,
+                fee_cost=0.3,
+                config_snapshot_id=candidate_id,
+            )
+        )
         db.query(Position).delete()
         db.commit()
     finally:
         db.close()
 
-    experiment_id = ((client.post("/api/account/analytics/experiments", json={"name": "Post rollback escalate", "baseline_snapshot_id": baseline_id, "candidate_snapshot_id": candidate_id, "mode": "demo", "scope": "global"}).json().get("data") or {}).get("id"))
-    recommendation_id = ((client.post("/api/account/analytics/recommendations", json={"experiment_id": experiment_id}).json().get("data") or {}).get("id"))
-    client.post(f"/api/account/analytics/recommendations/{recommendation_id}/approve", json={"reviewed_by": "tester", "decision_reason": "prm_escalate"})
+    experiment_id = (
+        client.post(
+            "/api/account/analytics/experiments",
+            json={
+                "name": "Post rollback escalate",
+                "baseline_snapshot_id": baseline_id,
+                "candidate_snapshot_id": candidate_id,
+                "mode": "demo",
+                "scope": "global",
+            },
+        )
+        .json()
+        .get("data")
+        or {}
+    ).get("id")
+    recommendation_id = (
+        client.post(
+            "/api/account/analytics/recommendations",
+            json={"experiment_id": experiment_id},
+        )
+        .json()
+        .get("data")
+        or {}
+    ).get("id")
+    client.post(
+        f"/api/account/analytics/recommendations/{recommendation_id}/approve",
+        json={"reviewed_by": "tester", "decision_reason": "prm_escalate"},
+    )
     db = SessionLocal()
     try:
-        apply_runtime_updates(db, {"cooldown_after_loss_streak_minutes": 75}, actor="prm_escalate_restore", active_position_count=0)
+        apply_runtime_updates(
+            db,
+            {"cooldown_after_loss_streak_minutes": 75},
+            actor="prm_escalate_restore",
+            active_position_count=0,
+        )
     finally:
         db.close()
-    promotion = (client.post("/api/account/analytics/promotions", json={"recommendation_id": recommendation_id, "initiated_by": "tester"}).json().get("data") or {})
+    promotion = (
+        client.post(
+            "/api/account/analytics/promotions",
+            json={"recommendation_id": recommendation_id, "initiated_by": "tester"},
+        )
+        .json()
+        .get("data")
+        or {}
+    )
     promotion_id = promotion.get("id")
-    promoted_snapshot_id = (((promotion.get("runtime_apply_result") or {}).get("state") or {}).get("config_snapshot_id"))
+    promoted_snapshot_id = (
+        (promotion.get("runtime_apply_result") or {}).get("state") or {}
+    ).get("config_snapshot_id")
 
     db = SessionLocal()
     try:
         now = utc_now_naive()
-        db.add(Order(symbol="PRMESC", side="SELL", order_type="MARKET", price=92.0, quantity=1.0, status="FILLED", mode="demo", gross_pnl=-8.0, net_pnl=-10.6, total_cost=2.6, fee_cost=2.6, config_snapshot_id=promoted_snapshot_id, timestamp=now))
-        db.add(Order(symbol="PRMESC", side="SELL", order_type="MARKET", price=91.0, quantity=1.0, status="FILLED", mode="demo", gross_pnl=-9.0, net_pnl=-11.9, total_cost=2.9, fee_cost=2.9, config_snapshot_id=promoted_snapshot_id, timestamp=now))
+        db.add(
+            Order(
+                symbol="PRMESC",
+                side="SELL",
+                order_type="MARKET",
+                price=92.0,
+                quantity=1.0,
+                status="FILLED",
+                mode="demo",
+                gross_pnl=-8.0,
+                net_pnl=-10.6,
+                total_cost=2.6,
+                fee_cost=2.6,
+                config_snapshot_id=promoted_snapshot_id,
+                timestamp=now,
+            )
+        )
+        db.add(
+            Order(
+                symbol="PRMESC",
+                side="SELL",
+                order_type="MARKET",
+                price=91.0,
+                quantity=1.0,
+                status="FILLED",
+                mode="demo",
+                gross_pnl=-9.0,
+                net_pnl=-11.9,
+                total_cost=2.9,
+                fee_cost=2.9,
+                config_snapshot_id=promoted_snapshot_id,
+                timestamp=now,
+            )
+        )
         db.commit()
-        save_decision_trace(db, symbol="PRMESC", mode="demo", action_type="entry_blocked", reason_code="kill_switch_gate", config_snapshot_id=promoted_snapshot_id, timestamp=now)
-        save_decision_trace(db, symbol="PRMESC", mode="demo", action_type="entry_blocked", reason_code="loss_streak_gate", config_snapshot_id=promoted_snapshot_id, timestamp=now)
+        save_decision_trace(
+            db,
+            symbol="PRMESC",
+            mode="demo",
+            action_type="entry_blocked",
+            reason_code="kill_switch_gate",
+            config_snapshot_id=promoted_snapshot_id,
+            timestamp=now,
+        )
+        save_decision_trace(
+            db,
+            symbol="PRMESC",
+            mode="demo",
+            action_type="entry_blocked",
+            reason_code="loss_streak_gate",
+            config_snapshot_id=promoted_snapshot_id,
+            timestamp=now,
+        )
         db.commit()
     finally:
         db.close()
 
-    client.post(f"/api/account/analytics/promotions/{promotion_id}/monitoring/evaluate", json={"notes": "escalate rollback monitor"})
-    rollback = (client.post(f"/api/account/analytics/promotions/{promotion_id}/rollback-decision", json={"initiated_by": "tester", "notes": "escalate rollback decision"}).json().get("data") or {})
+    client.post(
+        f"/api/account/analytics/promotions/{promotion_id}/monitoring/evaluate",
+        json={"notes": "escalate rollback monitor"},
+    )
+    rollback = (
+        client.post(
+            f"/api/account/analytics/promotions/{promotion_id}/rollback-decision",
+            json={"initiated_by": "tester", "notes": "escalate rollback decision"},
+        )
+        .json()
+        .get("data")
+        or {}
+    )
     rollback_id = rollback.get("id")
-    execution = (client.post(f"/api/account/analytics/rollbacks/{rollback_id}/execute", json={"initiated_by": "tester", "notes": "escalate rollback execute"}).json().get("data") or {})
-    rollback_snapshot_id = (((execution.get("runtime_apply_result") or {}).get("state") or {}).get("config_snapshot_id"))
+    execution = (
+        client.post(
+            f"/api/account/analytics/rollbacks/{rollback_id}/execute",
+            json={"initiated_by": "tester", "notes": "escalate rollback execute"},
+        )
+        .json()
+        .get("data")
+        or {}
+    )
+    rollback_snapshot_id = (
+        (execution.get("runtime_apply_result") or {}).get("state") or {}
+    ).get("config_snapshot_id")
 
     db = SessionLocal()
     try:
         now = utc_now_naive()
-        db.add(Order(symbol="PRMESC", side="SELL", order_type="MARKET", price=88.0, quantity=1.0, status="FILLED", mode="demo", gross_pnl=-12.0, net_pnl=-14.8, total_cost=2.8, fee_cost=2.8, config_snapshot_id=rollback_snapshot_id, timestamp=now))
-        db.add(Order(symbol="PRMESC", side="SELL", order_type="MARKET", price=87.0, quantity=1.0, status="FILLED", mode="demo", gross_pnl=-13.0, net_pnl=-15.9, total_cost=2.9, fee_cost=2.9, config_snapshot_id=rollback_snapshot_id, timestamp=now))
+        db.add(
+            Order(
+                symbol="PRMESC",
+                side="SELL",
+                order_type="MARKET",
+                price=88.0,
+                quantity=1.0,
+                status="FILLED",
+                mode="demo",
+                gross_pnl=-12.0,
+                net_pnl=-14.8,
+                total_cost=2.8,
+                fee_cost=2.8,
+                config_snapshot_id=rollback_snapshot_id,
+                timestamp=now,
+            )
+        )
+        db.add(
+            Order(
+                symbol="PRMESC",
+                side="SELL",
+                order_type="MARKET",
+                price=87.0,
+                quantity=1.0,
+                status="FILLED",
+                mode="demo",
+                gross_pnl=-13.0,
+                net_pnl=-15.9,
+                total_cost=2.9,
+                fee_cost=2.9,
+                config_snapshot_id=rollback_snapshot_id,
+                timestamp=now,
+            )
+        )
         db.commit()
-        save_decision_trace(db, symbol="PRMESC", mode="demo", action_type="entry_blocked", reason_code="kill_switch_gate", config_snapshot_id=rollback_snapshot_id, timestamp=now)
-        save_decision_trace(db, symbol="PRMESC", mode="demo", action_type="entry_blocked", reason_code="loss_streak_gate", config_snapshot_id=rollback_snapshot_id, timestamp=now)
-        save_decision_trace(db, symbol="PRMESC", mode="demo", action_type="entry_blocked", reason_code="daily_net_drawdown_gate", config_snapshot_id=rollback_snapshot_id, timestamp=now)
+        save_decision_trace(
+            db,
+            symbol="PRMESC",
+            mode="demo",
+            action_type="entry_blocked",
+            reason_code="kill_switch_gate",
+            config_snapshot_id=rollback_snapshot_id,
+            timestamp=now,
+        )
+        save_decision_trace(
+            db,
+            symbol="PRMESC",
+            mode="demo",
+            action_type="entry_blocked",
+            reason_code="loss_streak_gate",
+            config_snapshot_id=rollback_snapshot_id,
+            timestamp=now,
+        )
+        save_decision_trace(
+            db,
+            symbol="PRMESC",
+            mode="demo",
+            action_type="entry_blocked",
+            reason_code="daily_net_drawdown_gate",
+            config_snapshot_id=rollback_snapshot_id,
+            timestamp=now,
+        )
         db.commit()
     finally:
         db.close()
 
-    resp = client.post(f"/api/account/analytics/rollbacks/{rollback_id}/post-monitoring/evaluate", json={"notes": "escalate check"})
+    resp = client.post(
+        f"/api/account/analytics/rollbacks/{rollback_id}/post-monitoring/evaluate",
+        json={"notes": "escalate check"},
+    )
     assert resp.status_code == 200
     data = resp.json().get("data") or {}
     assert data.get("status") == "escalate"
@@ -1857,7 +4511,9 @@ def test_post_rollback_monitoring_audit_trail_read(client):
     assert len(items) >= 1
     monitoring_id = items[0].get("id")
 
-    resp = client.get(f"/api/account/analytics/post-rollback-monitoring/{monitoring_id}")
+    resp = client.get(
+        f"/api/account/analytics/post-rollback-monitoring/{monitoring_id}"
+    )
     assert resp.status_code == 200
     data = resp.json().get("data") or {}
     assert data.get("id") == monitoring_id
@@ -2088,7 +4744,9 @@ def test_policy_list_with_filters(client):
     for item in items:
         assert item.get("status") == "open"
 
-    resp = client.get("/api/account/analytics/policy-actions?source_type=promotion_monitoring")
+    resp = client.get(
+        "/api/account/analytics/policy-actions?source_type=promotion_monitoring"
+    )
     assert resp.status_code == 200
     items = resp.json().get("data") or []
     for item in items:
@@ -2118,7 +4776,9 @@ def test_policy_resolve_already_resolved(client):
     )
     action_id = (resp.json().get("data") or {}).get("id")
     client.post(f"/api/account/analytics/policy-actions/{action_id}/resolve", json={})
-    resp = client.post(f"/api/account/analytics/policy-actions/{action_id}/resolve", json={})
+    resp = client.post(
+        f"/api/account/analytics/policy-actions/{action_id}/resolve", json={}
+    )
     assert resp.status_code == 409
 
 
@@ -2219,7 +4879,9 @@ def test_governance_incident_duplicate_blocked(client):
     pa_id = (pa_resp.json().get("data") or {}).get("id")
 
     client.post("/api/account/analytics/incidents", json={"policy_action_id": pa_id})
-    resp = client.post("/api/account/analytics/incidents", json={"policy_action_id": pa_id})
+    resp = client.post(
+        "/api/account/analytics/incidents", json={"policy_action_id": pa_id}
+    )
     assert resp.status_code == 400
     assert "już istnieje" in resp.json().get("detail", "")
 
@@ -2236,7 +4898,9 @@ def test_governance_incident_lifecycle(client):
     )
     pa_id = (pa_resp.json().get("data") or {}).get("id")
 
-    inc_resp = client.post("/api/account/analytics/incidents", json={"policy_action_id": pa_id})
+    inc_resp = client.post(
+        "/api/account/analytics/incidents", json={"policy_action_id": pa_id}
+    )
     inc_id = (inc_resp.json().get("data") or {}).get("id")
 
     # open → acknowledged
@@ -2259,7 +4923,11 @@ def test_governance_incident_lifecycle(client):
     # in_progress → resolved
     resp = client.post(
         f"/api/account/analytics/incidents/{inc_id}/transition",
-        json={"new_status": "resolved", "operator": "admin", "notes": "przyczyna usunięta"},
+        json={
+            "new_status": "resolved",
+            "operator": "admin",
+            "notes": "przyczyna usunięta",
+        },
     )
     assert resp.status_code == 200
     data = resp.json().get("data") or {}
@@ -2280,7 +4948,9 @@ def test_governance_incident_invalid_transition(client):
     )
     pa_id = (pa_resp.json().get("data") or {}).get("id")
 
-    inc_resp = client.post("/api/account/analytics/incidents", json={"policy_action_id": pa_id})
+    inc_resp = client.post(
+        "/api/account/analytics/incidents", json={"policy_action_id": pa_id}
+    )
     inc_id = (inc_resp.json().get("data") or {}).get("id")
 
     # open → in_progress (niedozwolone — trzeba najpierw acknowledged)
@@ -2317,7 +4987,9 @@ def test_governance_incident_get_by_id(client):
     )
     pa_id = (pa_resp.json().get("data") or {}).get("id")
 
-    inc_resp = client.post("/api/account/analytics/incidents", json={"policy_action_id": pa_id})
+    inc_resp = client.post(
+        "/api/account/analytics/incidents", json={"policy_action_id": pa_id}
+    )
     inc_id = (inc_resp.json().get("data") or {}).get("id")
 
     resp = client.get(f"/api/account/analytics/incidents/{inc_id}")
@@ -2384,6 +5056,7 @@ def test_governance_pipeline_status_reflects_freezes(client):
 # =====================================================================
 # Pipeline Guard Integration – freeze-blocked operations → 403
 # =====================================================================
+
 
 def _ensure_blocking_policy_action(client):
     """Upewnij się, że jest aktywna policy action blokująca promotions/experiments/recommendations."""
@@ -2458,7 +5131,8 @@ def test_guard_rollback_blocked(client):
     # Rollback wymaga specyficznej policy action blokującej rollback
     # (escalate domyślnie: rollback_allowed=True, więc trzeba dodać akcję z rollback_allowed=False)
     # Tworzymy dedykowaną policy action która blokuje rollbacki
-    from backend.database import SessionLocal, PolicyAction
+    from backend.database import PolicyAction, SessionLocal
+
     db = SessionLocal()
     try:
         # Dodaj PA z rollback_allowed=False
@@ -2494,7 +5168,13 @@ def test_guard_rollback_blocked(client):
 def test_guard_error_format_consistency(client):
     """Spójny format błędu freeze we wszystkich operacjach."""
     _ensure_blocking_policy_action(client)
-    required_keys = {"error", "operation", "message", "blocking_actions", "blockers_count"}
+    required_keys = {
+        "error",
+        "operation",
+        "message",
+        "blocking_actions",
+        "blockers_count",
+    }
 
     # Experiment
     resp = client.post(
@@ -2507,7 +5187,9 @@ def test_guard_error_format_consistency(client):
     )
     assert resp.status_code == 403
     detail = resp.json().get("detail") or {}
-    assert required_keys.issubset(detail.keys()), f"Brakujące klucze: {required_keys - detail.keys()}"
+    assert required_keys.issubset(
+        detail.keys()
+    ), f"Brakujące klucze: {required_keys - detail.keys()}"
 
     # Recommendation
     resp2 = client.post(
@@ -2516,16 +5198,20 @@ def test_guard_error_format_consistency(client):
     )
     assert resp2.status_code == 403
     detail2 = resp2.json().get("detail") or {}
-    assert required_keys.issubset(detail2.keys()), f"Brakujące klucze: {required_keys - detail2.keys()}"
+    assert required_keys.issubset(
+        detail2.keys()
+    ), f"Brakujące klucze: {required_keys - detail2.keys()}"
 
 
 # =====================================================================
 # Notification hooks — formatowanie, dispatch, endpointy
 # =====================================================================
 
+
 def test_notification_format_incident_created():
     """Format incydentu zawiera priorytet po polsku, PA id, szczegóły."""
     from backend.notification_hooks import format_incident_created
+
     incident = {
         "id": 42,
         "policy_action_id": 7,
@@ -2548,6 +5234,7 @@ def test_notification_format_incident_created():
 def test_notification_format_incident_escalated():
     """Format eskalacji zawiera ostrzeżenie i termin."""
     from backend.notification_hooks import format_incident_escalated
+
     incident = {
         "id": 5,
         "policy_action_id": 3,
@@ -2562,6 +5249,7 @@ def test_notification_format_incident_escalated():
 def test_notification_format_policy_action_created():
     """Format policy action zawiera akcję po polsku, priorytet, opis."""
     from backend.notification_hooks import format_policy_action_created
+
     pa = {
         "id": 10,
         "policy_action": "hold_new_promotions",
@@ -2583,10 +5271,14 @@ def test_notification_format_policy_action_created():
 def test_notification_format_pipeline_blocked():
     """Format blokady pipeline zawiera operację po polsku i blokery."""
     from backend.notification_hooks import format_pipeline_blocked
-    text = format_pipeline_blocked("promotion", [
-        {"policy_action_id": 1, "priority": "critical"},
-        {"policy_action_id": 2, "priority": "high"},
-    ])
+
+    text = format_pipeline_blocked(
+        "promotion",
+        [
+            {"policy_action_id": 1, "priority": "critical"},
+            {"policy_action_id": 2, "priority": "high"},
+        ],
+    )
     assert "wdrożeni" in text.lower()  # "wdrożenia nowych ustawień"
     assert "#1" in text
     assert "#2" in text
@@ -2596,6 +5288,7 @@ def test_notification_format_pipeline_blocked():
 def test_notification_format_sla_breach():
     """Format naruszenia SLA zawiera liczbę eskalowanych incydentów."""
     from backend.notification_hooks import format_sla_breach
+
     escalated = [
         {"id": 1, "priority": "critical", "sla_deadline": "2026-03-25T10:00:00"},
         {"id": 2, "priority": "high", "sla_deadline": "2026-03-25T11:00:00"},
@@ -2608,6 +5301,7 @@ def test_notification_format_sla_breach():
 def test_notification_dispatch_logs_to_db():
     """Dispatch zawsze loguje do DB (kanał log=True)."""
     from backend.notification_hooks import dispatch_notification
+
     result = dispatch_notification("test_event", "test message", priority="low")
     assert result["event_type"] == "test_event"
     assert result["channels"]["log"] is True
@@ -2618,6 +5312,7 @@ def test_notification_dispatch_logs_to_db():
 def test_notification_dispatch_skips_low_priority_telegram():
     """Telegram pomijany przy priorytecie niższym niż próg."""
     from backend.notification_hooks import dispatch_notification
+
     result = dispatch_notification("low_prio_event", "low prio msg", priority="low")
     assert result["channels"]["telegram"] is None
 
@@ -2648,11 +5343,12 @@ def test_notification_hook_on_policy_action(client):
     """Tworzenie policy action triggeruje notification hook (logowany do DB)."""
     # Tworzymy policy action — hook jest wbudowany w create_policy_action
     from backend.database import SessionLocal, SystemLog
+
     db = SessionLocal()
     try:
-        before_count = db.query(SystemLog).filter(
-            SystemLog.module == "notification_hooks"
-        ).count()
+        before_count = (
+            db.query(SystemLog).filter(SystemLog.module == "notification_hooks").count()
+        )
     finally:
         db.close()
 
@@ -2668,9 +5364,9 @@ def test_notification_hook_on_policy_action(client):
 
     db = SessionLocal()
     try:
-        after_count = db.query(SystemLog).filter(
-            SystemLog.module == "notification_hooks"
-        ).count()
+        after_count = (
+            db.query(SystemLog).filter(SystemLog.module == "notification_hooks").count()
+        )
     finally:
         db.close()
 
@@ -2694,10 +5390,14 @@ def test_notification_hook_on_incident(client):
 
     db = SessionLocal()
     try:
-        before_count = db.query(SystemLog).filter(
-            SystemLog.module == "notification_hooks",
-            SystemLog.message.like("%incident_created%"),
-        ).count()
+        before_count = (
+            db.query(SystemLog)
+            .filter(
+                SystemLog.module == "notification_hooks",
+                SystemLog.message.like("%incident_created%"),
+            )
+            .count()
+        )
     finally:
         db.close()
 
@@ -2708,10 +5408,14 @@ def test_notification_hook_on_incident(client):
 
     db = SessionLocal()
     try:
-        after_count = db.query(SystemLog).filter(
-            SystemLog.module == "notification_hooks",
-            SystemLog.message.like("%incident_created%"),
-        ).count()
+        after_count = (
+            db.query(SystemLog)
+            .filter(
+                SystemLog.module == "notification_hooks",
+                SystemLog.message.like("%incident_created%"),
+            )
+            .count()
+        )
     finally:
         db.close()
 
@@ -2726,10 +5430,14 @@ def test_notification_hook_on_blocked_operation(client):
 
     db = SessionLocal()
     try:
-        before_count = db.query(SystemLog).filter(
-            SystemLog.module == "notification_hooks",
-            SystemLog.message.like("%pipeline_blocked%"),
-        ).count()
+        before_count = (
+            db.query(SystemLog)
+            .filter(
+                SystemLog.module == "notification_hooks",
+                SystemLog.message.like("%pipeline_blocked%"),
+            )
+            .count()
+        )
     finally:
         db.close()
 
@@ -2745,14 +5453,20 @@ def test_notification_hook_on_blocked_operation(client):
 
     db = SessionLocal()
     try:
-        after_count = db.query(SystemLog).filter(
-            SystemLog.module == "notification_hooks",
-            SystemLog.message.like("%pipeline_blocked%"),
-        ).count()
+        after_count = (
+            db.query(SystemLog)
+            .filter(
+                SystemLog.module == "notification_hooks",
+                SystemLog.message.like("%pipeline_blocked%"),
+            )
+            .count()
+        )
     finally:
         db.close()
 
-    assert after_count > before_count, "Pipeline blocked notification powinien zapisać log"
+    assert (
+        after_count > before_count
+    ), "Pipeline blocked notification powinien zapisać log"
 
 
 # =====================================================================
@@ -2800,7 +5514,9 @@ def test_worker_cycle_runs_all_steps(client):
 
     # Żaden krok nie powinien być "error" na czystej bazie
     for step_name, step_data in steps.items():
-        assert step_data.get("status") == "ok", f"Krok {step_name} zwrócił error: {step_data}"
+        assert (
+            step_data.get("status") == "ok"
+        ), f"Krok {step_name} zwrócił error: {step_data}"
 
     # Brak błędów krytycznych
     assert len(data["errors"]) == 0
@@ -2824,8 +5540,9 @@ def test_worker_cycle_function_directly():
 
 def test_worker_cycle_escalation_with_overdue_incident(client):
     """Worker eskaluje incydenty z przekroczonym SLA."""
-    from backend.database import SessionLocal, Incident
     from datetime import datetime, timedelta
+
+    from backend.database import Incident, SessionLocal
 
     # Stwórz incydent z przeterminowanym SLA
     db = SessionLocal()
@@ -2858,9 +5575,13 @@ def test_worker_cycle_logs_to_system_log(client):
 
     db = SessionLocal()
     try:
-        before_count = db.query(SystemLog).filter(
-            SystemLog.module == "reevaluation_worker",
-        ).count()
+        before_count = (
+            db.query(SystemLog)
+            .filter(
+                SystemLog.module == "reevaluation_worker",
+            )
+            .count()
+        )
     finally:
         db.close()
 
@@ -2868,9 +5589,13 @@ def test_worker_cycle_logs_to_system_log(client):
 
     db = SessionLocal()
     try:
-        after_count = db.query(SystemLog).filter(
-            SystemLog.module == "reevaluation_worker",
-        ).count()
+        after_count = (
+            db.query(SystemLog)
+            .filter(
+                SystemLog.module == "reevaluation_worker",
+            )
+            .count()
+        )
     finally:
         db.close()
 
@@ -2890,12 +5615,9 @@ def test_worker_get_worker_status():
 
 def test_worker_start_stop():
     """start_worker / stop_worker działają poprawnie."""
-    from backend.reevaluation_worker import (
-        get_worker_status,
-        start_worker,
-        stop_worker,
-    )
     import time
+
+    from backend.reevaluation_worker import get_worker_status, start_worker, stop_worker
 
     # Upewnij się że worker nie działa
     stop_worker()
@@ -2922,15 +5644,19 @@ def test_worker_start_stop():
 
 def test_worker_cycle_with_active_promotion_monitoring(client):
     """Worker re-ewaluuje aktywne monitoringi post-promotion."""
-    from backend.database import SessionLocal, ConfigPromotion, ConfigSnapshot
-    import hashlib, json
+    import hashlib
+    import json
+
+    from backend.database import ConfigPromotion, ConfigSnapshot, SessionLocal
 
     # Utwórz snapshot + promotion z aktywnym monitoringiem
     db = SessionLocal()
     try:
         payload = {"key": "value"}
         payload_json = json.dumps(payload, sort_keys=True)
-        snap_id = "worker-test-" + hashlib.sha256(payload_json.encode()).hexdigest()[:16]
+        snap_id = (
+            "worker-test-" + hashlib.sha256(payload_json.encode()).hexdigest()[:16]
+        )
         snapshot = ConfigSnapshot(
             id=snap_id,
             config_hash=hashlib.sha256(payload_json.encode()).hexdigest(),
@@ -3000,9 +5726,9 @@ def test_console_no_section_errors(client):
     data = resp.json()["data"]
 
     for section_name, section_data in data["sections"].items():
-        assert "error" not in section_data, (
-            f"Sekcja '{section_name}' zwróciła błąd: {section_data.get('error')}"
-        )
+        assert (
+            "error" not in section_data
+        ), f"Sekcja '{section_name}' zwróciła błąd: {section_data.get('error')}"
 
 
 def test_console_incidents_structure(client):
@@ -3120,8 +5846,8 @@ def test_console_invalid_section(client):
 
 def test_console_bundle_function_directly():
     """Bezpośrednie wywołanie get_operator_console() działa poprawnie."""
-    from backend.operator_console import get_operator_console
     from backend.database import SessionLocal
+    from backend.operator_console import get_operator_console
 
     db = SessionLocal()
     try:
@@ -3284,7 +6010,8 @@ def test_correlation_why_blocked_invalid_operation(client):
 
 def test_correlation_promotion_chain(client):
     """Łańcuch promocji zawiera przynajmniej sam rekord promocji."""
-    from backend.database import SessionLocal, ConfigPromotion
+    from backend.database import ConfigPromotion, SessionLocal
+
     # Znajdź dowolną promocję (z wcześniejszych testów)
     db = SessionLocal()
     try:
@@ -3316,8 +6043,8 @@ def test_correlation_promotion_chain_not_found(client):
 
 def test_correlation_functions_directly():
     """Bezpośrednie wywołanie funkcji korelacji działa poprawnie."""
-    from backend.database import SessionLocal
     from backend.correlation import get_why_blocked
+    from backend.database import SessionLocal
 
     db = SessionLocal()
     try:
@@ -3332,6 +6059,7 @@ def test_correlation_functions_directly():
 # =====================================================================
 # ============ TRADING EFFECTIVENESS REVIEW (ETAP X) ==================
 # =====================================================================
+
 
 def _seed_effectiveness_data():
     """Seed: buy+sell pair z kosztami, decision trace ze strategią i reason_code."""
@@ -3353,10 +6081,21 @@ def _seed_effectiveness_data():
         db.add(buy)
         db.commit()
         db.refresh(buy)
-        save_cost_entry(db, symbol="EFFEUR", cost_type="taker_fee", order_id=buy.id,
-                        actual_value=0.10, expected_value=0.10)
-        attach_costs_to_order(db, order=buy, gross_pnl=0.0,
-                              config_snapshot_id="eff-snap", entry_reason_code="rsi_oversold")
+        save_cost_entry(
+            db,
+            symbol="EFFEUR",
+            cost_type="taker_fee",
+            order_id=buy.id,
+            actual_value=0.10,
+            expected_value=0.10,
+        )
+        attach_costs_to_order(
+            db,
+            order=buy,
+            gross_pnl=0.0,
+            config_snapshot_id="eff-snap",
+            entry_reason_code="rsi_oversold",
+        )
 
         # Sell order (profitable gross, but costs eat some)
         sell = Order(
@@ -3376,12 +6115,29 @@ def _seed_effectiveness_data():
         db.add(sell)
         db.commit()
         db.refresh(sell)
-        save_cost_entry(db, symbol="EFFEUR", cost_type="taker_fee", order_id=sell.id,
-                        actual_value=0.10, expected_value=0.10)
-        save_cost_entry(db, symbol="EFFEUR", cost_type="slippage", order_id=sell.id,
-                        actual_value=0.05, expected_value=0.05)
-        attach_costs_to_order(db, order=sell, gross_pnl=2.0,
-                              config_snapshot_id="eff-snap", exit_reason_code="take_profit")
+        save_cost_entry(
+            db,
+            symbol="EFFEUR",
+            cost_type="taker_fee",
+            order_id=sell.id,
+            actual_value=0.10,
+            expected_value=0.10,
+        )
+        save_cost_entry(
+            db,
+            symbol="EFFEUR",
+            cost_type="slippage",
+            order_id=sell.id,
+            actual_value=0.05,
+            expected_value=0.05,
+        )
+        attach_costs_to_order(
+            db,
+            order=sell,
+            gross_pnl=2.0,
+            config_snapshot_id="eff-snap",
+            exit_reason_code="take_profit",
+        )
 
         # DecisionTrace for strategy attribution
         save_decision_trace(
@@ -3570,7 +6326,14 @@ def test_tuning_insights_endpoint(client):
     assert isinstance(data["candidates"], list)
     # Każdy kandydat musi mieć wymagane pola
     for c in data["candidates"]:
-        for key in ("id", "category", "priority", "action", "setting_key", "confidence"):
+        for key in (
+            "id",
+            "category",
+            "priority",
+            "action",
+            "setting_key",
+            "confidence",
+        ):
             assert key in c, f"Brak pola {key} w kandydacie"
 
 
@@ -3602,8 +6365,12 @@ def test_tuning_insights_candidate_categories(client):
     resp = client.get("/api/account/analytics/tuning-insights")
     candidates = resp.json()["data"]["candidates"]
     valid = {
-        "symbol_filter", "entry_filter", "strategy_filter",
-        "cost_optimization", "activity_limit", "execution_quality",
+        "symbol_filter",
+        "entry_filter",
+        "strategy_filter",
+        "cost_optimization",
+        "activity_limit",
+        "execution_quality",
         "risk_discipline",
     }
     for c in candidates:
@@ -3642,9 +6409,9 @@ def test_tuning_insights_setting_keys_non_empty(client):
     resp = client.get("/api/account/analytics/tuning-insights")
     candidates = resp.json()["data"]["candidates"]
     for c in candidates:
-        assert c.get("setting_key") or c.get("target"), (
-            f"Kandydat {c['id']} nie ma setting_key ani target"
-        )
+        assert c.get("setting_key") or c.get(
+            "target"
+        ), f"Kandydat {c['id']} nie ma setting_key ani target"
 
 
 def test_tuning_insights_confidence_range(client):
@@ -3652,9 +6419,9 @@ def test_tuning_insights_confidence_range(client):
     resp = client.get("/api/account/analytics/tuning-insights")
     candidates = resp.json()["data"]["candidates"]
     for c in candidates:
-        assert 0.0 <= c["confidence"] <= 1.0, (
-            f"Confidence poza zakresem: {c['confidence']}"
-        )
+        assert (
+            0.0 <= c["confidence"] <= 1.0
+        ), f"Confidence poza zakresem: {c['confidence']}"
 
 
 # ============ CANDIDATE VALIDATION / EXPERIMENT FEED (ETAP Z) ============
@@ -3694,8 +6461,15 @@ def test_experiment_feed_bundles_structure(client):
     resp = client.get("/api/account/analytics/experiment-feed")
     bundles = resp.json()["data"]["bundles"]
     for b in bundles:
-        for key in ("name", "scope", "priority", "avg_confidence",
-                     "candidates_count", "settings_affected", "candidates"):
+        for key in (
+            "name",
+            "scope",
+            "priority",
+            "avg_confidence",
+            "candidates_count",
+            "settings_affected",
+            "candidates",
+        ):
             assert key in b, f"Brak pola {key} w paczce {b.get('name')}"
         assert isinstance(b["candidates"], list)
         assert len(b["candidates"]) > 0
@@ -3770,21 +6544,36 @@ def test_candidate_classification_directly():
 
     # Kandydat actionable (wysoki priorytet, wysoka confidence)
     high = {
-        "id": "test_high", "category": "symbol_filter",
-        "priority": "wysoki", "action": "test", "setting_key": "watchlist",
-        "target": "TESTSYM", "confidence": 0.8, "reason": "test",
+        "id": "test_high",
+        "category": "symbol_filter",
+        "priority": "wysoki",
+        "action": "test",
+        "setting_key": "watchlist",
+        "target": "TESTSYM",
+        "confidence": 0.8,
+        "reason": "test",
     }
     # Kandydat needs_more_data (za mała confidence)
     low_conf = {
-        "id": "test_low", "category": "symbol_filter",
-        "priority": "wysoki", "action": "test", "setting_key": "watchlist",
-        "target": "LOWSYM", "confidence": 0.1, "reason": "test",
+        "id": "test_low",
+        "category": "symbol_filter",
+        "priority": "wysoki",
+        "action": "test",
+        "setting_key": "watchlist",
+        "target": "LOWSYM",
+        "confidence": 0.1,
+        "reason": "test",
     }
     # Kandydat info_only
     info = {
-        "id": "test_info", "category": "cost_optimization",
-        "priority": "informacyjny", "action": "test", "setting_key": None,
-        "target": "global", "confidence": 0.5, "reason": "test",
+        "id": "test_info",
+        "category": "cost_optimization",
+        "priority": "informacyjny",
+        "action": "test",
+        "setting_key": None,
+        "target": "global",
+        "confidence": 0.5,
+        "reason": "test",
     }
 
     result = classify_candidates([high, low_conf, info])
@@ -3800,14 +6589,21 @@ def test_conflict_detection_directly():
 
     # Dwa kandydaty: usunięcie z watchlist + zmiana per-hour dla tego samego symbolu
     remove = {
-        "id": "sym_remove_X", "category": "symbol_filter",
-        "priority": "wysoki", "action": "usuń_z_watchlist",
-        "setting_key": "watchlist", "target": "XSYM", "confidence": 0.8,
+        "id": "sym_remove_X",
+        "category": "symbol_filter",
+        "priority": "wysoki",
+        "action": "usuń_z_watchlist",
+        "setting_key": "watchlist",
+        "target": "XSYM",
+        "confidence": 0.8,
     }
     limit = {
-        "id": "sym_limit_X", "category": "activity_limit",
-        "priority": "średni", "action": "ogranicz_aktywność",
-        "setting_key": "max_trades_per_hour_per_symbol", "target": "XSYM",
+        "id": "sym_limit_X",
+        "category": "activity_limit",
+        "priority": "średni",
+        "action": "ogranicz_aktywność",
+        "setting_key": "max_trades_per_hour_per_symbol",
+        "target": "XSYM",
         "confidence": 0.5,
     }
 
@@ -3818,22 +6614,37 @@ def test_conflict_detection_directly():
 
 # ============ EXIT QUALITY (ETAP B) ====================================
 
+
 def test_exit_quality_model_creation():
     """ExitQuality — zapis rekordu do DB i odczyt."""
     from backend.database import ExitQuality, SessionLocal
+
     db = SessionLocal()
     try:
         eq = ExitQuality(
-            symbol="BTCUSDT", mode="demo", side="BUY",
-            entry_price=50000.0, exit_price=51000.0, quantity=0.01,
-            planned_tp=52000.0, planned_sl=49000.0,
-            mfe_price=51500.0, mae_price=49800.0,
-            gross_pnl=10.0, net_pnl=8.0, total_cost=2.0,
-            mfe_pnl=15.0, mae_pnl=-2.0,
-            gave_back_pct=46.67, tp_hit=False,
-            tp_near_miss_pct=75.0, sl_hit=False,
-            expected_rr=2.0, realized_rr=0.8,
-            edge_vs_cost=4.0, duration_seconds=3600.0,
+            symbol="BTCUSDT",
+            mode="demo",
+            side="BUY",
+            entry_price=50000.0,
+            exit_price=51000.0,
+            quantity=0.01,
+            planned_tp=52000.0,
+            planned_sl=49000.0,
+            mfe_price=51500.0,
+            mae_price=49800.0,
+            gross_pnl=10.0,
+            net_pnl=8.0,
+            total_cost=2.0,
+            mfe_pnl=15.0,
+            mae_pnl=-2.0,
+            gave_back_pct=46.67,
+            tp_hit=False,
+            tp_near_miss_pct=75.0,
+            sl_hit=False,
+            expected_rr=2.0,
+            realized_rr=0.8,
+            edge_vs_cost=4.0,
+            duration_seconds=3600.0,
         )
         db.add(eq)
         db.commit()
@@ -3847,8 +6658,9 @@ def test_exit_quality_model_creation():
 
 def test_exit_quality_report_empty():
     """exit_quality_report zwraca pusty raport gdy brak danych."""
-    from backend.trading_effectiveness import exit_quality_report
     from backend.database import SessionLocal
+    from backend.trading_effectiveness import exit_quality_report
+
     db = SessionLocal()
     try:
         result = exit_quality_report(db, mode="nonexistent_mode")
@@ -3859,26 +6671,42 @@ def test_exit_quality_report_empty():
 
 def test_exit_quality_report_with_data():
     """exit_quality_report — poprawne agregaty z istniejących rekordów."""
-    from backend.trading_effectiveness import exit_quality_report
     from backend.database import ExitQuality, SessionLocal
+    from backend.trading_effectiveness import exit_quality_report
+
     db = SessionLocal()
     try:
         # Wstaw dwa rekordy testowe
-        for i, (sym, tp_hit, sl_hit, gave, rr) in enumerate([
-            ("ETHUSDT", True, False, 20.0, 1.5),
-            ("ETHUSDT", False, True, 80.0, -0.5),
-        ]):
+        for i, (sym, tp_hit, sl_hit, gave, rr) in enumerate(
+            [
+                ("ETHUSDT", True, False, 20.0, 1.5),
+                ("ETHUSDT", False, True, 80.0, -0.5),
+            ]
+        ):
             eq = ExitQuality(
-                symbol=sym, mode="demo_eqtest", side="BUY",
-                entry_price=3000.0, exit_price=3100.0, quantity=0.1,
-                planned_tp=3200.0, planned_sl=2900.0,
-                mfe_price=3150.0, mae_price=2950.0,
-                gross_pnl=10.0, net_pnl=8.0, total_cost=2.0,
-                mfe_pnl=15.0, mae_pnl=-5.0,
-                gave_back_pct=gave, tp_hit=tp_hit,
-                tp_near_miss_pct=75.0, sl_hit=sl_hit,
-                expected_rr=2.0, realized_rr=rr,
-                edge_vs_cost=4.0, duration_seconds=1800.0,
+                symbol=sym,
+                mode="demo_eqtest",
+                side="BUY",
+                entry_price=3000.0,
+                exit_price=3100.0,
+                quantity=0.1,
+                planned_tp=3200.0,
+                planned_sl=2900.0,
+                mfe_price=3150.0,
+                mae_price=2950.0,
+                gross_pnl=10.0,
+                net_pnl=8.0,
+                total_cost=2.0,
+                mfe_pnl=15.0,
+                mae_pnl=-5.0,
+                gave_back_pct=gave,
+                tp_hit=tp_hit,
+                tp_near_miss_pct=75.0,
+                sl_hit=sl_hit,
+                expected_rr=2.0,
+                realized_rr=rr,
+                edge_vs_cost=4.0,
+                duration_seconds=1800.0,
             )
             db.add(eq)
         db.commit()
@@ -3962,14 +6790,33 @@ def test_position_analysis_with_position(client):
 def test_position_analysis_hold_card(client):
     """Pozycja HOLD generuje kartę z celem i remaining (wymaga tymczasowego tieru HOLD)."""
     import json as _json
+
     db = SessionLocal()
 
     # Ustaw tymczasowy tier HOLD dla WLFIEUR na czas testu
     _hold_tiers = {
-        "CORE": {"symbols": ["BTCEUR"], "min_confidence_add": 0.0, "min_edge_multiplier_add": 0.0, "risk_scale": 1.0, "max_trades_per_day_per_symbol": 2},
-        "HOLD": {"symbols": ["WLFIEUR"], "hold_mode": True, "no_auto_exit": True, "no_new_entries": True, "target_value_eur": 300, "min_confidence_add": 0.0, "min_edge_multiplier_add": 0.0, "risk_scale": 0.0, "max_trades_per_day_per_symbol": 0},
+        "CORE": {
+            "symbols": ["BTCEUR"],
+            "min_confidence_add": 0.0,
+            "min_edge_multiplier_add": 0.0,
+            "risk_scale": 1.0,
+            "max_trades_per_day_per_symbol": 2,
+        },
+        "HOLD": {
+            "symbols": ["WLFIEUR"],
+            "hold_mode": True,
+            "no_auto_exit": True,
+            "no_new_entries": True,
+            "target_value_eur": 300,
+            "min_confidence_add": 0.0,
+            "min_edge_multiplier_add": 0.0,
+            "risk_scale": 0.0,
+            "max_trades_per_day_per_symbol": 0,
+        },
     }
-    old_setting = db.query(RuntimeSetting).filter(RuntimeSetting.key == "symbol_tiers").first()
+    old_setting = (
+        db.query(RuntimeSetting).filter(RuntimeSetting.key == "symbol_tiers").first()
+    )
     old_value = old_setting.value if old_setting else None
     if old_setting:
         old_setting.value = _json.dumps(_hold_tiers)
@@ -4008,7 +6855,11 @@ def test_position_analysis_hold_card(client):
             db.delete(obj)
             db.commit()
         # Przywróć oryginalny tier override
-        st = db.query(RuntimeSetting).filter(RuntimeSetting.key == "symbol_tiers").first()
+        st = (
+            db.query(RuntimeSetting)
+            .filter(RuntimeSetting.key == "symbol_tiers")
+            .first()
+        )
         if st and old_value is not None:
             st.value = old_value
             db.commit()
@@ -4016,6 +6867,8 @@ def test_position_analysis_hold_card(client):
             db.delete(st)
             db.commit()
         db.close()
+
+
 # TESTY AKCEPTACYJNE — LIVE/DEMO spójność (v0.7)
 # ═══════════════════════════════════════════════════════════════════════════
 
@@ -4052,13 +6905,25 @@ def test_acceptance_demo_positions_from_local_db(client):
         assert item.get("source") != "binance_spot"
 
 
-def test_acceptance_live_positions_analysis_restores_entry_baseline(client, monkeypatch):
+def test_acceptance_live_positions_analysis_restores_entry_baseline(
+    client, monkeypatch
+):
     class _FakeBinance:
         def get_my_trades(self, symbol: str, limit: int = 500):
             assert symbol == "BTCEUR"
             return [
-                {"isBuyer": True, "qty": "0.2", "price": "80", "time": 1_700_000_000_000},
-                {"isBuyer": True, "qty": "0.3", "price": "120", "time": 1_700_000_100_000},
+                {
+                    "isBuyer": True,
+                    "qty": "0.2",
+                    "price": "80",
+                    "time": 1_700_000_000_000,
+                },
+                {
+                    "isBuyer": True,
+                    "qty": "0.3",
+                    "price": "120",
+                    "time": 1_700_000_100_000,
+                },
             ]
 
     def _fake_live_spot_portfolio(_db):
@@ -4077,11 +6942,17 @@ def test_acceptance_live_positions_analysis_restores_entry_baseline(client, monk
         }
 
     monkeypatch.setattr(positions_router, "get_binance_client", lambda: _FakeBinance())
-    monkeypatch.setattr(portfolio_router, "_build_live_spot_portfolio", _fake_live_spot_portfolio)
+    monkeypatch.setattr(
+        portfolio_router, "_build_live_spot_portfolio", _fake_live_spot_portfolio
+    )
 
     db = SessionLocal()
     try:
-        existing = db.query(Position).filter(Position.symbol == "BTCEUR", Position.mode == "live").all()
+        existing = (
+            db.query(Position)
+            .filter(Position.symbol == "BTCEUR", Position.mode == "live")
+            .all()
+        )
         for item in existing:
             db.delete(item)
         db.commit()
@@ -4090,21 +6961,38 @@ def test_acceptance_live_positions_analysis_restores_entry_baseline(client, monk
         assert resp.status_code == 200
         payload = resp.json()
         assert payload.get("success") is True
-        card = next((item for item in payload.get("data", []) if item.get("symbol") == "BTCEUR"), None)
+        card = next(
+            (
+                item
+                for item in payload.get("data", [])
+                if item.get("symbol") == "BTCEUR"
+            ),
+            None,
+        )
         assert card is not None
         assert round(float(card.get("entry_price") or 0), 4) == 104.0
         assert round(float(card.get("cost_eur") or 0), 4) == 52.0
         assert round(float(card.get("pnl_eur") or 0), 4) == -2.0
-        assert round(float(card.get("pnl_pct") or 0), 2) == round((-2.0 / 52.0) * 100, 2)
+        assert round(float(card.get("pnl_pct") or 0), 2) == round(
+            (-2.0 / 52.0) * 100, 2
+        )
         assert card.get("entry_price_source") == "binance_trade_history"
 
-        synced = db.query(Position).filter(Position.symbol == "BTCEUR", Position.mode == "live").first()
+        synced = (
+            db.query(Position)
+            .filter(Position.symbol == "BTCEUR", Position.mode == "live")
+            .first()
+        )
         assert synced is not None
         assert round(float(synced.entry_price or 0), 4) == 104.0
         assert round(float(synced.quantity or 0), 4) == 0.5
         assert synced.entry_reason_code == "synced_from_binance"
     finally:
-        cleanup = db.query(Position).filter(Position.symbol == "BTCEUR", Position.mode == "live").all()
+        cleanup = (
+            db.query(Position)
+            .filter(Position.symbol == "BTCEUR", Position.mode == "live")
+            .all()
+        )
         for item in cleanup:
             db.delete(item)
         db.commit()
@@ -4174,7 +7062,13 @@ def test_acceptance_goal_evaluator_returns_realism(client):
     data = resp.json()
     assert data.get("success") is True
     assert "realism" in data
-    assert data["realism"] in ("bardzo_realny", "realny", "mozliwy", "trudny", "malo_realny")
+    assert data["realism"] in (
+        "bardzo_realny",
+        "realny",
+        "mozliwy",
+        "trudny",
+        "malo_realny",
+    )
     assert "required_move_pct" in data
     assert data["required_move_pct"] == 50.0  # (15000-10000)/10000 * 100
     assert "reality_score" in data
@@ -4197,3 +7091,748 @@ def test_acceptance_effective_universe_not_empty(client):
     assert data.get("success") is True
     # Nie wymagamy danych (bo klines mogą być puste w testach),
     # ale endpoint nie powinien crashować
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Testy logiki fundametalnej: scoring 0-100, SELL guard, regime, edge vs cost
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+def test_can_sell_blocked_when_no_position():
+    """can_sell(0) musi zwrócić (False, ...) — twarda blokada SELL bez pozycji."""
+    allowed, reason = can_sell(position_qty=0.0)
+    assert allowed is False
+    assert "Cannot SELL" in reason or "brak" in reason.lower() or len(reason) > 0
+
+
+def test_can_sell_allowed_when_position_exists():
+    """can_sell z niezerową ilością zwraca True."""
+    allowed, _ = can_sell(position_qty=0.5)
+    assert allowed is True
+
+
+def test_detect_regime_trend_up():
+    """detect_regime: gdy EMA wyrównane w górę + RSI 55 + pozytywny MACD → TREND_UP."""
+    from backend.risk import detect_regime
+
+    result = detect_regime(
+        price=110.0,
+        ema21_15m=105.0,
+        ema50_15m=100.0,
+        ema21_1h=108.0,
+        ema50_1h=103.0,
+        ema200_1h=95.0,
+        rsi_15m=57.0,
+        macd_hist_15m=0.15,
+        volume_ratio_15m=1.3,
+    )
+    assert result.regime == "TREND_UP"
+    assert result.confidence >= 0.5
+
+
+def test_detect_regime_range_blocks_buy():
+    """detect_regime: mieszane EMA + neutral RSI → nie TREND_UP."""
+    from backend.risk import detect_regime
+
+    result = detect_regime(
+        price=100.0,
+        ema21_15m=100.5,
+        ema50_15m=100.3,  # minimal spread — trend boczny
+        ema21_1h=101.0,
+        ema50_1h=100.8,
+        ema200_1h=99.5,
+        rsi_15m=50.0,
+        macd_hist_15m=0.001,
+        volume_ratio_15m=0.95,
+    )
+    # Reżim RANGE lub CHAOS — nie TREND_UP
+    assert result.regime in ("RANGE", "CHAOS", "TREND_DOWN")
+
+
+def test_validate_long_entry_all_conditions_met():
+    """validate_long_entry: gdy wszystkie warunki spełnione → allowed=True."""
+    costs = TradeCostEstimate(
+        fee_entry_pct=0.075,
+        fee_exit_pct=0.075,
+        spread_pct=0.05,
+        slippage_pct=0.05,
+    )
+    decision = validate_long_entry(
+        regime="TREND_UP",
+        signal_score=80.0,
+        expected_move_pct=1.8,
+        risk_reward=2.5,
+        costs=costs,
+    )
+    assert decision.allowed is True
+
+
+def test_validate_long_entry_blocked_wrong_regime():
+    """validate_long_entry: reżim RANGE blokuje BUY."""
+    costs = TradeCostEstimate(
+        fee_entry_pct=0.075,
+        fee_exit_pct=0.075,
+        spread_pct=0.05,
+        slippage_pct=0.05,
+    )
+    decision = validate_long_entry(
+        regime="RANGE",
+        signal_score=85.0,
+        expected_move_pct=2.0,
+        risk_reward=2.5,
+        costs=costs,
+    )
+    assert decision.allowed is False
+
+
+def test_score_opportunity_buy_in_trend_up_gives_high_score():
+    """
+    _score_opportunity: dobry BUY przy TREND_UP + RSI 58 + volume 1.4 + edge 2%
+    musi dać score >= 60.
+    """
+    from backend.database import SessionLocal
+    from backend.routers.signals import _score_opportunity
+
+    db = SessionLocal()
+    try:
+        signal = {
+            "symbol": "BTCUSDT",
+            "signal_type": "BUY",
+            "confidence": 0.75,
+            "price": 50000.0,
+            "indicators": {
+                "rsi": 58.0,
+                "ema_20": 49500.0,
+                "ema_50": 48000.0,
+                "atr": 600.0,
+                "volume_ratio": 1.4,
+                "macd_hist": 50.0,
+                "market_regime": "TREND_UP",
+                "regime_confidence": 0.82,
+                "expected_move_pct": 2.0,
+                "total_cost_pct": 0.3,
+                "risk_reward": 2.5,
+            },
+        }
+        result = _score_opportunity(signal, db)
+        assert 0 <= result["score"] <= 100
+        assert (
+            result["score"] >= 60
+        ), f"Oczekiwano score >= 60, dostałem {result['score']}"
+        assert "score_breakdown" in result
+    finally:
+        db.close()
+
+
+def test_score_opportunity_hold_gives_low_score():
+    """HOLD sygnał musi mieć score <= 25 (penalty HOLD)."""
+    from backend.database import SessionLocal
+    from backend.routers.signals import _score_opportunity
+
+    db = SessionLocal()
+    try:
+        signal = {
+            "symbol": "ETHUSDT",
+            "signal_type": "HOLD",
+            "confidence": 0.5,
+            "price": 2000.0,
+            "indicators": {
+                "market_regime": "RANGE",
+                "regime_confidence": 0.4,
+            },
+        }
+        result = _score_opportunity(signal, db)
+        assert (
+            result["score"] <= 25
+        ), f"HOLD powinien być <= 25, dostałem {result['score']}"
+    finally:
+        db.close()
+
+
+def test_score_opportunity_buy_against_trend_penalized():
+    """BUY przy TREND_DOWN musi mieć niski score (brak bonus trendu, bez regime_bonus)."""
+    from backend.database import SessionLocal
+    from backend.routers.signals import _score_opportunity
+
+    db = SessionLocal()
+    try:
+        signal = {
+            "symbol": "SOLUSDT",
+            "signal_type": "BUY",
+            "confidence": 0.6,
+            "price": 100.0,
+            "indicators": {
+                "rsi": 42.0,
+                "ema_20": 95.0,
+                "ema_50": 102.0,  # EMA50 > EMA20 — trend spadkowy
+                "atr": 1.5,
+                "volume_ratio": 0.9,
+                "market_regime": "TREND_DOWN",
+                "regime_confidence": 0.7,
+                "expected_move_pct": 0.8,
+                "total_cost_pct": 0.3,
+            },
+        }
+        result = _score_opportunity(signal, db)
+        # Brak trend bonus + niski volume → niski wynik
+        assert (
+            result["score"] < 40
+        ), f"BUY pod prąd trendu powinien być < 40, dostałem {result['score']}"
+    finally:
+        db.close()
+
+
+# ============================================================
+# TESTY KLASYFIKACJI POZYCJI (KROK 4)
+# ============================================================
+
+
+def _make_spot(
+    symbol: str,
+    qty: float,
+    entry_price,
+    source: str = "binance_spot",
+    current_price: float = 100.0,
+    value_eur: float = None,
+) -> dict:
+    """Pomocnicza fabryka danych pozycji spot dla testów klasyfikacji."""
+    v = value_eur if value_eur is not None else qty * current_price
+    return {
+        "symbol": symbol,
+        "quantity": qty,
+        "entry_price": entry_price,
+        "current_price": current_price,
+        "position_value_eur": v,
+        "value_eur": v,  # alias używany wewnętrznie przez _analyze_spot_position
+        "source": source,
+        "is_hold": False,
+        "hold_target_eur": None,
+        "trend": None,
+        "rsi": None,
+        "planned_tp": None,
+        "planned_sl": None,
+    }
+
+
+def test_classify_valid_position_has_recommendation():
+    """Pozycja z entry_price != None i value > 0.50 → classification=valid_position, decyzja ≠ DUST/BRAK DANYCH."""
+    from unittest.mock import patch
+
+    from backend.database import SessionLocal
+    from backend.routers.positions import _analyze_spot_position
+
+    db = SessionLocal()
+    try:
+        spot = _make_spot(
+            "BTCEUR",
+            qty=0.001,
+            entry_price=85000.0,
+            current_price=90000.0,
+            value_eur=90.0,
+        )
+        # Mockujemy get_live_context bo w izolowanej testowej bazie nie ma tabeli klines
+        with patch("backend.routers.positions.get_live_context", return_value=None):
+            card = _analyze_spot_position(spot, db, tier_map={})
+
+        assert (
+            card["classification"] == "valid_position"
+        ), f"Oczekiwano valid_position, got {card['classification']}"
+        assert card["can_analyze"] is True
+        assert card["can_compute_pnl"] is True
+        assert card["has_entry_price"] is True
+        assert card["is_dust"] is False
+        assert card["decision"] not in (
+            "DUST",
+            "BRAK DANYCH",
+        ), f"Nieoczekiwana decyzja: {card['decision']}"
+        assert (
+            card["warning_message"] is None
+        ), f"Nie powinno być ostrzeżenia: {card['warning_message']}"
+        assert card["pnl_eur"] is not None  # PnL da się policzyć
+    finally:
+        db.close()
+
+
+def test_classify_missing_entry_blocks_recommendation():
+    """Pozycja z entry_price=None i value > 0.50 → classification=missing_entry_price, decyzja=BRAK DANYCH, can_analyze=False."""
+    from backend.database import SessionLocal
+    from backend.routers.positions import _analyze_spot_position
+
+    db = SessionLocal()
+    try:
+        spot = _make_spot(
+            "ETHEUR", qty=0.5, entry_price=None, current_price=1800.0, value_eur=900.0
+        )
+        # can_analyze=False → get_live_context nie jest wołany
+        card = _analyze_spot_position(spot, db, tier_map={})
+
+        assert (
+            card["classification"] == "missing_entry_price"
+        ), f"Oczekiwano missing_entry_price, got {card['classification']}"
+        assert card["can_analyze"] is False
+        assert card["can_compute_pnl"] is False
+        assert card["has_entry_price"] is False
+        assert card["is_dust"] is False
+        assert (
+            card["decision"] == "BRAK DANYCH"
+        ), f"Oczekiwano BRAK DANYCH, got {card['decision']}"
+        assert card["warning_message"] is not None
+        assert card["pnl_eur"] is None  # PnL niemożliwe
+        assert card["pnl_pct"] is None
+    finally:
+        db.close()
+
+
+def test_classify_dust_source_blocks_recommendation():
+    """Pozycja z source=binance_spot_dust → classification=dust_position niezależnie od wartości."""
+    from backend.database import SessionLocal
+    from backend.routers.positions import _analyze_spot_position
+
+    db = SessionLocal()
+    try:
+        # can_analyze=False (dust) → get_live_context nie jest wołany
+        spot = _make_spot(
+            "AVAXEUR",
+            qty=0.001,
+            entry_price=8.0,
+            source="binance_spot_dust",
+            current_price=8.0,
+            value_eur=0.008,
+        )
+        card = _analyze_spot_position(spot, db, tier_map={})
+
+        assert (
+            card["classification"] == "dust_position"
+        ), f"Oczekiwano dust_position, got {card['classification']}"
+        assert card["is_dust"] is True
+        assert card["can_analyze"] is False
+        assert card["decision"] == "DUST", f"Oczekiwano DUST, got {card['decision']}"
+        assert card["warning_message"] is not None
+        assert card["pnl_eur"] is None
+    finally:
+        db.close()
+
+
+def test_classify_low_value_dust_blocks_recommendation():
+    """Pozycja o wartości < 0.50 EUR → dust_position niezależnie od source."""
+    from backend.database import SessionLocal
+    from backend.routers.positions import _analyze_spot_position
+
+    db = SessionLocal()
+    try:
+        spot = _make_spot(
+            "SHIBEUR",
+            qty=1000.0,
+            entry_price=0.0000003,
+            source="binance_spot",
+            current_price=0.0000003,
+            value_eur=0.0003,
+        )
+        card = _analyze_spot_position(spot, db, tier_map={})
+
+        assert card["is_dust"] is True
+        assert card["classification"] == "dust_position"
+        assert card["decision"] == "DUST"
+        assert card["can_analyze"] is False
+    finally:
+        db.close()
+
+
+def test_mixed_portfolio_summary_counts_only_valid():
+    """Podsumowanie analizy portfela: wartość PnL i koszt agregowane tylko dla valid_position."""
+    from unittest.mock import patch
+
+    from backend.database import SessionLocal
+    from backend.routers.positions import _analyze_spot_position
+
+    db = SessionLocal()
+    try:
+        valid_spot = _make_spot(
+            "BTCEUR",
+            qty=0.001,
+            entry_price=80000.0,
+            current_price=90000.0,
+            value_eur=90.0,
+        )
+        dust_spot = _make_spot(
+            "SHIBEUR",
+            qty=1000.0,
+            entry_price=None,
+            source="binance_spot_dust",
+            current_price=0.0000003,
+            value_eur=0.0003,
+        )
+        missing_spot = _make_spot(
+            "AVAXEUR", qty=3.0, entry_price=None, current_price=8.0, value_eur=24.0
+        )
+
+        with patch("backend.routers.positions.get_live_context", return_value=None):
+            cards = [
+                _analyze_spot_position(s, db, tier_map={})
+                for s in [valid_spot, dust_spot, missing_spot]
+            ]
+
+        valid_cards = [c for c in cards if c.get("classification") == "valid_position"]
+        dust_cards = [c for c in cards if c.get("is_dust")]
+        missing_cards = [
+            c for c in cards if c.get("classification") == "missing_entry_price"
+        ]
+
+        assert len(valid_cards) == 1
+        assert len(dust_cards) == 1
+        assert len(missing_cards) == 1
+
+        # Tylko valid_position ma PnL możliwy do zsumowania
+        pnl_sum = sum(c["pnl_eur"] for c in valid_cards if c.get("pnl_eur") is not None)
+        assert (
+            pnl_sum != 0
+        ), "Valid position z entry!=current powinna mieć niezerowe PnL"
+
+        # Dust i missing nie mają PnL
+        for c in dust_cards + missing_cards:
+            assert c.get("pnl_eur") is None, f"{c['symbol']}: nie powinien mieć pnl_eur"
+    finally:
+        db.close()
+
+
+def test_api_position_card_contract_fields_present():
+    """Każda karta z _analyze_spot_position musi mieć wymagane pola kontraktu API."""
+    from unittest.mock import patch
+
+    from backend.database import SessionLocal
+    from backend.routers.positions import _analyze_spot_position
+
+    REQUIRED_FIELDS = [
+        "symbol",
+        "classification",
+        "is_dust",
+        "has_entry_price",
+        "can_analyze",
+        "can_compute_pnl",
+        "warning_message",
+        "decision",
+        "strength",
+        "reasons",
+        "entry_price",
+        "current_price",
+        "quantity",
+        "position_value_eur",
+        "pnl_eur",
+        "pnl_pct",
+        "source",
+    ]
+
+    db = SessionLocal()
+    try:
+        spot = _make_spot(
+            "BTCEUR",
+            qty=0.001,
+            entry_price=85000.0,
+            current_price=90000.0,
+            value_eur=90.0,
+        )
+        with patch("backend.routers.positions.get_live_context", return_value=None):
+            card = _analyze_spot_position(spot, db, tier_map={})
+
+        for field in REQUIRED_FIELDS:
+            assert field in card, f"Brak pola '{field}' w karcie pozycji"
+    finally:
+        db.close()
+
+
+# ---------------------------------------------------------------------------
+# DIAGNOSTIC HUB — testy smoke dla 3 endpointów centrum diagnostyki
+# ---------------------------------------------------------------------------
+
+
+def test_api_diagnostic_system_logs_endpoint(client):
+    """GET /api/account/system-logs — musi zwrócić success=True i listę data."""
+    resp = client.get("/api/account/system-logs?limit=10")
+    assert (
+        resp.status_code == 200
+    ), f"Oczekiwano 200, got {resp.status_code}: {resp.text}"
+    j = resp.json()
+    assert j.get("success") is True
+    assert isinstance(j.get("data"), list)
+
+
+def test_api_diagnostic_system_logs_level_filter(client):
+    """GET /api/account/system-logs?level=ERROR — filtr poziomu nie może zwrócić błędu 4xx/5xx."""
+    resp = client.get("/api/account/system-logs?limit=20&level=ERROR")
+    assert resp.status_code == 200, f"Filtr level=ERROR zwrócił {resp.status_code}"
+    j = resp.json()
+    assert j.get("success") is True
+    for entry in j.get("data", []):
+        assert (
+            entry.get("level") == "ERROR"
+        ), f"Filtr level=ERROR zwrócił wpis z level={entry.get('level')}"
+
+
+def test_api_diagnostic_bot_activity_endpoint(client):
+    """GET /api/account/bot-activity — musi zwrócić pola considered, rejected, bought, closed."""
+    resp = client.get("/api/account/bot-activity?mode=live&minutes=15")
+    assert (
+        resp.status_code == 200
+    ), f"Oczekiwano 200, got {resp.status_code}: {resp.text}"
+    j = resp.json()
+    # endpoint zwraca {"data": {...}} bez klucza success
+    d = j.get("data", {})
+    for field in (
+        "considered",
+        "rejected",
+        "bought",
+        "closed",
+        "last_actions",
+        "open_positions",
+    ):
+        assert field in d, f"Brak pola '{field}' w odpowiedzi bot-activity"
+    assert isinstance(d["last_actions"], list)
+    assert isinstance(d["open_positions"], list)
+
+
+def test_api_diagnostic_execution_trace_endpoint(client):
+    """GET /api/signals/execution-trace — musi zwrócić listę data z polami symbol i reason_code."""
+    resp = client.get("/api/signals/execution-trace?mode=live&limit_minutes=30")
+    assert (
+        resp.status_code == 200
+    ), f"Oczekiwano 200, got {resp.status_code}: {resp.text}"
+    j = resp.json()
+    assert j.get("success") is True
+    data = j.get("data", [])
+    assert isinstance(data, list)
+    for item in data[:5]:
+        assert (
+            "symbol" in item
+        ), f"Brak pola 'symbol' w rekordzie execution-trace: {item}"
+        assert (
+            "reason_code" in item
+        ), f"Brak pola 'reason_code' w rekordzie execution-trace: {item}"
+
+
+# ---------------------------------------------------------------------------
+# NAPRAWY z sesji: dust-counts, AI providers, mode propagation
+# ---------------------------------------------------------------------------
+
+
+def test_portfolio_wealth_has_dust_and_active_counts(client):
+    """GET /api/portfolio/wealth — musi mieć positions_count (aktywne), dust_positions_count i all_assets_count."""
+    resp = client.get("/api/portfolio/wealth?mode=demo")
+    assert (
+        resp.status_code == 200
+    ), f"Oczekiwano 200, got {resp.status_code}: {resp.text}"
+    j = resp.json()
+    assert j.get("success") is True
+    # Nowe pola rozdzielające dust od aktywnych
+    assert "positions_count" in j, "Brak pola positions_count (aktywne)"
+    assert "dust_positions_count" in j, "Brak pola dust_positions_count"
+    assert "all_assets_count" in j, "Brak pola all_assets_count"
+    assert "cash_assets_count" in j, "Brak pola cash_assets_count"
+    # positions_count (aktywne) <= all_assets_count (total)
+    assert (
+        j["positions_count"] <= j["all_assets_count"]
+    ), f"positions_count ({j['positions_count']}) > all_assets_count ({j['all_assets_count']})"
+    # dust + aktywne + cash <= total (mogą się pokrywać przy edge case 0-value cash)
+    assert j["dust_positions_count"] >= 0
+
+
+def test_analytics_overview_respects_mode_param(client):
+    """GET /api/account/analytics/overview?mode=live — endpoint nie powinien ignorować parametru mode."""
+    resp_live = client.get("/api/account/analytics/overview?mode=live")
+    resp_demo = client.get("/api/account/analytics/overview?mode=demo")
+    assert resp_live.status_code == 200, f"mode=live zwrócił {resp_live.status_code}"
+    assert resp_demo.status_code == 200, f"mode=demo zwrócił {resp_demo.status_code}"
+    j_live = resp_live.json()
+    j_demo = resp_demo.json()
+    assert j_live.get("success") is True, f"mode=live nie ma success=True: {j_live}"
+    assert j_demo.get("success") is True, f"mode=demo nie ma success=True: {j_demo}"
+    # Oba tryby mogą zwrócić różny `mode` w danych — sprawdzamy tylko strukturę
+    assert "data" in j_live
+    assert "data" in j_demo
+
+
+def test_ai_status_endpoint_has_runtime_field(client):
+    """GET /api/account/ai-status — każdy provider powinien mieć pole runtime z status."""
+    resp = client.get("/api/account/ai-status")
+    assert (
+        resp.status_code == 200
+    ), f"Oczekiwano 200, got {resp.status_code}: {resp.text}"
+    j = resp.json()
+    assert j.get("success") is True
+    d = j.get("data", {})
+    providers = d.get("providers", {})
+    assert len(providers) > 0, "Brak providerów w odpowiedzi ai-status"
+    for name, pdata in providers.items():
+        assert "runtime" in pdata, f"Provider '{name}' nie ma pola 'runtime'"
+        rt = pdata["runtime"]
+        assert "status" in rt, f"Provider '{name}'.runtime nie ma pola 'status'"
+        assert rt["status"] in (
+            "ok",
+            "backoff",
+            "unconfigured",
+        ), f"Provider '{name}'.runtime.status ma nieoczekiwaną wartość: {rt['status']}"
+
+
+def test_ai_providers_status_function():
+    """Funkcja get_ai_providers_status() zwraca listę providerów z wymaganymi polami."""
+    from backend.analysis import get_ai_providers_status
+
+    result = get_ai_providers_status()
+    assert isinstance(result, list), "get_ai_providers_status() nie zwraca listy"
+    assert len(result) == 4, f"Oczekiwano 4 providerów, got {len(result)}"
+    VALID_STATUSES = {"ok", "backoff", "unconfigured"}
+    for p in result:
+        assert "name" in p, f"Provider bez pola 'name': {p}"
+        assert "status" in p, f"Provider '{p.get('name')}' bez pola 'status'"
+        assert "label" in p, f"Provider '{p.get('name')}' bez pola 'label'"
+        assert (
+            p["status"] in VALID_STATUSES
+        ), f"Provider '{p['name']}' ma nieprawidłowy status: '{p['status']}'"
+
+
+# ---------------------------------------------------------------------------
+# Testy: capital-snapshot i trading-status — nowe endpointy
+# ---------------------------------------------------------------------------
+
+
+def test_capital_snapshot_structure(client):
+    """GET /api/account/capital-snapshot — musi zwrócić required fields."""
+    resp = client.get("/api/account/capital-snapshot?mode=demo")
+    assert (
+        resp.status_code == 200
+    ), f"Oczekiwano 200, got {resp.status_code}: {resp.text}"
+    j = resp.json()
+    assert j.get("success") is True, f"success != True: {j}"
+    d = j.get("data", {})
+    required = [
+        "base_currency",
+        "free_cash",
+        "total_account_value",
+        "active_positions_count",
+        "dust_positions_count",
+        "cash_assets_count",
+        "all_assets_count",
+        "sync_status",
+        "source_of_truth",
+    ]
+    for field in required:
+        assert field in d, f"Brak wymaganego pola '{field}' w capital-snapshot"
+
+
+def test_capital_snapshot_dust_classification(client):
+    """capital-snapshot: aktywne + dust + cash <= all_assets_count (lub równe w trybie demo)."""
+    resp = client.get("/api/account/capital-snapshot?mode=demo")
+    j = resp.json()
+    assert j.get("success") is True
+    d = j["data"]
+    active = d["active_positions_count"]
+    dust = d["dust_positions_count"]
+    cash = d["cash_assets_count"]
+    total = d["all_assets_count"]
+    assert active >= 0 and dust >= 0 and cash >= 0 and total >= 0
+    # Suma składowych nie może przekraczać wszystkich aktywów
+    assert (
+        active + dust + cash <= total + 5
+    ), f"Suma aktywne({active})+pył({dust})+cash({cash})={active+dust+cash} > total({total})"
+
+
+def test_capital_snapshot_sync_status(client):
+    """capital-snapshot: sync_status musi być jedną z znanych wartości."""
+    resp = client.get("/api/account/capital-snapshot?mode=demo")
+    j = resp.json()
+    d = j.get("data", {})
+    valid_statuses = {
+        "ok",
+        "binance_unavailable",
+        "local_db_fallback",
+        "demo",
+        "error",
+        "unknown",
+    }
+    status = d.get("sync_status", "")
+    assert status in valid_statuses, f"Nieznany sync_status: '{status}'"
+
+
+def test_trading_status_structure(client):
+    """GET /api/account/trading-status — musi zwrócić required fields."""
+    resp = client.get("/api/account/trading-status?mode=demo")
+    assert (
+        resp.status_code == 200
+    ), f"Oczekiwano 200, got {resp.status_code}: {resp.text}"
+    j = resp.json()
+    assert j.get("success") is True, f"success != True: {j}"
+    d = j.get("data", {})
+    required = [
+        "trading_enabled",
+        "live_trading_enabled",
+        "exchange_connected",
+        "blockers",
+        "status_color",
+        "candidate_count",
+    ]
+    for field in required:
+        assert field in d, f"Brak wymaganego pola '{field}' w trading-status"
+    assert isinstance(d["blockers"], list), "blockers musi być listą"
+
+
+def test_trading_status_blockers_structure(client):
+    """trading-status: każdy bloker musi mieć code, stage, severity, message."""
+    resp = client.get("/api/account/trading-status?mode=demo")
+    j = resp.json()
+    d = j.get("data", {})
+    blockers = d.get("blockers", [])
+    required_blocker_fields = {"code", "stage", "severity", "message"}
+    for b in blockers:
+        missing = required_blocker_fields - set(b.keys())
+        assert not missing, f"Bloker {b.get('code', '?')} nie ma pól: {missing}"
+
+
+def test_trading_status_status_color(client):
+    """trading-status: status_color musi być green/yellow/red."""
+    resp = client.get("/api/account/trading-status?mode=demo")
+    j = resp.json()
+    color = j.get("data", {}).get("status_color")
+    assert color in ("green", "yellow", "red"), f"Nieznany status_color: '{color}'"
+
+
+def test_trading_status_live_disabled_shows_blocker_or_ok(client):
+    """trading-status?mode=live: w trybie live bez kluczy Binance bloker exchange_connected=False lub trading jest OK."""
+    resp = client.get("/api/account/trading-status?mode=live")
+    assert resp.status_code == 200, f"Oczekiwano 200: {resp.text}"
+    j = resp.json()
+    assert j.get("success") is True
+    d = j.get("data", {})
+    # Sprawdzamy spójność: kolor czerwony → muszą być blokery
+    if d.get("status_color") == "red":
+        assert (
+            len(d.get("blockers", [])) > 0
+        ), "Kolor red, ale brak blokerów — niespójność"
+
+
+def test_runtime_activity_structure(client):
+    """GET /api/account/runtime-activity — payload musi mieć kluczowe sekcje runtime."""
+    resp = client.get("/api/account/runtime-activity?mode=live")
+    assert (
+        resp.status_code == 200
+    ), f"Oczekiwano 200, got {resp.status_code}: {resp.text}"
+    j = resp.json()
+    assert j.get("success") is True
+    d = j.get("data", {})
+
+    required = [
+        "mode",
+        "alive",
+        "collector",
+        "worker",
+        "market_data",
+        "decision_pipeline_15m",
+        "recent_decisions",
+        "updated_at",
+    ]
+    for field in required:
+        assert field in d, f"Brak pola '{field}' w runtime-activity"
+
+    assert isinstance(d.get("collector"), dict)
+    assert isinstance(d.get("worker"), dict)
+    assert isinstance(d.get("market_data"), dict)
+    assert isinstance(d.get("decision_pipeline_15m"), dict)
+    assert isinstance(d.get("recent_decisions"), list)

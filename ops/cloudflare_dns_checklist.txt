@@ -1,0 +1,43 @@
+Cloudflare PRO checklist (named tunnel)
+
+1) Login i named tunnel
+- cloudflared tunnel login
+- cloudflared tunnel create rldc-tunnel
+- cloudflared tunnel list
+
+2) Uzupełnij config
+- Edytuj /home/rldc/.cloudflared/config.yml
+- tunnel: <TUNNEL_ID_UUID>
+- credentials-file: /home/rldc/.cloudflared/<TUNNEL_ID_UUID>.json
+- hostname frontend: rldc.twojadomena.com -> localhost:3000
+- hostname api: api.rldc.twojadomena.com -> localhost:8000
+
+3) DNS w Cloudflare
+- cloudflared tunnel route dns rldc-tunnel rldc.twojadomena.com
+- cloudflared tunnel route dns rldc-tunnel api.rldc.twojadomena.com
+- Sprawdź w panelu DNS: rekordy CNAME/proxied do tunnel
+
+4) Test lokalny przed systemd
+- cloudflared --config /home/rldc/.cloudflared/config.yml tunnel run
+- curl -I https://rldc.twojadomena.com
+- curl -I https://api.rldc.twojadomena.com
+
+5) Systemd
+- sudo cp ops/cloudflared.service.example /etc/systemd/system/cloudflared.service
+- sudo systemctl daemon-reload
+- sudo systemctl enable cloudflared
+- sudo systemctl start cloudflared
+- sudo systemctl status cloudflared --no-pager
+- sudo journalctl -u cloudflared -n 200 --no-pager
+
+6) Po wdrożeniu ustaw ENV
+- APP_DOMAIN=rldc.twojadomena.com
+- PUBLIC_DOMAIN=rldc.twojadomena.com
+- API_DOMAIN=api.rldc.twojadomena.com
+- CLOUDFLARE_TUNNEL_URL=https://rldc.twojadomena.com
+
+7) Security minimal
+- ADMIN_TOKEN ustawiony i długi (>=32)
+- SAFE_MODE_CONFIG_OUTPUT=true
+- ADMIN_ONLY_COMMANDS=true
+- /api/control/* nie odpowiada bez X-Admin-Token

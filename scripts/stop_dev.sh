@@ -34,6 +34,11 @@ stop_pid_file "$LOG_DIR/backend.pid"  "Backend"
 stop_pid_file "$LOG_DIR/frontend.pid" "Frontend"
 stop_pid_file "$LOG_DIR/telegram.pid" "Telegram"
 
+if systemctl --user is-active --quiet rldc-telegram 2>/dev/null; then
+    echo "[STOP] Telegram (systemd) — zatrzymuję rldc-telegram.service."
+    systemctl --user stop rldc-telegram 2>/dev/null || true
+fi
+
 # Fallback: zabij po nazwie procesu gdyby PID file nie istniał
 echo ""
 echo "[FALLBACK] Sprawdzam procesy po porcie..."

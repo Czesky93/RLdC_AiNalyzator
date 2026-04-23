@@ -12,28 +12,43 @@ Definitions used across the system:
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
 import math
 import os
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from typing import Dict, Iterable, List, Optional
 
 from sqlalchemy import desc
 from sqlalchemy.orm import Session
 
-from backend.database import CostLedger, DecisionTrace, MarketData, Order, Position, utc_now_naive
+from backend.database import (
+    CostLedger,
+    DecisionTrace,
+    MarketData,
+    Order,
+    Position,
+    utc_now_naive,
+)
 
 
 def get_demo_quote_ccy() -> str:
     v = (os.getenv("DEMO_QUOTE_CCY", "") or "").strip().upper()
     if v:
         return v
-    quotes = [q.strip().upper() for q in (os.getenv("PORTFOLIO_QUOTES", "") or "").split(",") if q.strip()]
+    quotes = [
+        q.strip().upper()
+        for q in (os.getenv("PORTFOLIO_QUOTES", "") or "").split(",")
+        if q.strip()
+    ]
     return quotes[0] if quotes else "EUR"
 
 
 def _quotes_candidates() -> List[str]:
-    env_quotes = [q.strip().upper() for q in (os.getenv("PORTFOLIO_QUOTES", "EUR,USDC") or "").split(",") if q.strip()]
+    env_quotes = [
+        q.strip().upper()
+        for q in (os.getenv("PORTFOLIO_QUOTES", "EUR,USDC") or "").split(",")
+        if q.strip()
+    ]
     common = ["USDT", "USDC", "BUSD", "EUR", "USD", "BTC", "ETH"]
     merged: List[str] = []
     for q in env_quotes + common:
@@ -90,7 +105,9 @@ class _Holding:
     total_cost: float = 0.0
 
 
-def compute_order_cost_summary(order: Order, db: Session | None = None) -> Dict[str, float]:
+def compute_order_cost_summary(
+    order: Order, db: Session | None = None
+) -> Dict[str, float]:
     fee_cost = _float(order.fee_cost)
     slippage_cost = _float(order.slippage_cost)
     spread_cost = _float(order.spread_cost)
@@ -99,14 +116,39 @@ def compute_order_cost_summary(order: Order, db: Session | None = None) -> Dict[
     if db is not None and (total_cost <= 0.0 and order.id is not None):
         rows = db.query(CostLedger).filter(CostLedger.order_id == int(order.id)).all()
         if rows:
-            fee_cost = sum(_float(r.actual_value if r.actual_value is not None else r.expected_value) for r in rows if r.cost_type in {"maker_fee", "taker_fee"})
-            slippage_cost = sum(_float(r.actual_value if r.actual_value is not None else r.expected_value) for r in rows if r.cost_type == "slippage")
-            spread_cost = sum(_float(r.actual_value if r.actual_value is not None else r.expected_value) for r in rows if r.cost_type == "spread")
-            total_cost = sum(_float(r.actual_value if r.actual_value is not None else r.expected_value) for r in rows)
+            fee_cost = sum(
+                _float(
+                    r.actual_value if r.actual_value is not None else r.expected_value
+                )
+                for r in rows
+                if r.cost_type in {"maker_fee", "taker_fee"}
+            )
+            slippage_cost = sum(
+                _float(
+                    r.actual_value if r.actual_value is not None else r.expected_value
+                )
+                for r in rows
+                if r.cost_type == "slippage"
+            )
+            spread_cost = sum(
+                _float(
+                    r.actual_value if r.actual_value is not None else r.expected_value
+                )
+                for r in rows
+                if r.cost_type == "spread"
+            )
+            total_cost = sum(
+                _float(
+                    r.actual_value if r.actual_value is not None else r.expected_value
+                )
+                for r in rows
+            )
 
     gross_pnl = _float(order.gross_pnl)
     net_pnl = _float(order.net_pnl, gross_pnl - total_cost)
-    cost_leakage_ratio = (total_cost / abs(gross_pnl)) if abs(gross_pnl) > 1e-12 else 0.0
+    cost_leakage_ratio = (
+        (total_cost / abs(gross_pnl)) if abs(gross_pnl) > 1e-12 else 0.0
+    )
 
     return {
         "gross_pnl": _round_metric(gross_pnl),
@@ -121,7 +163,9 @@ def compute_order_cost_summary(order: Order, db: Session | None = None) -> Dict[
     }
 
 
-def validate_order_economics(order: Order, db: Session | None = None, tolerance: float = 1e-6) -> Dict[str, object]:
+def validate_order_economics(
+    order: Order, db: Session | None = None, tolerance: float = 1e-6
+) -> Dict[str, object]:
     summary = compute_order_cost_summary(order, db=db)
     gross_pnl = summary["gross_pnl"]
     total_cost = summary["total_cost"]
@@ -181,8 +225,14 @@ def summarize_orders(
 
     closed_count = sum(1 for o in order_list if (o.side or "").upper() == "SELL")
     net_expectancy = (net_pnl / closed_count) if closed_count > 0 else 0.0
-    profit_factor_net = (net_wins / abs(net_losses)) if abs(net_losses) > 1e-12 else (net_wins if net_wins > 0 else 0.0)
-    cost_leakage_ratio = (total_cost / abs(gross_pnl)) if abs(gross_pnl) > 1e-12 else 0.0
+    profit_factor_net = (
+        (net_wins / abs(net_losses))
+        if abs(net_losses) > 1e-12
+        else (net_wins if net_wins > 0 else 0.0)
+    )
+    cost_leakage_ratio = (
+        (total_cost / abs(gross_pnl)) if abs(gross_pnl) > 1e-12 else 0.0
+    )
 
     return {
         "label": label,
@@ -194,19 +244,29 @@ def summarize_orders(
         "fee_cost": _round_metric(fee_cost),
         "slippage_cost": _round_metric(slippage_cost),
         "spread_cost": _round_metric(spread_cost),
-        "expected_edge_avg": _round_metric(expected_edge_sum / len(order_list)) if order_list else 0.0,
-        "realized_rr_avg": _round_metric(sum(realized_rr_values) / len(realized_rr_values)) if realized_rr_values else 0.0,
+        "expected_edge_avg": (
+            _round_metric(expected_edge_sum / len(order_list)) if order_list else 0.0
+        ),
+        "realized_rr_avg": (
+            _round_metric(sum(realized_rr_values) / len(realized_rr_values))
+            if realized_rr_values
+            else 0.0
+        ),
         "cost_leakage_ratio": _round_metric(cost_leakage_ratio),
         "net_expectancy": _round_metric(net_expectancy),
         "profit_factor_net": _round_metric(profit_factor_net),
-        "win_rate_net": _round_metric(win_count / closed_count) if closed_count > 0 else 0.0,
+        "win_rate_net": (
+            _round_metric(win_count / closed_count) if closed_count > 0 else 0.0
+        ),
         "wins": win_count,
         "losses": loss_count,
         "inconsistencies": inconsistencies,
     }
 
 
-def position_cost_summary(position: Position, db: Session | None = None) -> Dict[str, float]:
+def position_cost_summary(
+    position: Position, db: Session | None = None
+) -> Dict[str, float]:
     gross_pnl = _float(position.gross_pnl)
     net_pnl = _float(position.net_pnl)
     total_cost = _float(position.total_cost)
@@ -215,15 +275,44 @@ def position_cost_summary(position: Position, db: Session | None = None) -> Dict
     spread_cost = _float(position.spread_cost)
 
     if db is not None and position.id is not None and total_cost <= 0.0:
-        rows = db.query(CostLedger).filter(CostLedger.position_id == int(position.id)).all()
+        rows = (
+            db.query(CostLedger)
+            .filter(CostLedger.position_id == int(position.id))
+            .all()
+        )
         if rows:
-            fee_cost = sum(_float(r.actual_value if r.actual_value is not None else r.expected_value) for r in rows if r.cost_type in {"maker_fee", "taker_fee"})
-            slippage_cost = sum(_float(r.actual_value if r.actual_value is not None else r.expected_value) for r in rows if r.cost_type == "slippage")
-            spread_cost = sum(_float(r.actual_value if r.actual_value is not None else r.expected_value) for r in rows if r.cost_type == "spread")
-            total_cost = sum(_float(r.actual_value if r.actual_value is not None else r.expected_value) for r in rows)
+            fee_cost = sum(
+                _float(
+                    r.actual_value if r.actual_value is not None else r.expected_value
+                )
+                for r in rows
+                if r.cost_type in {"maker_fee", "taker_fee"}
+            )
+            slippage_cost = sum(
+                _float(
+                    r.actual_value if r.actual_value is not None else r.expected_value
+                )
+                for r in rows
+                if r.cost_type == "slippage"
+            )
+            spread_cost = sum(
+                _float(
+                    r.actual_value if r.actual_value is not None else r.expected_value
+                )
+                for r in rows
+                if r.cost_type == "spread"
+            )
+            total_cost = sum(
+                _float(
+                    r.actual_value if r.actual_value is not None else r.expected_value
+                )
+                for r in rows
+            )
             net_pnl = gross_pnl - total_cost
 
-    cost_leakage_ratio = (total_cost / abs(gross_pnl)) if abs(gross_pnl) > 1e-12 else 0.0
+    cost_leakage_ratio = (
+        (total_cost / abs(gross_pnl)) if abs(gross_pnl) > 1e-12 else 0.0
+    )
     return {
         "gross_pnl": _round_metric(gross_pnl),
         "net_pnl": _round_metric(net_pnl),
@@ -237,7 +326,12 @@ def position_cost_summary(position: Position, db: Session | None = None) -> Dict
     }
 
 
-def summarize_positions(positions: Iterable[Position], db: Session | None = None, *, label: str | None = None) -> Dict[str, object]:
+def summarize_positions(
+    positions: Iterable[Position],
+    db: Session | None = None,
+    *,
+    label: str | None = None,
+) -> Dict[str, object]:
     items = list(positions)
     gross_pnl = sum(position_cost_summary(p, db=db)["gross_pnl"] for p in items)
     net_pnl = sum(position_cost_summary(p, db=db)["net_pnl"] for p in items)
@@ -245,7 +339,9 @@ def summarize_positions(positions: Iterable[Position], db: Session | None = None
     fee_cost = sum(position_cost_summary(p, db=db)["fee_cost"] for p in items)
     slippage_cost = sum(position_cost_summary(p, db=db)["slippage_cost"] for p in items)
     spread_cost = sum(position_cost_summary(p, db=db)["spread_cost"] for p in items)
-    exposure = sum(_float(p.current_price or p.entry_price) * _float(p.quantity) for p in items)
+    exposure = sum(
+        _float(p.current_price or p.entry_price) * _float(p.quantity) for p in items
+    )
     return {
         "label": label,
         "positions": len(items),
@@ -259,12 +355,16 @@ def summarize_positions(positions: Iterable[Position], db: Session | None = None
     }
 
 
-def compute_daily_performance(db: Session, mode: str = "demo", now: Optional[datetime] = None) -> Dict[str, object]:
+def compute_daily_performance(
+    db: Session, mode: str = "demo", now: Optional[datetime] = None
+) -> Dict[str, object]:
     now = now or utc_now_naive()
     day_ago = now - timedelta(hours=24)
     orders = (
         db.query(Order)
-        .filter(Order.mode == mode, Order.status == "FILLED", Order.timestamp >= day_ago)
+        .filter(
+            Order.mode == mode, Order.status == "FILLED", Order.timestamp >= day_ago
+        )
         .order_by(Order.timestamp.asc(), Order.id.asc())
         .all()
     )
@@ -274,13 +374,17 @@ def compute_daily_performance(db: Session, mode: str = "demo", now: Optional[dat
     return summary
 
 
-def compute_activity_snapshot(db: Session, mode: str = "demo", now: Optional[datetime] = None) -> Dict[str, object]:
+def compute_activity_snapshot(
+    db: Session, mode: str = "demo", now: Optional[datetime] = None
+) -> Dict[str, object]:
     now = now or utc_now_naive()
     day_ago = now - timedelta(hours=24)
     hour_ago = now - timedelta(hours=1)
     orders = (
         db.query(Order)
-        .filter(Order.mode == mode, Order.status == "FILLED", Order.timestamp >= day_ago)
+        .filter(
+            Order.mode == mode, Order.status == "FILLED", Order.timestamp >= day_ago
+        )
         .all()
     )
     by_symbol_24h: Dict[str, int] = {}
@@ -301,7 +405,9 @@ def compute_activity_snapshot(db: Session, mode: str = "demo", now: Optional[dat
     }
 
 
-def compute_symbol_performance(db: Session, mode: str = "demo") -> List[Dict[str, object]]:
+def compute_symbol_performance(
+    db: Session, mode: str = "demo"
+) -> List[Dict[str, object]]:
     orders = db.query(Order).filter(Order.mode == mode, Order.status == "FILLED").all()
     grouped: Dict[str, List[Order]] = {}
     for order in orders:
@@ -317,12 +423,10 @@ def compute_symbol_performance(db: Session, mode: str = "demo") -> List[Dict[str
     return result
 
 
-def compute_strategy_performance(db: Session, mode: str = "demo") -> List[Dict[str, object]]:
-    traces = (
-        db.query(DecisionTrace)
-        .filter(DecisionTrace.mode == mode)
-        .all()
-    )
+def compute_strategy_performance(
+    db: Session, mode: str = "demo"
+) -> List[Dict[str, object]]:
+    traces = db.query(DecisionTrace).filter(DecisionTrace.mode == mode).all()
     strategy_by_order: Dict[int, str] = {}
     for trace in traces:
         if trace.order_id and trace.strategy_name:
@@ -353,7 +457,9 @@ def blocked_decisions_summary(db: Session, mode: str = "demo") -> Dict[str, int]
     return dict(sorted(blocked.items(), key=lambda item: item[1], reverse=True))
 
 
-def cost_breakdown_by_symbol(db: Session, mode: str = "demo") -> List[Dict[str, object]]:
+def cost_breakdown_by_symbol(
+    db: Session, mode: str = "demo"
+) -> List[Dict[str, object]]:
     orders = db.query(Order).filter(Order.mode == mode, Order.status == "FILLED").all()
     grouped: Dict[str, List[Order]] = {}
     for order in orders:
@@ -375,12 +481,22 @@ def cost_breakdown_by_symbol(db: Session, mode: str = "demo") -> List[Dict[str, 
     return result
 
 
-def compute_risk_snapshot(db: Session, mode: str = "demo", now: Optional[datetime] = None) -> Dict[str, object]:
+def compute_risk_snapshot(
+    db: Session, mode: str = "demo", now: Optional[datetime] = None
+) -> Dict[str, object]:
     now = now or utc_now_naive()
     day_perf = compute_daily_performance(db, mode=mode, now=now)
-    positions = db.query(Position).filter(Position.mode == mode).all()
+    # Tylko prawdziwie otwarte pozycje: exit_reason_code IS NULL i quantity > 0
+    positions_all = db.query(Position).filter(Position.mode == mode).all()
+    positions = [
+        p
+        for p in positions_all
+        if p.exit_reason_code is None and _float(p.quantity) > 0
+    ]
     exposure_per_symbol = {
-        (p.symbol or "").upper(): _round_metric(_float(p.current_price or p.entry_price) * _float(p.quantity))
+        (p.symbol or "").upper(): _round_metric(
+            _float(p.current_price or p.entry_price) * _float(p.quantity)
+        )
         for p in positions
         if p.symbol
     }
@@ -407,16 +523,39 @@ def compute_risk_snapshot(db: Session, mode: str = "demo", now: Optional[datetim
         entry = _float(p.entry_price)
         qty = _float(p.quantity)
         if entry > 0 and qty > 0:
-            current = _get_latest_price(db, (p.symbol or "").upper()) or _float(p.current_price) or entry
+            current = (
+                _get_latest_price(db, (p.symbol or "").upper())
+                or _float(p.current_price)
+                or entry
+            )
             unrealized_pnl += (current - entry) * qty
     daily_total_pnl = daily_net_pnl + unrealized_pnl
     if mode == "demo":
         initial_balance = float(os.getenv("DEMO_INITIAL_BALANCE", "10000") or 10000)
     else:
-        # Dla LIVE używamy total_exposure jako proxy bazowego kapitału
-        initial_balance = max(1.0, total_exposure)
+        # Dla LIVE: próbuj użyć ostatniego snapshotu AccountSnapshot jako bazę kapitału
+        # (wolna gotówka EUR + wartość pozycji). Fallback: total_exposure lub live_balance_eur z ENV.
+        from backend.database import AccountSnapshot
+
+        last_snap = (
+            db.query(AccountSnapshot)
+            .filter(AccountSnapshot.mode == "live")
+            .order_by(AccountSnapshot.timestamp.desc())
+            .first()
+        )
+        if last_snap and _float(last_snap.equity) > 0:
+            initial_balance = _float(last_snap.equity)
+        else:
+            _live_balance_env = float(os.getenv("LIVE_INITIAL_BALANCE", "0") or 0)
+            initial_balance = max(
+                1.0, total_exposure if total_exposure > 0 else _live_balance_env
+            )
     daily_net_drawdown = min(0.0, daily_total_pnl)
-    kill_switch_triggered = daily_net_drawdown <= -(initial_balance * 0.03) if initial_balance > 0 else False
+    kill_switch_triggered = (
+        daily_net_drawdown <= -(initial_balance * 0.03)
+        if initial_balance > 0
+        else False
+    )
 
     return {
         "mode": mode,
@@ -443,7 +582,12 @@ def compute_demo_account_state(
     # Czytaj initial_balance z RuntimeSetting (override po resecie demo)
     # lub fallback do ENV DEMO_INITIAL_BALANCE
     from backend.database import RuntimeSetting
-    _ib_row = db.query(RuntimeSetting).filter(RuntimeSetting.key == "demo_initial_balance").first()
+
+    _ib_row = (
+        db.query(RuntimeSetting)
+        .filter(RuntimeSetting.key == "demo_initial_balance")
+        .first()
+    )
     if _ib_row and _ib_row.value:
         try:
             initial_balance = float(_ib_row.value)
@@ -471,8 +615,14 @@ def compute_demo_account_state(
         if not sym or symbol_quote(sym, quotes) != quote_ccy:
             continue
 
-        qty_f = _float(order.executed_quantity if order.executed_quantity is not None else order.quantity)
-        px_f = _float(order.executed_price if order.executed_price is not None else order.price)
+        qty_f = _float(
+            order.executed_quantity
+            if order.executed_quantity is not None
+            else order.quantity
+        )
+        px_f = _float(
+            order.executed_price if order.executed_price is not None else order.price
+        )
         if qty_f <= 0 or px_f <= 0:
             continue
 
@@ -484,7 +634,9 @@ def compute_demo_account_state(
             cash -= (px_f * qty_f) + costs["total_cost"]
             new_qty = holding.qty + qty_f
             if new_qty > 0:
-                holding.avg_entry = ((holding.avg_entry * holding.qty) + (px_f * qty_f)) / new_qty
+                holding.avg_entry = (
+                    (holding.avg_entry * holding.qty) + (px_f * qty_f)
+                ) / new_qty
             holding.qty = new_qty
             holding.total_cost += costs["total_cost"]
             holdings[sym] = holding
@@ -504,7 +656,9 @@ def compute_demo_account_state(
                 holdings[sym] = holding
             closed_orders_for_quote.append(order)
 
-    realized_summary = summarize_orders(closed_orders_for_quote, db=db, label="demo_quote_closed")
+    realized_summary = summarize_orders(
+        closed_orders_for_quote, db=db, label="demo_quote_closed"
+    )
     realized_pnl_total = _float(realized_summary["net_pnl"])
     realized_gross_pnl_total = _float(realized_summary["gross_pnl"])
     total_cost = _float(realized_summary["total_cost"])
@@ -567,6 +721,9 @@ def compute_demo_account_state(
         "risk_snapshot": risk_snapshot,
         "roi": float(roi),
         "positions": positions,
-        "warnings": warnings + [f"order_economics_inconsistencies={len(realized_summary['inconsistencies'])}"],
+        "warnings": warnings
+        + [
+            f"order_economics_inconsistencies={len(realized_summary['inconsistencies'])}"
+        ],
         "timestamp": now.isoformat(),
     }

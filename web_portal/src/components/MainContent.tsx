@@ -209,13 +209,105 @@ function removeGoal(symbol: string) {
   }).catch(() => {})
 }
 
-/** Buduje główną rekomendację dla symbolu na podstawie sygnałów, prognozy i analizy pozycji. */
+/**
+ * buildMainRecommendation — buduje rekomendację z kanonicznego modelu decision-view gdy dostępny,
+ * albo z lokalnych komponentów jako fallback.
+ * ZASADA: final_signal z backendu jest autorytetem. Nie wolno anulować decyzji SELL przez BUY.
+ */
 function buildMainRecommendation(
   card: any,
   latestSignal: any,
   forecast: any,
-  hasPosition: boolean
+  hasPosition: boolean,
+  decisionView?: any,   // kanoniczny model z /api/signals/{symbol}/decision-view
 ): { decision: string; reasons: string[]; color: string; bg: string; urgency: 'high' | 'medium' | 'low' } {
+
+  // ── Kanoniczny model z backendu — używaj gdy dostępny ──────────────────────
+  if (decisionView && decisionView.final_signal) {
+    const fs = decisionView.final_signal as string        // BUY | SELL | WAIT | HOLD | NO_TRADE
+    const reason = decisionView.final_signal_reason as string || ''
+    const conf = decisionView.final_confidence != null
+      ? `${Math.round((decisionView.final_confidence as number) * 100)}% pewność`
+      : ''
+    const dq = decisionView.data_quality as string || ''
+    const warnings: string[] = decisionView.warnings || []
+    const blockers: string[] = decisionView.blockers || []
+
+    const reasons: string[] = [reason]
+    if (conf) reasons.push(conf)
+    if (dq === 'stale') reasons.push(`⚠ Dane stare (${decisionView.data_age_seconds}s)`)
+    if (dq === 'degraded') reasons.push(`Dane częściowo aktualne`)
+    if (warnings.length > 0) reasons.push(warnings[0])
+    if (blockers.length > 0 && fs !== 'BUY') reasons.push(blockers[0])
+
+    // Mapa final_signal → UI
+    if (fs === 'BUY' && !hasPosition) {
+      return {
+        decision: 'KUP TERAZ',
+        reasons: reasons.slice(0, 4),
+        color: 'text-rldc-green-primary',
+        bg: 'bg-rldc-green-primary/10 border-rldc-green-primary/30',
+        urgency: 'high',
+      }
+    }
+    if (fs === 'BUY' && hasPosition) {
+      return {
+        decision: 'TRZYMAJ',
+        reasons: ['Pozycja już otwarta — sygnał kupna potwierdza trend', ...reasons.slice(0, 3)],
+        color: 'text-rldc-teal-primary',
+        bg: 'bg-rldc-teal-primary/10 border-rldc-teal-primary/30',
+        urgency: 'low',
+      }
+    }
+    if (fs === 'SELL' && hasPosition) {
+      return {
+        decision: 'ZAMKNIJ POZYCJĘ',
+        reasons: reasons.slice(0, 4),
+        color: 'text-rldc-red-primary',
+        bg: 'bg-rldc-red-primary/10 border-rldc-red-primary/30',
+        urgency: 'high',
+      }
+    }
+    if (fs === 'SELL' && !hasPosition) {
+      return {
+        decision: 'NIE WCHODŹ',
+        reasons: ['Sygnał sprzedaży bez otwartej pozycji — spot trading', ...reasons.slice(0, 3)],
+        color: 'text-rldc-red-primary',
+        bg: 'bg-rldc-red-primary/10 border-rldc-red-primary/30',
+        urgency: 'medium',
+      }
+    }
+    if (fs === 'HOLD' && hasPosition) {
+      const pnlPct: number = card?.pnl_pct ?? 0
+      if (pnlPct > 5) {
+        return {
+          decision: 'SPRZEDAJ CZĘŚĆ',
+          reasons: [`Pozycja na +${pnlPct.toFixed(1)}% — warto zabezpieczyć zysk`, ...reasons.slice(0, 3)],
+          color: 'text-orange-400',
+          bg: 'bg-orange-400/10 border-orange-400/30',
+          urgency: 'medium',
+        }
+      }
+      return {
+        decision: 'TRZYMAJ',
+        reasons: reasons.slice(0, 4),
+        color: 'text-rldc-teal-primary',
+        bg: 'bg-rldc-teal-primary/10 border-rldc-teal-primary/30',
+        urgency: 'low',
+      }
+    }
+    if (fs === 'NO_TRADE' || fs === 'WAIT') {
+      return {
+        decision: 'POCZEKAJ',
+        reasons: reasons.slice(0, 4),
+        color: 'text-yellow-400',
+        bg: 'bg-yellow-400/10 border-yellow-400/30',
+        urgency: 'low',
+      }
+    }
+  }
+
+  // ── FALLBACK: lokalna heurystyka (bez decision-view z backendu) ───────────
   const f24 = (forecast as any)?.forecast_24h
   const f1h = (forecast as any)?.forecast_1h
   const sysDecision = ((card?.decision || '') as string).toUpperCase()
@@ -230,15 +322,14 @@ function buildMainRecommendation(
   else if (signalType === 'SELL') reasons.push(`Sygnał sprzedaży z pewnością ${signalConf}%`)
   if (trend === 'WZROSTOWY') reasons.push('Trend wzrostowy (EMA20 > EMA50)')
   else if (trend === 'SPADKOWY') reasons.push('Trend spadkowy (EMA20 < EMA50)')
-  if (rsi != null && rsi < 32) reasons.push(`RSI ${rsi} — strefa wyprzedania, możliwe odbicie`)
-  else if (rsi != null && rsi > 70) reasons.push(`RSI ${rsi} — strefa wykupowania, ryzyko korekty`)
-  else if (rsi != null) reasons.push(`RSI ${rsi} — strefa neutralna`)
+  if (rsi != null && rsi < 32) reasons.push(`RSI ${rsi} — strefa wyprzedania`)
+  else if (rsi != null && rsi > 70) reasons.push(`RSI ${rsi} — strefa wykupowania`)
   if (f24) {
     const pct = f24.projected_pct != null ? ` (${f24.projected_pct > 0 ? '+' : ''}${(f24.projected_pct as number).toFixed(1)}%)` : ''
     reasons.push(`Prognoza 24h: ${f24.direction}${pct}`)
   }
-  if (hasPosition && pnlPct > 5) reasons.push(`Pozycja na +${pnlPct.toFixed(1)}% — dobry zysk do zabezpieczenia`)
-  else if (hasPosition && pnlPct < -5) reasons.push(`Pozycja na ${pnlPct.toFixed(1)}% — obserwuj ryzyko dalszych strat`)
+  if (hasPosition && pnlPct > 5) reasons.push(`Pozycja na +${pnlPct.toFixed(1)}% — dobry zysk`)
+  else if (hasPosition && pnlPct < -5) reasons.push(`Pozycja na ${pnlPct.toFixed(1)}% — obserwuj ryzyko`)
 
   let posScore = 0
   let negScore = 0
@@ -269,7 +360,10 @@ function buildMainRecommendation(
       decision = 'TRZYMAJ'; color = 'text-rldc-teal-primary'; bg = 'bg-rldc-teal-primary/10 border-rldc-teal-primary/30'; urgency = 'low'
     }
   } else {
-    if (posScore >= 3) {
+    // WAŻNE: jeśli sygnał jest SELL, nie możemy pokazać BUY jako decyzji
+    if (signalType === 'SELL') {
+      decision = 'NIE WCHODŹ'; color = 'text-rldc-red-primary'; bg = 'bg-rldc-red-primary/10 border-rldc-red-primary/30'; urgency = 'medium'
+    } else if (posScore >= 3) {
       decision = 'KUP TERAZ'; color = 'text-rldc-green-primary'; bg = 'bg-rldc-green-primary/10 border-rldc-green-primary/30'; urgency = 'high'
     } else if (posScore >= 2) {
       decision = 'KANDYDAT DO WEJŚCIA'; color = 'text-rldc-green-primary'; bg = 'bg-rldc-green-primary/5 border-rldc-green-primary/20'; urgency = 'medium'
@@ -506,6 +600,9 @@ function SymbolDetailPanel({
   const { data: ticker, loading: tickerLoading } = useFetch<any>(`/api/market/ticker/${symbol}`, 15000)
   const { data: accuracy } = useFetch<any>(`/api/market/forecast-accuracy/${symbol}?limit=20`, 60000)
   const { data: decisions } = useFetch<any>(`/api/positions/decisions/${symbol}?limit=15`, 60000)
+  // Kanoniczny model decyzji — autorytatywne źródło dla rekomendacji i CTA
+  const { data: decisionViewRaw, lastUpdated: dvUpdated } = useFetch<any>(`/api/signals/${symbol}/decision-view?mode=${mode}`, 15000)
+  const decisionView = (decisionViewRaw as any)?.data ?? null
   const [orderStatus, setOrderStatus] = useState<string | null>(null)
   const [closeStatus, setCloseStatus] = useState<string | null>(null)
   const [buyAmt, setBuyAmt] = useState('50')
@@ -519,7 +616,8 @@ function SymbolDetailPanel({
 
   const card = (analysis?.data || []).find((c: any) => c.symbol === symbol)
   const latestSignal = (signals?.data || []).find((s: any) => s.symbol === symbol)
-  const panelLastUpdated = analysisUpdated ?? signalsUpdated
+  // Preferuj czas z decision-view (kanoniczny snapshot), fallback na analysis/signals
+  const panelLastUpdated = dvUpdated ?? analysisUpdated ?? signalsUpdated
 
   const handleBuy = async () => {
     const amt = parseFloat(buyAmt.replace(',', '.'))
@@ -587,6 +685,7 @@ function SymbolDetailPanel({
 
   const formatPrice = (value: number | null | undefined, missing = '--') => {
     if (value == null || Number.isNaN(value)) return missing
+    if (value < 0.0001) return value.toFixed(8)  // meme coiny: SHIB, PEPE
     if (value < 1) return value.toFixed(6)
     if (value < 100) return value.toFixed(4)
     return value.toFixed(2)
@@ -634,11 +733,17 @@ function SymbolDetailPanel({
 
         <div className="flex-1 p-5 space-y-5">
           {/* ━━━ GŁÓWNA REKOMENDACJA ━━━ */}
-          {(card || latestSignal || forecast) && (() => {
-            const rec = buildMainRecommendation(card, latestSignal, forecast, hasPosition)
-            const isBuyRec = rec.decision === 'KUP TERAZ' || rec.decision === 'KANDYDAT DO WEJŚCIA'
-            const isSellAll = rec.decision === 'ZAMKNIJ POZYCJĘ'
-            const isSellPart = rec.decision === 'SPRZEDAJ CZĘŚĆ'
+          {(card || latestSignal || forecast || decisionView) && (() => {
+            const rec = buildMainRecommendation(card, latestSignal, forecast, hasPosition, decisionView)
+            // primary_cta z backendu jest autorytatywne; fallback do reguły lokalnej
+            const backendCta = decisionView?.primary_cta as string | null | undefined
+            const isBuyRec = backendCta
+              ? backendCta === 'BUY'
+              : (rec.decision === 'KUP TERAZ' || rec.decision === 'KANDYDAT DO WEJŚCIA')
+            const isSellAll = backendCta
+              ? (backendCta === 'SELL' && hasPosition)
+              : rec.decision === 'ZAMKNIJ POZYCJĘ'
+            const isSellPart = !backendCta && rec.decision === 'SPRZEDAJ CZĘŚĆ'
             return (
               <div className={`rounded-xl border-2 px-5 py-4 ${rec.bg}`}>
                 <div className="flex items-center justify-between mb-2">
@@ -655,7 +760,7 @@ function SymbolDetailPanel({
                     </div>
                   ))}
                 </div>
-                {mode === 'demo' && (
+                {(isBuyRec || isSellPart || isSellAll) && (
                   <div className="flex flex-wrap gap-2">
                     {isBuyRec && (
                       <button
@@ -932,7 +1037,7 @@ function SymbolDetailPanel({
                 )}
 
                 {/* Wyniki analizy backendowej */}
-                {ga && !goalAnalysisLoading && (
+                {ga && !goalAnalysisLoading && ga.goal_decision != null && (
                   <div className="space-y-3">
                     {/* Cel + score */}
                     <div className="flex items-center justify-between">
@@ -1237,7 +1342,7 @@ function SymbolDetailPanel({
                     </span>
                   </div>
                 )}
-                {mode === 'demo' && (isBuy || isSell || isHold) && (
+                {(isBuy || isSell || isHold) && (
                   <div className="mt-3 flex flex-wrap gap-2">
                     {isBuy && (
                       <button
@@ -1281,7 +1386,7 @@ function SymbolDetailPanel({
             <div className="text-[10px] uppercase tracking-widest text-slate-500 mb-3">Akcje</div>
 
             {/* KUP */}
-            {mode === 'demo' && (
+            {true && (
               <div className="mb-3">
                 {!showBuyForm ? (
                   <button
@@ -1349,7 +1454,7 @@ function SymbolDetailPanel({
             )}
 
             {/* ZAMKNIJ pozycję jeśli otwarta */}
-            {hasPosition && card?.id && mode === 'demo' && (
+            {hasPosition && card?.id && (
               <div>
                 <div className="text-[10px] text-slate-500 mb-1.5">Zamknij pozycję (sprzedaj):</div>
                 <div className="grid grid-cols-3 gap-2">
@@ -1371,11 +1476,7 @@ function SymbolDetailPanel({
               </div>
             )}
 
-            {mode !== 'demo' && (
-              <div className="text-xs text-slate-500 text-center py-2">
-                Akcje handlowe dostępne tylko w trybie DEMO
-              </div>
-            )}
+
           </div>
         </div>
       </div>
@@ -1438,16 +1539,10 @@ function DashboardHeader({
     <div className="mb-4 flex items-center justify-between">
       <h1 className="text-2xl font-bold terminal-title">{title}</h1>
       <div className="flex items-center gap-2">
-        {tradingMode === 'live' ? (
-          <div className="flex items-center gap-1.5 px-3 py-1 bg-amber-500/20 text-amber-400 border border-amber-500/30 rounded text-sm font-bold">
-            <span className="inline-block w-2 h-2 bg-amber-400 rounded-full animate-pulse"></span>
-            LIVE TRADE — dane Binance
-          </div>
-        ) : (
-          <div className="px-3 py-1 bg-rldc-green-primary/15 text-rldc-green-primary border border-rldc-green-primary/30 rounded text-sm font-medium">
-            DEMO — tryb symulacyjny
-          </div>
-        )}
+        <div className="flex items-center gap-1.5 px-3 py-1 bg-amber-500/20 text-amber-400 border border-amber-500/30 rounded text-sm font-bold">
+          <span className="inline-block w-2 h-2 bg-amber-400 rounded-full animate-pulse"></span>
+          LIVE — Binance
+        </div>
         <OpenAIStatusPill status={openaiStatus?.data} />
       </div>
     </div>
@@ -1612,11 +1707,243 @@ function EquityChartBlock({ kpi, mode }: { kpi: any; mode: 'demo' | 'live' }) {
   )
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// TradingStatusPanel — panel "Status handlu / Dlaczego bot nie handluje?"
+// Konsumuje /api/account/trading-status i /api/account/capital-snapshot
+// ─────────────────────────────────────────────────────────────────────────────
+function TradingStatusPanel({ tradingStatus: ts, capitalSnap: cs, mode }: {
+  tradingStatus: any
+  capitalSnap: any
+  mode: 'demo' | 'live'
+}) {
+  const [expanded, setExpanded] = React.useState(false)
+
+  if (!ts) return null
+
+  const color = ts.status_color === 'green'
+    ? { bg: 'bg-rldc-green-primary/8', border: 'border-rldc-green-primary/30', text: 'text-rldc-green-primary', dot: 'bg-rldc-green-primary' }
+    : ts.status_color === 'yellow'
+    ? { bg: 'bg-yellow-500/8', border: 'border-yellow-500/30', text: 'text-yellow-400', dot: 'bg-yellow-400' }
+    : { bg: 'bg-rldc-red-primary/8', border: 'border-rldc-red-primary/30', text: 'text-rldc-red-primary', dot: 'bg-rldc-red-primary' }
+
+  const statusLabel = ts.status_color === 'green'
+    ? 'Bot aktywny — może handlować'
+    : ts.status_color === 'yellow'
+    ? 'Bot aktywny z ograniczeniami'
+    : 'Handel zablokowany'
+
+  const blockers: any[] = ts.blockers || []
+
+  return (
+    <div className={`mb-5 rounded-lg border ${color.bg} ${color.border} px-4 py-3`}>
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-2">
+          <div className={`w-2 h-2 rounded-full ${color.dot} ${ts.status_color === 'green' ? 'animate-pulse' : ''}`} />
+          <span className={`text-xs font-bold ${color.text}`}>{statusLabel}</span>
+          {blockers.length > 0 && (
+            <span className="text-[10px] text-slate-500 ml-1">({blockers.length} blokad{blockers.length === 1 ? 'a' : blockers.length < 5 ? 'y' : 'er'})</span>
+          )}
+        </div>
+        <div className="flex items-center gap-4 text-[10px] text-slate-500">
+          <span>{mode.toUpperCase()} | trading: <span className={ts.trading_enabled ? 'text-rldc-green-primary' : 'text-rldc-red-primary'}>{ts.trading_enabled ? 'ON' : 'OFF'}</span></span>
+          {ts.last_rejection_reason && (
+            <span className="text-yellow-400/70">{ts.last_rejection_reason}</span>
+          )}
+          <button
+            type="button"
+            onClick={() => setExpanded(e => !e)}
+            className="text-slate-500 hover:text-slate-300 transition text-[10px]"
+          >
+            {expanded ? '▲ zwiń' : '▼ rozwiń'}
+          </button>
+        </div>
+      </div>
+
+      {/* Blokady — zawsze widoczne gdy są krytyczne lub expanded */}
+      {(blockers.length > 0 && (expanded || blockers.some((b: any) => b.severity === 'critical'))) && (
+        <div className="mt-3 space-y-1.5">
+          {blockers.map((b: any, i: number) => (
+            <div key={i} className={`flex items-start gap-2 px-2 py-1.5 rounded text-[10px] ${
+              b.severity === 'critical' ? 'bg-rldc-red-primary/10 text-rldc-red-primary border border-rldc-red-primary/20' :
+              b.severity === 'warning'  ? 'bg-yellow-500/10 text-yellow-400 border border-yellow-500/20' :
+              'bg-slate-800 text-slate-400 border border-slate-700'
+            }`}>
+              <span className="font-mono font-bold shrink-0">{b.code}</span>
+              <span>{b.message}</span>
+              {b.symbol && <span className="ml-auto text-slate-500 shrink-0">{b.symbol}</span>}
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* Pipeline etapów — widoczny gdy expanded */}
+      {expanded && (
+        <div className="mt-3 pt-3 border-t border-rldc-dark-border/50">
+          <div className="text-[10px] text-slate-500 mb-2 uppercase tracking-widest">Pipeline (ostatnie 15 min)</div>
+          <div className="flex flex-wrap gap-2">
+            {[
+              { label: 'Rozważano', value: ts.candidate_count, color: 'text-slate-300' },
+              { label: 'Kupiono', value: ts.bought_count_15m, color: 'text-rldc-green-primary' },
+              { label: 'Zamknięto', value: ts.closed_count_15m, color: 'text-rldc-red-primary' },
+              { label: 'Pominięto', value: ts.skipped_count_15m, color: 'text-yellow-400' },
+            ].map(s => (
+              <div key={s.label} className="bg-rldc-dark-card rounded px-2 py-1 border border-rldc-dark-border">
+                <div className="text-[9px] text-slate-500">{s.label}</div>
+                <div className={`text-sm font-bold ${s.color}`}>{s.value ?? '--'}</div>
+              </div>
+            ))}
+          </div>
+          {ts.last_decision_time && (
+            <div className="mt-2 text-[10px] text-slate-500">
+              Ostatnia decyzja: <span className="text-slate-300">{String(ts.last_decision_time).replace('T', ' ').slice(0, 19)}</span>
+              {ts.last_attempted_symbol && <> · symbol: <span className="text-rldc-teal-primary">{ts.last_attempted_symbol}</span></>}
+            </div>
+          )}
+
+          {/* Capital snap — source of truth */}
+          {cs && (
+            <div className="mt-2 text-[10px] text-slate-500 flex flex-wrap gap-3">
+              <span>Źródło: <span className="text-slate-300">{cs.source_of_truth}</span></span>
+              <span>Stan: {cs.sync_status === 'ok' ? <span className="text-rldc-green-primary">OK</span> : <span className="text-yellow-400">{cs.sync_status}</span>}</span>
+              {cs.sync_warning && <span className="text-yellow-400">⚠ {cs.sync_warning}</span>}
+              <span>Aktywne: <span className="text-slate-300">{cs.active_positions_count}</span></span>
+              <span>Dust: <span className="text-slate-400">{cs.dust_positions_count}</span></span>
+              <span>Cash: <span className="text-slate-300">{cs.cash_assets_count}</span></span>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function RuntimeActivityPanel({ mode }: { mode: 'demo' | 'live' }) {
+  const { data, loading, error } = useFetch<any>(`/api/account/runtime-activity?mode=${mode}`, 10000)
+  const rt = data?.data
+
+  if (!rt && loading) {
+    return (
+      <div className="mb-5 rounded-lg border border-rldc-dark-border bg-rldc-dark-card px-4 py-3 text-xs text-slate-500">
+        Ładowanie statusu runtime...
+      </div>
+    )
+  }
+
+  if (error) {
+    return (
+      <div className="mb-5 rounded-lg border border-rldc-red-primary/30 bg-rldc-red-primary/8 px-4 py-3 text-xs text-rldc-red-primary">
+        Błąd runtime-activity: {error}
+      </div>
+    )
+  }
+
+  if (!rt) return null
+
+  const dot = (ok: boolean, warn = false) => (
+    <span className={`inline-block w-2 h-2 rounded-full ${ok ? 'bg-rldc-green-primary' : warn ? 'bg-yellow-400' : 'bg-rldc-red-primary'}`} />
+  )
+
+  const fmtTs = (v: any) => (v ? String(v).replace('T', ' ').slice(0, 19) : '--')
+  const lastDecision = rt.last_decision || null
+  const lastOrder = rt.last_order || null
+  const lastPending = rt.last_pending || null
+  const md = rt.market_data || {}
+  const worker = rt.worker || {}
+  const collector = rt.collector || {}
+  const recent: any[] = rt.recent_decisions || []
+
+  return (
+    <div className="mb-5 rounded-lg border border-rldc-dark-border bg-rldc-dark-card px-4 py-3">
+      <div className="flex items-center justify-between mb-3">
+        <div className="text-xs font-semibold uppercase tracking-widest text-slate-400">Aktywność runtime (LIVE heartbeat)</div>
+        <div className={`text-[10px] font-semibold ${rt.alive ? 'text-rldc-green-primary' : 'text-yellow-400'}`}>
+          {rt.alive ? 'RUNNING' : 'DEGRADED'}
+        </div>
+      </div>
+
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-2 mb-3">
+        <div className="bg-rldc-dark-bg rounded border border-rldc-dark-border px-2 py-2 text-[10px] text-slate-400 flex items-center justify-between">
+          <span>Collector</span>{dot(Boolean(collector.running))}
+        </div>
+        <div className="bg-rldc-dark-bg rounded border border-rldc-dark-border px-2 py-2 text-[10px] text-slate-400 flex items-center justify-between">
+          <span>WebSocket</span>{dot(Boolean(collector.ws_running))}
+        </div>
+        <div className="bg-rldc-dark-bg rounded border border-rldc-dark-border px-2 py-2 text-[10px] text-slate-400 flex items-center justify-between">
+          <span>Worker</span>{dot(Boolean(worker.enabled), !Boolean(worker.running))}
+        </div>
+        <div className="bg-rldc-dark-bg rounded border border-rldc-dark-border px-2 py-2 text-[10px] text-slate-400 flex items-center justify-between">
+          <span>Dane świeże</span>{dot(!Boolean(md.data_stale), Boolean(md.data_stale))}
+        </div>
+      </div>
+
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-[11px]">
+        <div className="rounded border border-rldc-dark-border bg-rldc-dark-bg px-3 py-2">
+          <div className="text-[10px] uppercase tracking-widest text-slate-500 mb-1">Ostatnia decyzja</div>
+          {lastDecision ? (
+            <>
+              <div className="text-slate-200 font-mono">{lastDecision.symbol} · {String(lastDecision.action_type || '').toUpperCase()}</div>
+              <div className="text-slate-400">{lastDecision.reason_pl || lastDecision.reason_code || '--'}</div>
+              <div className="text-slate-500">{fmtTs(lastDecision.timestamp)}</div>
+            </>
+          ) : <div className="text-slate-500">Brak decyzji</div>}
+        </div>
+
+        <div className="rounded border border-rldc-dark-border bg-rldc-dark-bg px-3 py-2">
+          <div className="text-[10px] uppercase tracking-widest text-slate-500 mb-1">Ostatnie zlecenie</div>
+          {lastOrder ? (
+            <>
+              <div className="text-slate-200 font-mono">{lastOrder.symbol} · {lastOrder.side} · {lastOrder.status}</div>
+              <div className="text-slate-400">qty: {Number(lastOrder.quantity || 0).toFixed(6)} · px: {Number(lastOrder.executed_price || 0).toFixed(6)}</div>
+              <div className="text-slate-500">{fmtTs(lastOrder.timestamp)}</div>
+            </>
+          ) : <div className="text-slate-500">Brak zleceń</div>}
+        </div>
+      </div>
+
+      <div className="mt-3 text-[10px] text-slate-500 flex flex-wrap gap-3">
+        <span>Tick age: <span className={md.data_stale ? 'text-yellow-400' : 'text-slate-300'}>{md.last_tick_age_s ?? '--'}s</span></span>
+        <span>Symbole z danymi: <span className="text-slate-300">{md.symbols_with_data ?? '--'}</span></span>
+        <span>Watchlist: <span className="text-slate-300">{collector.watchlist_count ?? '--'}</span></span>
+        <span>Rozważono 15m: <span className="text-slate-300">{rt?.decision_pipeline_15m?.considered ?? 0}</span></span>
+        <span>Kupiono 15m: <span className="text-rldc-green-primary">{rt?.decision_pipeline_15m?.bought ?? 0}</span></span>
+        <span>Zamknięto 15m: <span className="text-rldc-red-primary">{rt?.decision_pipeline_15m?.closed ?? 0}</span></span>
+      </div>
+
+      {lastPending && (
+        <div className="mt-2 text-[10px] text-slate-500">
+          Ostatni pending: <span className="text-slate-300 font-mono">#{lastPending.id} {lastPending.symbol} {lastPending.side} {lastPending.status}</span>
+          <span className="ml-2">{fmtTs(lastPending.created_at)}</span>
+        </div>
+      )}
+
+      {!!recent.length && (
+        <div className="mt-3 pt-3 border-t border-rldc-dark-border/50">
+          <div className="text-[10px] uppercase tracking-widest text-slate-500 mb-2">Ostatnie 5 decyzji</div>
+          <div className="space-y-1">
+            {recent.map((r: any, i: number) => (
+              <div key={i} className="text-[10px] text-slate-400 flex items-center justify-between">
+                <span className="font-mono text-slate-300">{r.symbol} · {String(r.action_type || '').toUpperCase()}</span>
+                <span className="truncate px-2">{r.reason_pl || r.reason_code || '--'}</span>
+                <span className="text-slate-500 shrink-0">{fmtTs(r.timestamp)}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
 function CommandCenterView({ mode, onSymbolClick }: { mode: 'demo' | 'live'; onSymbolClick?: (s: string) => void }) {
   const { data: kpi, loading: kpiLoading, lastUpdated: kpiUpdated } = useFetch<any>(`/api/portfolio/wealth?mode=${mode}`, 15000)
-  const { data: scanner, loading: scanLoading } = useFetch<any>(`/api/market/scanner?top_n=5`, 30000)
+  const { data: capitalSnap } = useFetch<any>(`/api/account/capital-snapshot?mode=${mode}`, 20000)
+  const { data: tradingStatus } = useFetch<any>(`/api/account/trading-status?mode=${mode}`, 20000)
+  // ── Kanoniczny snapshot dashboardu — jeden endpoint, spójny snapshot_id ──
+  const { data: marketScanRaw, loading: scanLoading, lastUpdated: scanUpdated } = useFetch<any>(`/api/dashboard/market-scan?mode=${mode}`, 18000)
+  const marketScan = (marketScanRaw as any)?.data ?? null
+  // Fallback: analiza pozycji z osobnego endpointu
   const { data: analysis, loading: analLoading } = useFetch<any>(`/api/positions/analysis?mode=${mode}`, 30000)
-  const { data: bestOpp, loading: bestLoading, lastUpdated: bestUpdated } = useFetch<any>(`/api/signals/best-opportunity`, 20000)
+  // Supplemental: szczegółowy status oczekiwania per-symbol (dodatkowe dane diagnostyczne)
   const { data: waitStatus } = useFetch<any>(`/api/signals/wait-status`, 30000)
   const { data: allowedData } = useFetch<any>(`/api/market/allowed-symbols?quotes=EUR,USDC,USDT`, 120000)
   const { data: finalDecisions } = useFetch<any>(`/api/signals/final-decisions?mode=${mode}`, 25000)
@@ -1641,6 +1968,7 @@ function CommandCenterView({ mode, onSymbolClick }: { mode: 'demo' | 'live'; onS
   const [resetMsg, setResetMsg] = useState<string | null>(null)
   const [resetBalance, setResetBalance] = useState('500')
   const [showResetForm, setShowResetForm] = useState(false)
+  const [showRejected, setShowRejected] = useState(false)
 
   const kd = kpi
   const equity = kd?.total_equity ?? null
@@ -1650,8 +1978,20 @@ function CommandCenterView({ mode, onSymbolClick }: { mode: 'demo' | 'live'; onS
   const pnlChange24h = kd?.equity_change ?? null
   const pnlChangePct = kd?.equity_change_pct ?? null
 
-  const scanItems: any[] = scanner?.data || []
-  const posCards: any[] = analysis?.data || []
+  // Dane ze wspólnego snapshotu — zapewniona spójność snapshot_id
+  const snapshotId: string | null = marketScan?.snapshot_id ?? null
+  const scanItems: any[] = marketScan?.opportunities_top_n || []
+  const bestExec: any = marketScan?.best_executable_candidate ?? null
+  const bestAnalytical: any = marketScan?.best_analytical_candidate ?? null
+  const rejectedCandidates: any[] = marketScan?.rejected_candidates || []
+  const finalStatus: string = marketScan?.final_market_status || 'WAIT'
+  const finalMessage: string = marketScan?.final_user_message || ''
+  const marketDistribution: any = marketScan?.market_distribution ?? null
+  const portfolioConstraints: any = marketScan?.portfolio_constraints_summary ?? null
+  // Pozycje z tego samego snapshotu — spójny cycle_id
+  const posCardsFromScan: any[] = marketScan?.positions_snapshot || []
+  // Fallback: jeśli w skan snapshot brak danych pozycji, użyj pełnego analysis
+  const posCards: any[] = posCardsFromScan.length > 0 ? posCardsFromScan : (analysis?.data || [])
 
   const handleReset = async () => {
     const val = parseFloat(resetBalance.replace(',', '.'))
@@ -1717,53 +2057,127 @@ function CommandCenterView({ mode, onSymbolClick }: { mode: 'demo' | 'live'; onS
         </div>
       )}
 
-      {/* ━━━ NAJLEPSZA OKAZJA TERAZ ━━━ */}
-      {bestOpp && !bestOpp._info && (
-        <div className={`mb-5 rounded-xl border-2 px-5 py-4 flex items-center justify-between gap-4 ${
-          bestOpp.action === 'BUY' ? 'bg-rldc-green-primary/8 border-rldc-green-primary/30' :
-          bestOpp.action === 'SELL' ? 'bg-rldc-red-primary/8 border-rldc-red-primary/30' :
-          'bg-slate-500/5 border-slate-500/20'
-        }`}>
-          <div className="flex items-center gap-4">
-            <div>
-              <div className="text-[10px] uppercase tracking-widest text-slate-500 mb-1">Najlepsza okazja teraz</div>
-              <div className="flex items-center gap-3">
-                <span className={`text-2xl font-black ${
-                  bestOpp.action === 'BUY' ? 'text-rldc-green-primary' :
-                  bestOpp.action === 'SELL' ? 'text-rldc-red-primary' : 'text-slate-400'
-                }`}>
-                  {bestOpp.action === 'BUY' ? 'KUP' : bestOpp.action === 'SELL' ? 'SPRZEDAJ' : 'CZEKAJ'}
-                </span>
-                {bestOpp.symbol && (
-                  <span className="text-xl font-bold text-slate-100">
-                    {bestOpp.symbol.replace('EUR', '/EUR').replace('USDC', '/USDC').replace('USDT', '/USDT')}
-                  </span>
+      {/* ━━━ PANEL STATUSU HANDLU ━━━ */}
+      <TradingStatusPanel tradingStatus={tradingStatus?.data} capitalSnap={capitalSnap?.data} mode={mode} />
+
+      {/* ━━━ AKTYWNOŚĆ RUNTIME (co bot robi teraz) ━━━ */}
+      <RuntimeActivityPanel mode={mode} />
+
+      {/* ━━━ NAJLEPSZA OKAZJA TERAZ (best executable candidate) ━━━ */}
+      {marketScan && (() => {
+        const hasExecutable = finalStatus === 'ENTRY_FOUND' && bestExec != null
+        const signalColor = hasExecutable
+          ? (bestExec.signal === 'BUY' ? 'text-rldc-green-primary' : 'text-rldc-red-primary')
+          : 'text-yellow-400'
+        const bgClass = hasExecutable
+          ? (bestExec.signal === 'BUY'
+              ? 'bg-rldc-green-primary/8 border-rldc-green-primary/30'
+              : 'bg-rldc-red-primary/8 border-rldc-red-primary/30')
+          : 'bg-slate-500/5 border-slate-500/20'
+        const ctaLabel = hasExecutable
+          ? (bestExec.signal === 'BUY' ? 'KUP' : 'SPRZEDAJ')
+          : 'CZEKAJ'
+
+        return (
+          <div className={`mb-5 rounded-xl border-2 px-5 py-4 ${bgClass}`}>
+            <div className="flex items-start justify-between gap-4">
+              <div className="flex-1 min-w-0">
+                <div className="text-[10px] uppercase tracking-widest text-slate-500 mb-1">
+                  Najlepsza okazja teraz
+                  {snapshotId && (
+                    <span className="ml-2 text-[9px] text-slate-700 font-mono">#{snapshotId.slice(0, 8)}</span>
+                  )}
+                </div>
+                <div className="flex items-center gap-3 flex-wrap">
+                  <span className={`text-2xl font-black ${signalColor}`}>{ctaLabel}</span>
+                  {hasExecutable && bestExec.symbol && (
+                    <span className="text-xl font-bold text-slate-100">
+                      {bestExec.symbol.replace('EUR', '/EUR').replace('USDC', '/USDC').replace('USDT', '/USDT')}
+                    </span>
+                  )}
+                  {hasExecutable && bestExec.confidence != null && (
+                    <span className="px-2 py-0.5 rounded-full text-xs font-bold bg-rldc-dark-bg border border-rldc-dark-border text-slate-300">
+                      {Math.round(bestExec.confidence * 100)}% pewności
+                    </span>
+                  )}
+                  {hasExecutable && bestExec.score != null && (
+                    <span className="px-2 py-0.5 rounded-full text-xs bg-rldc-dark-bg border border-rldc-dark-border text-slate-400">
+                      Score {bestExec.score.toFixed(1)}/100
+                    </span>
+                  )}
+                </div>
+
+                {/* Powód / opis */}
+                {hasExecutable && bestExec.reason && (
+                  <div className="text-xs text-slate-500 mt-1 truncate">{bestExec.reason}</div>
                 )}
-                {bestOpp.confidence != null && (
-                  <span className="px-2 py-0.5 rounded-full text-xs font-bold bg-rldc-dark-bg border border-rldc-dark-border text-slate-300">
-                    {Math.round(bestOpp.confidence * 100)}% pewności
-                  </span>
+                {!hasExecutable && finalMessage && (
+                  <div className="text-xs text-slate-500 mt-1">{finalMessage}</div>
+                )}
+
+                {/* Kandydat analityczny vs wykonalny — gdy różne */}
+                {!hasExecutable && bestAnalytical && bestAnalytical.symbol !== bestExec?.symbol && (
+                  <div className="mt-2 text-xs text-slate-600 border-t border-slate-800 pt-2">
+                    <span className="text-slate-500">Najlepszy analitycznie:</span>{' '}
+                    <span className="text-slate-400 font-mono">{bestAnalytical.symbol}</span>{' '}
+                    <span className="text-slate-500">{bestAnalytical.signal} {bestAnalytical.score?.toFixed(1)}/100</span>
+                    {rejectedCandidates.find(r => r.symbol === bestAnalytical.symbol) && (
+                      <span className="ml-2 text-rldc-red-primary/70">
+                        → zablokowany: {rejectedCandidates.find(r => r.symbol === bestAnalytical.symbol)?.rejection_reason_code}
+                      </span>
+                    )}
+                  </div>
+                )}
+
+                {/* Diagnostyka odrzuceń */}
+                {rejectedCandidates.length > 0 && (
+                  <div className="mt-2">
+                    <button
+                      className="text-[10px] text-slate-600 hover:text-slate-400 transition"
+                      onClick={() => setShowRejected(v => !v)}
+                    >
+                      {showRejected ? '▲' : '▼'} {rejectedCandidates.length} odrzuconych kandydatów
+                    </button>
+                    {showRejected && (
+                      <div className="mt-1 space-y-1 max-h-40 overflow-auto">
+                        {rejectedCandidates.slice(0, 8).map((r: any) => (
+                          <div key={r.symbol} className="flex items-center gap-2 text-[10px] text-slate-600">
+                            <span className="font-mono text-slate-500 w-20 shrink-0">{r.symbol}</span>
+                            <span className={`shrink-0 ${r.signal === 'BUY' ? 'text-rldc-green-primary/60' : 'text-rldc-red-primary/60'}`}>
+                              {r.signal}
+                            </span>
+                            <span className="text-slate-700">{r.rejection_reason_code}</span>
+                            <span className="text-slate-700 truncate">{r.rejection_reason_text}</span>
+                          </div>
+                        ))}
+                        {rejectedCandidates.length > 8 && (
+                          <div className="text-[10px] text-slate-700">
+                            +{rejectedCandidates.length - 8} więcej...
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
                 )}
               </div>
-              {bestOpp.reason && (
-                <div className="text-xs text-slate-500 mt-1">{bestOpp.reason}</div>
+
+              {/* CTA button — tylko gdy executable candidate */}
+              {hasExecutable && bestExec.symbol && (
+                <button
+                  onClick={() => onSymbolClick?.(bestExec.symbol)}
+                  className={`shrink-0 px-4 py-2 rounded-lg text-sm font-bold border transition ${
+                    bestExec.signal === 'BUY'
+                      ? 'bg-rldc-green-primary/20 text-rldc-green-primary border-rldc-green-primary/40 hover:bg-rldc-green-primary/35'
+                      : 'bg-rldc-red-primary/20 text-rldc-red-primary border-rldc-red-primary/40 hover:bg-rldc-red-primary/35'
+                  }`}
+                >
+                  Otwórz {bestExec.symbol.replace('EUR', '/EUR').replace('USDC', '/USDC')} →
+                </button>
               )}
             </div>
           </div>
-          {bestOpp.symbol && bestOpp.action !== 'CZEKAJ' && (
-            <button
-              onClick={() => onSymbolClick?.(bestOpp.symbol)}
-              className={`shrink-0 px-4 py-2 rounded-lg text-sm font-bold border transition ${
-                bestOpp.action === 'BUY'
-                  ? 'bg-rldc-green-primary/20 text-rldc-green-primary border-rldc-green-primary/40 hover:bg-rldc-green-primary/35'
-                  : 'bg-rldc-red-primary/20 text-rldc-red-primary border-rldc-red-primary/40 hover:bg-rldc-red-primary/35'
-              }`}
-            >
-              Otwórz {bestOpp.symbol.replace('EUR', '/EUR').replace('USDC', '/USDC')} →
-            </button>
-          )}
-        </div>
-      )}
+        )
+      })()}
 
       {/* ━━━ CELE UŻYTKOWNIKA ━━━ */}
       {(() => {
@@ -2523,7 +2937,11 @@ function CommandCenterView({ mode, onSymbolClick }: { mode: 'demo' | 'live'; onS
             </div>
             {scanItems.length > 0 && (
               <div className="px-5 py-2 border-t border-rldc-dark-border/30">
-                <div className="text-[10px] text-slate-500">Przeskanowano {scanner?.scanned ?? '--'} symboli · odświeżanie 30s</div>
+                <div className="text-[10px] text-slate-500">
+                  Przeskanowano {marketScan?.scanned_symbols_count ?? '--'} symboli,
+                  przeanalizowano {marketScan?.analyzed_symbols_count ?? '--'} ·
+                  snapshot #{snapshotId?.slice(0, 8) ?? '--'} · odświeżanie 18s
+                </div>
               </div>
             )}
           </div>
@@ -2681,20 +3099,20 @@ function CommandCenterView({ mode, onSymbolClick }: { mode: 'demo' | 'live'; onS
         {/* Prawa kolumna: co teraz zrobić + reset demo */}
         <div className="col-span-12 lg:col-span-5 space-y-5">
 
-          {/* Priorytetowa decyzja — Best Trade Engine */}
+          {/* Priorytetowa decyzja — Best Executable Candidate */}
           <div className="bg-rldc-dark-card rounded-lg border border-rldc-dark-border neon-card p-5">
             <div className="flex items-center justify-between mb-3">
               <div className="text-[10px] uppercase tracking-widest text-slate-500">Najlepsza okazja teraz</div>
-              <DataStatus lastUpdated={bestUpdated} loading={bestLoading} error={null} refreshMs={20000} />
+              <DataStatus lastUpdated={scanUpdated} loading={scanLoading} error={null} refreshMs={18000} />
             </div>
 
-            {bestLoading && (
+            {scanLoading && !marketScan && (
               <div className="py-3 text-center text-sm text-slate-500">Analizuję rynek…</div>
             )}
 
-            {!bestLoading && bestOpp?.opportunity && (() => {
-              const opp = bestOpp.opportunity
-              const isBuy = opp.action === 'BUY'
+            {marketScan && finalStatus === 'ENTRY_FOUND' && bestExec && (() => {
+              const opp = bestExec
+              const isBuy = opp.signal === 'BUY'
               const hasProfit = opp.expected_profit_pct != null && opp.risk_pct != null
               const rrRatio = hasProfit ? (opp.expected_profit_pct / opp.risk_pct).toFixed(1) : null
               const accentBg = isBuy ? 'bg-rldc-green-primary/10 border-rldc-green-primary/30' : 'bg-rldc-red-primary/10 border-rldc-red-primary/30'
@@ -2705,7 +3123,6 @@ function CommandCenterView({ mode, onSymbolClick }: { mode: 'demo' | 'live'; onS
                   className={`rounded-lg border p-4 cursor-pointer hover:opacity-90 transition ${accentBg}`}
                   onClick={() => onSymbolClick?.(opp.symbol)}
                 >
-                  {/* Nagłówek */}
                   <div className="flex items-center justify-between mb-3">
                     <div className="flex items-center gap-3">
                       <div className={`text-2xl font-black ${accentText}`}>{opp.symbol.replace('EUR', '/EUR').replace('USDC', '/USDC')}</div>
@@ -2718,13 +3135,9 @@ function CommandCenterView({ mode, onSymbolClick }: { mode: 'demo' | 'live'; onS
                       <div className="text-[10px] text-slate-500">pewność</div>
                     </div>
                   </div>
-
-                  {/* Confidence bar */}
                   <div className="w-full bg-rldc-dark-bg rounded-full h-1.5 mb-3">
                     <div className={`h-1.5 rounded-full ${accentBar}`} style={{ width: `${Math.round(opp.confidence * 100)}%` }} />
                   </div>
-
-                  {/* Metryki */}
                   {hasProfit && (
                     <div className="grid grid-cols-3 gap-3 mb-3 text-center">
                       <div>
@@ -2743,15 +3156,11 @@ function CommandCenterView({ mode, onSymbolClick }: { mode: 'demo' | 'live'; onS
                       </div>
                     </div>
                   )}
-
-                  {/* Score breakdown */}
                   <div className="flex items-center gap-2 mb-2">
-                    <div className={`text-sm font-bold font-mono ${accentText}`}>Score {opp.score.toFixed(1)}</div>
+                    <div className={`text-sm font-bold font-mono ${accentText}`}>Score {opp.score?.toFixed(1)}</div>
                     <div className="flex-1 h-px bg-rldc-dark-border/50" />
                     {opp.price && <div className="text-xs font-mono text-slate-400">{opp.price < 1 ? opp.price.toFixed(6) : opp.price < 100 ? opp.price.toFixed(4) : opp.price.toFixed(2)} EUR</div>}
                   </div>
-
-                  {/* Breakdown szczegółowy */}
                   {opp.score_breakdown?.length > 0 && (
                     <ul className="mt-1 space-y-1 list-none p-0">
                       {(opp.score_breakdown as string[]).map((line: string, i: number) => (
@@ -2764,40 +3173,51 @@ function CommandCenterView({ mode, onSymbolClick }: { mode: 'demo' | 'live'; onS
                       ))}
                     </ul>
                   )}
+                  {/* Snapshot ID dla spójności */}
+                  {snapshotId && (
+                    <div className="mt-2 text-[9px] text-slate-700 font-mono">snapshot #{snapshotId.slice(0, 8)}</div>
+                  )}
                 </div>
               )
             })()}
 
-            {!bestLoading && !bestOpp?.opportunity && (
+            {marketScan && finalStatus !== 'ENTRY_FOUND' && (
               <div className="rounded-lg border border-rldc-dark-border/50 bg-slate-500/5 p-4">
                 <div className="flex items-center gap-2 mb-2">
                   <div className="text-slate-300 font-semibold text-sm">⏸ Czekaj</div>
-                  {bestOpp?.best_candidate && (
+                  {bestAnalytical && (
                     <div className="text-[10px] px-2 py-0.5 rounded bg-slate-500/20 text-slate-400 font-mono">
-                      best: {bestOpp.best_candidate.symbol} @ {(bestOpp.best_candidate.confidence * 100).toFixed(0)}%
+                      analitycznie: {bestAnalytical.symbol} {bestAnalytical.signal} {(bestAnalytical.confidence * 100).toFixed(0)}%
                     </div>
                   )}
                 </div>
-                <div className="text-xs text-slate-400 leading-relaxed">{bestOpp?.reason || 'Analizuję rynek…'}</div>
-                {bestOpp?.candidates_evaluated != null && (
-                  <div className="text-[10px] text-slate-500 mt-2">Oceniono {bestOpp.candidates_evaluated} par</div>
-                )}
+                <div className="text-xs text-slate-400 leading-relaxed">{finalMessage || 'Analizuję rynek…'}</div>
+                <div className="text-[10px] text-slate-500 mt-2">
+                  Przeskanowano {marketScan.scanned_symbols_count ?? '--'} symboli,
+                  odrzucono {marketScan.rejected_count ?? '--'} kandydatów
+                </div>
+                {rejectedCandidates.slice(0, 3).map((r: any) => (
+                  <div key={r.symbol} className="mt-1 text-[10px] text-slate-600 flex gap-2">
+                    <span className="font-mono text-slate-500">{r.symbol}</span>
+                    <span className="text-rldc-red-primary/60">{r.rejection_reason_code}</span>
+                  </div>
+                ))}
               </div>
             )}
 
-            {/* Runner-up */}
-            {!bestLoading && bestOpp?.runner_up && (
+            {/* Best analytical ≠ executable — pokaż różnicę */}
+            {marketScan && bestExec && bestAnalytical && bestExec.symbol !== bestAnalytical.symbol && (
               <div className="mt-3 pt-3 border-t border-rldc-dark-border/40">
                 <div className="text-[10px] text-slate-500 mb-1">Następna w kolejce</div>
                 <div
                   className="flex items-center gap-3 cursor-pointer hover:opacity-80 transition"
-                  onClick={() => onSymbolClick?.(bestOpp.runner_up.symbol)}
+                  onClick={() => onSymbolClick?.(bestAnalytical.symbol)}
                 >
-                  <div className="text-sm font-bold text-slate-300">{bestOpp.runner_up.symbol.replace('EUR', '/EUR')}</div>
-                  <div className={`px-2 py-0.5 rounded text-[11px] font-bold ${bestOpp.runner_up.action === 'BUY' ? 'text-rldc-green-primary bg-rldc-green-primary/10' : 'text-rldc-red-primary bg-rldc-red-primary/10'}`}>
-                    {bestOpp.runner_up.action === 'BUY' ? 'KUP' : 'SPRZEDAJ'}
+                  <div className="text-sm font-bold text-slate-300">{bestAnalytical.symbol.replace('EUR', '/EUR')}</div>
+                  <div className={`px-2 py-0.5 rounded text-[11px] font-bold ${bestAnalytical.signal === 'BUY' ? 'text-rldc-green-primary bg-rldc-green-primary/10' : 'text-rldc-red-primary bg-rldc-red-primary/10'}`}>
+                    {bestAnalytical.signal === 'BUY' ? 'KUP' : 'SPRZEDAJ'}
                   </div>
-                  <div className="text-xs font-mono text-slate-400">{(bestOpp.runner_up.confidence * 100).toFixed(0)}% · {bestOpp.runner_up.score.toFixed(1)}pkt</div>
+                  <div className="text-xs font-mono text-slate-400">{(bestAnalytical.confidence * 100).toFixed(0)}% · {bestAnalytical.score?.toFixed(1)}pkt</div>
                 </div>
               </div>
             )}
@@ -2817,17 +3237,17 @@ function CommandCenterView({ mode, onSymbolClick }: { mode: 'demo' | 'live'; onS
                     <div className={`text-2xl font-bold ${b.color}`}>{b.count}</div>
                     <div className="text-[10px] text-slate-500 mt-0.5">{b.label}</div>
                     <div className="mt-1 h-1 rounded-full bg-rldc-dark-bg">
-                      <div className={`h-1 rounded-full ${b.bg}`} style={{ width: `${scanner?.scanned ? Math.round(b.count / scanner.scanned * 100) : 0}%` }} />
+                      <div className={`h-1 rounded-full ${b.bg}`} style={{ width: `${marketScan?.analyzed_symbols_count ? Math.round(b.count / marketScan.analyzed_symbols_count * 100) : 0}%` }} />
                     </div>
                   </div>
                 ))}
               </div>
-              <div className="text-[10px] text-slate-500 text-center mt-2">z {scanner?.scanned ?? '--'} przeskanowanych par</div>
+              <div className="text-[10px] text-slate-500 text-center mt-2">z {marketScan?.scanned_symbols_count ?? '--'} przeskanowanych par</div>
             </div>
           )}
 
-          {/* Reset Demo */}
-          {mode === 'demo' && (
+          {/* Reset Demo — ukryty w trybie live (nieużywany) */}
+          {false && mode === 'demo' && (
             <div className="bg-rldc-dark-card rounded-lg border border-rldc-dark-border/50 neon-card p-5">
               <div className="text-[10px] uppercase tracking-widest text-slate-500 mb-3">Reset konta demo</div>
               <p className="text-xs text-slate-400 mb-3">Zresetuj konto demo do wybranego kapitału startowego. Zamknie wszystkie pozycje i wyczyści historię snapshotów.</p>
@@ -2870,7 +3290,7 @@ function CommandCenterView({ mode, onSymbolClick }: { mode: 'demo' | 'live'; onS
                 </div>
               )}
               {resetMsg && (
-                <div className={`mt-2 text-xs ${resetMsg.startsWith('✓') ? 'text-rldc-green-primary' : 'text-rldc-red-primary'}`}>
+                <div className={`mt-2 text-xs ${(resetMsg?.startsWith('✓')) ? 'text-rldc-green-primary' : 'text-rldc-red-primary'}`}>
                   {resetMsg}
                 </div>
               )}
@@ -3004,7 +3424,7 @@ function LivePositionsBlock({
               </div>
               <div className="flex items-center justify-between">
                 <div className="text-[10px] text-slate-500 italic">{holdReason}</div>
-                {mode === 'demo' && onCloseQty && onClose && (
+                {onCloseQty && onClose && (
                   <div className="flex gap-1">
                     <button
                       onClick={() => onCloseQty(Number(p.id), q25)}
@@ -3076,6 +3496,7 @@ function WlfiStatusCard() {
 function DashboardV2View({ tradingMode, onSymbolClick }: { tradingMode: 'live' | 'demo'; onSymbolClick?: (s: string) => void }) {
   const mode = tradingMode === 'live' ? 'live' : 'demo'
   const { data: summary } = useFetch<any>(`/api/portfolio/wealth?mode=${mode}`, 15000)
+  const { data: economics } = useFetch<any>(`/api/account/analytics/overview?mode=${mode}`, 30000)
   const { data: control } = useFetch<any>(`/api/control/state`, 15000)
   const [selectedSymbol, setSelectedSymbol] = useState<string>('BTCEUR')
 
@@ -3095,33 +3516,34 @@ function DashboardV2View({ tradingMode, onSymbolClick }: { tradingMode: 'live' |
   const unrealized = toNum(summary?.unrealized_pnl)
   const realized24h = toNum(summary?.equity_change)
   const roiPct = toNum(summary?.equity_change_pct)
+  const eco = economics?.data || {}
+  const retentionRatio = toNum(eco.gross_to_net_retention_ratio) ?? 0
+  const leakageRatio = toNum(eco.cost_leakage_ratio) ?? 0
+  const overtradingScore = toNum(eco.overtrading_score) ?? 0
 
-  const tradingEnabled = control?.data?.demo_trading_enabled
-  const tradingPill =
-    mode === 'demo' ? (
-      <div
-        className={`px-3 py-1 rounded text-[11px] font-semibold border ${
-          tradingEnabled === true
-            ? 'bg-rldc-green-primary/15 text-rldc-green-primary border-rldc-green-primary/20'
-            : tradingEnabled === false
-              ? 'bg-rldc-red-primary/15 text-rldc-red-primary border-rldc-red-primary/20'
-              : 'bg-slate-500/10 text-slate-300 border-rldc-dark-border'
-        }`}
-        title="TRADING: {tradingEnabled === null || tradingEnabled === undefined ? '--' : tradingEnabled ? 'WŁĄCZONY' : 'WYŁĄCZONY'}"
-      >
-        TRADING: {tradingEnabled === null || tradingEnabled === undefined ? '--' : tradingEnabled ? 'WŁĄCZONY' : 'WYŁĄCZONY'}
-      </div>
-    ) : null
+  const tradingEnabled = control?.data?.live_trading_enabled ?? control?.data?.demo_trading_enabled
+  const tradingPill = (
+    <div
+      className={`px-3 py-1 rounded text-[11px] font-semibold border ${
+        tradingEnabled === true
+          ? 'bg-rldc-green-primary/15 text-rldc-green-primary border-rldc-green-primary/20'
+          : tradingEnabled === false
+            ? 'bg-rldc-red-primary/15 text-rldc-red-primary border-rldc-red-primary/20'
+            : 'bg-slate-500/10 text-slate-300 border-rldc-dark-border'
+      }`}
+    >
+      LIVE TRADING: {tradingEnabled === null || tradingEnabled === undefined ? '--' : tradingEnabled ? 'WŁĄCZONY' : 'WYŁĄCZONY'}
+    </div>
+  )
 
   const closePosition = async (positionId: number) => {
     return closePositionQty(positionId, null)
   }
 
   const closePositionQty = async (positionId: number, quantity: number | null) => {
-    if (mode !== 'demo') return
     try {
       const url = new URL(`${getApiBase()}/api/positions/${positionId}/close`)
-      url.searchParams.set('mode', 'demo')
+      url.searchParams.set('mode', 'live')
       if (typeof quantity === 'number' && Number.isFinite(quantity) && quantity > 0) {
         url.searchParams.set('quantity', String(quantity))
       }
@@ -3141,6 +3563,24 @@ function DashboardV2View({ tradingMode, onSymbolClick }: { tradingMode: 'live' |
     { label: 'Zmiana equity % (24h)', value: formatPct(roiPct), accent: roiPct && roiPct < 0 ? 'text-rldc-red-primary' : 'text-rldc-green-primary' },
   ]
 
+  const economicsKpis = [
+    {
+      label: 'Retencja brutto→netto',
+      value: `${(retentionRatio * 100).toFixed(1)}%`,
+      accent: retentionRatio >= 0.7 ? 'text-rldc-green-primary' : 'text-amber-400',
+    },
+    {
+      label: 'Leakage kosztowe',
+      value: `${(leakageRatio * 100).toFixed(1)}%`,
+      accent: leakageRatio <= 0.3 ? 'text-rldc-green-primary' : 'text-rldc-red-primary',
+    },
+    {
+      label: 'Overtrading score',
+      value: `${(overtradingScore * 100).toFixed(1)}%`,
+      accent: overtradingScore <= 0.35 ? 'text-rldc-green-primary' : 'text-rldc-red-primary',
+    },
+  ]
+
   return (
     <div className="flex-1 overflow-auto">
       <div className="p-6 max-w-[1680px] mx-auto">
@@ -3155,6 +3595,16 @@ function DashboardV2View({ tradingMode, onSymbolClick }: { tradingMode: 'live' |
               <div className="text-[10px] uppercase tracking-widest text-slate-500">{k.label}</div>
               <div className={`text-lg font-semibold font-mono ${k.accent}`}>{k.value}</div>
               <div className="text-[10px] text-slate-500 mt-1">{quoteCcy || '--'}</div>
+            </div>
+          ))}
+        </div>
+
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-3 mb-4">
+          {economicsKpis.map((k) => (
+            <div key={k.label} className="terminal-card border border-rldc-dark-border rounded-lg px-4 py-3 neon-card">
+              <div className="text-[10px] uppercase tracking-widest text-slate-500">{k.label}</div>
+              <div className={`text-lg font-semibold font-mono ${k.accent}`}>{k.value}</div>
+              <div className="text-[10px] text-slate-500 mt-1">KONTROLA KOSZTÓW</div>
             </div>
           ))}
         </div>
@@ -3204,16 +3654,10 @@ function ClassicDashboardView({ tradingMode }: { tradingMode: 'live' | 'demo' })
         <div className="mb-4 flex items-center justify-between">
           <h1 className="text-2xl font-bold terminal-title">RLDC Ain Alyzer (Classic)</h1>
           <div className="flex items-center gap-2">
-            {tradingMode === 'live' ? (
-              <div className="flex items-center gap-1.5 px-3 py-1 bg-amber-500/20 text-amber-400 border border-amber-500/30 rounded text-sm font-bold">
-                <span className="inline-block w-2 h-2 bg-amber-400 rounded-full animate-pulse"></span>
-                LIVE TRADE — dane Binance
-              </div>
-            ) : (
-              <div className="px-3 py-1 bg-rldc-green-primary/15 text-rldc-green-primary border border-rldc-green-primary/30 rounded text-sm font-medium">
-                DEMO — tryb symulacyjny
-              </div>
-            )}
+            <div className="flex items-center gap-1.5 px-3 py-1 bg-amber-500/20 text-amber-400 border border-amber-500/30 rounded text-sm font-bold">
+              <span className="inline-block w-2 h-2 bg-amber-400 rounded-full animate-pulse"></span>
+              LIVE — Binance
+            </div>
             <OpenAIStatusPill status={openaiStatus?.data} />
           </div>
         </div>
@@ -3392,7 +3836,7 @@ function PendingOrdersWidget({ mode }: { mode: 'demo' | 'live' }) {
   }
 
   const rows = items.map((p: any) => {
-    const canAct = mode === 'demo' && String(p.status || '').toUpperCase() === 'PENDING'
+    const canAct = String(p.status || '').toUpperCase() === 'PENDING'
     return [
       p.id,
       p.symbol,
@@ -3965,6 +4409,9 @@ function OtherView({ activeView, tradingMode, onSymbolClick }: MainContentProps 
   if (activeView === 'execution-trace') {
     return <ExecutionTraceView mode={mode} />
   }
+  if (activeView === 'operator-console') {
+    return <DiagnosticHubView mode={mode} />
+  }
   if (activeView === 'markets') {
     return <MarketsView onSymbolClick={onSymbolClick} />
   }
@@ -3999,7 +4446,7 @@ function OtherView({ activeView, tradingMode, onSymbolClick }: MainContentProps 
     return <BacktestView mode={mode} />
   }
   if (activeView === 'economics' || activeView === 'alerts' || activeView === 'news') {
-    return <MarketProxyView activeView={activeView} />
+    return <MarketProxyView activeView={activeView} mode={mode} />
   }
   if (activeView === 'blog') {
     return <BlogView />
@@ -4393,7 +4840,7 @@ function PortfolioView({ mode, onSymbolClick }: { mode: 'demo' | 'live'; onSymbo
   const { data: forecast } = useFetch<any>(`/api/portfolio/forecast?mode=${mode}`, 60000)
 
   const fmtPrice = (v: number) =>
-    v == null ? '--' : v < 1 ? v.toFixed(6) : v < 100 ? v.toFixed(4) : v.toFixed(2)
+    v == null ? '--' : v < 0.0001 ? v.toFixed(8) : v < 1 ? v.toFixed(6) : v < 100 ? v.toFixed(4) : v.toFixed(2)
   const fmtEur = (v: number | null | undefined) =>
     v == null ? '--' : `${v.toFixed(2)} EUR`
   const pnlCls = (v: number) => v >= 0 ? 'text-rldc-green-primary' : 'text-rldc-red-primary'
@@ -4406,7 +4853,13 @@ function PortfolioView({ mode, onSymbolClick }: { mode: 'demo' | 'live'; onSymbo
       value: wealth?.total_pnl != null ? `${wealth.total_pnl >= 0 ? '+' : ''}${wealth.total_pnl.toFixed(2)} EUR` : '--',
       color: wealth?.total_pnl != null ? pnlCls(wealth.total_pnl) : 'text-slate-400',
     },
-    { label: 'Otwarte pozycje', value: wealth?.positions_count != null ? String(wealth.positions_count) : '--', color: 'text-slate-200' },
+    {
+      label: 'Aktywne pozycje',
+      value: wealth?.positions_count != null
+        ? `${wealth.positions_count}${wealth.dust_positions_count > 0 ? ` (+${wealth.dust_positions_count} pył)` : ''}`
+        : '--',
+      color: 'text-slate-200',
+    },
   ]
 
   return (
@@ -4637,7 +5090,7 @@ function DecisionsView({ mode }: { mode: 'demo' | 'live' }) {
       )}
       {risk?.data?.daily_loss_triggered && (
         <div className="mb-4 bg-rldc-red-primary/20 border border-rldc-red-primary text-rldc-red-primary px-4 py-3 rounded">
-          Limit dziennej straty przekroczony — demo trading wstrzymany.
+          Limit dziennej straty przekroczony — handel wstrzymany.
         </div>
       )}
       {risk?.data?.drawdown_triggered && (
@@ -4761,15 +5214,15 @@ function BacktestView({ mode }: { mode: 'demo' | 'live' }) {
   )
 }
 
-function MarketProxyView({ activeView }: { activeView: string }) {
-  if (activeView === 'economics') return <EconomicsSubView />
+function MarketProxyView({ activeView, mode }: { activeView: string; mode: 'demo' | 'live' }) {
+  if (activeView === 'economics') return <EconomicsSubView mode={mode} />
   if (activeView === 'alerts') return <AlertsSubView />
   if (activeView === 'news') return <NewsSubView />
   return <div className="flex-1 p-6"><EmptyState reason="not-connected" /></div>
 }
 
-function EconomicsSubView() {
-  const { data, loading, error, lastUpdated } = useFetch<any>('/api/account/analytics/overview?mode=demo', 60000)
+function EconomicsSubView({ mode }: { mode: 'demo' | 'live' }) {
+  const { data, loading, error, lastUpdated } = useFetch<any>(`/api/account/analytics/overview?mode=${mode}`, 60000)
   const d = data?.data || {}
   const r = d.risk_snapshot || {}
   const a = d.account_state || {}
@@ -4782,6 +5235,9 @@ function EconomicsSubView() {
     { label: 'Profit Factor', value: `${(d.profit_factor_net ?? 0).toFixed(2)}`, color: (d.profit_factor_net ?? 0) >= 1 ? 'text-rldc-green-primary' : 'text-rldc-red-primary' },
     { label: 'Max Drawdown', value: `${(d.drawdown_net ?? 0).toFixed(2)} EUR`, color: 'text-rldc-red-primary' },
     { label: 'Zablokowanych decyzji', value: String(d.blocked_decisions_count ?? 0), color: 'text-slate-400' },
+    { label: 'Retencja brutto→netto', value: `${((d.gross_to_net_retention_ratio ?? 0) * 100).toFixed(1)}%`, color: (d.gross_to_net_retention_ratio ?? 0) >= 0.7 ? 'text-rldc-green-primary' : 'text-amber-400' },
+    { label: 'Overtrading score', value: `${((d.overtrading_score ?? 0) * 100).toFixed(1)}%`, color: (d.overtrading_score ?? 0) <= 0.35 ? 'text-rldc-green-primary' : 'text-rldc-red-primary' },
+    { label: 'Ubytek brutto→netto', value: `${(d.gross_net_gap ?? 0).toFixed(2)} EUR`, color: 'text-amber-400' },
   ]
   return (
     <div className="flex-1 p-6 overflow-auto">
@@ -4889,6 +5345,665 @@ function NewsSubView() {
               <div className="text-xs text-slate-400 leading-relaxed">{p.summary || 'Brak podsumowania.'}</div>
             </div>
           ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
+/* ─────────────────────────────────────────────────
+ *  WIDOK: Centrum diagnostyki — terminal + aktywność + ślad AI
+ * ───────────────────────────────────────────────── */
+function DiagnosticHubView({ mode }: { mode: 'demo' | 'live' }) {
+  const [tab, setTab] = useState<'terminal' | 'activity' | 'trace' | 'trading'>('terminal')
+
+  return (
+    <div className="flex-1 p-6 overflow-auto">
+      <div className="flex items-center justify-between mb-5">
+        <ViewHeader title="Centrum diagnostyki" description="Terminal systemu, aktywność bota, ślad decyzji AI i status handlu." />
+      </div>
+
+      {/* Zakładki */}
+      <div className="flex gap-2 mb-5 border-b border-rldc-dark-border pb-2">
+        {([
+          { key: 'terminal', label: 'Terminal' },
+          { key: 'activity', label: 'Aktywność bota' },
+          { key: 'trace', label: 'Ślad AI' },
+          { key: 'trading', label: 'Status handlu' },
+        ] as const).map(t => (
+          <button
+            key={t.key}
+            type="button"
+            onClick={() => setTab(t.key)}
+            className={`px-4 py-1.5 rounded text-xs font-semibold transition ${
+              tab === t.key
+                ? 'bg-rldc-teal-primary/20 text-rldc-teal-primary border border-rldc-teal-primary/40'
+                : 'text-slate-400 hover:text-slate-200 border border-transparent'
+            }`}
+          >
+            {t.label}
+          </button>
+        ))}
+      </div>
+
+      {tab === 'terminal' && <DiagTerminalTab />}
+      {tab === 'activity' && <DiagActivityTab mode={mode} />}
+      {tab === 'trace' && <DiagTraceTab mode={mode} />}
+      {tab === 'trading' && <DiagTradingTab mode={mode} />}
+    </div>
+  )
+}
+
+/* Panel 1: Terminal — logi systemowe */
+function DiagTerminalTab() {
+  const [level, setLevel] = React.useState<string>('')
+  const [paused, setPaused] = React.useState(false)
+  const [autoScroll, setAutoScroll] = React.useState(true)
+  const [chatInput, setChatInput] = React.useState('')
+  const [chatOutput, setChatOutput] = React.useState<any>(null)
+  const [chatLoading, setChatLoading] = React.useState(false)
+  const [termInput, setTermInput] = React.useState('pwd')
+  const [termOutput, setTermOutput] = React.useState<any>(null)
+  const [termLoading, setTermLoading] = React.useState(false)
+  const containerRef = React.useRef<HTMLDivElement>(null)
+
+  const url = `/api/account/system-logs?limit=100${level ? `&level=${level}` : ''}`
+  const { data, loading, error, lastUpdated } = useFetch<any>(paused ? '' : url, 5000)
+  const logs: any[] = data?.data || []
+
+  React.useEffect(() => {
+    if (autoScroll && containerRef.current) {
+      containerRef.current.scrollTop = containerRef.current.scrollHeight
+    }
+  }, [logs, autoScroll])
+
+  const levelColor = (l: string) => {
+    if (l === 'ERROR' || l === 'CRITICAL') return 'text-rldc-red-primary'
+    if (l === 'WARNING') return 'text-yellow-400'
+    if (l === 'INFO') return 'text-rldc-green-primary'
+    return 'text-slate-500'
+  }
+
+  const runAiCommand = async () => {
+    const text = chatInput.trim()
+    if (!text) return
+    setChatLoading(true)
+    try {
+      const headers = withAdminToken({ 'Content-Type': 'application/json' })
+      const res = await fetch(`${getApiBase()}/api/control/command/execute`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          text,
+          source: 'web',
+          execute_mode: 'execute',
+          force: /wymus|teraz/i.test(text),
+        }),
+      })
+      const json = await res.json()
+      if (!res.ok) throw new Error(json?.detail || `HTTP ${res.status}`)
+      setChatOutput(json?.data || null)
+    } catch (e: any) {
+      setChatOutput({ error: e?.message || 'Blad AI command' })
+    } finally {
+      setChatLoading(false)
+    }
+  }
+
+  const runTerminalCommand = async () => {
+    const command = termInput.trim()
+    if (!command) return
+    setTermLoading(true)
+    try {
+      const headers = withAdminToken({ 'Content-Type': 'application/json' })
+      const res = await fetch(`${getApiBase()}/api/control/terminal/exec`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ command, timeout_seconds: 6 }),
+      })
+      const json = await res.json()
+      if (!res.ok) throw new Error(json?.detail || `HTTP ${res.status}`)
+      setTermOutput(json?.data || null)
+    } catch (e: any) {
+      setTermOutput({ error: e?.message || 'Blad terminala' })
+    } finally {
+      setTermLoading(false)
+    }
+  }
+
+  return (
+    <div>
+      <div className="flex items-center gap-3 mb-3 flex-wrap">
+        <DataStatus lastUpdated={lastUpdated} loading={loading} error={error} refreshMs={5000} />
+        <div className="flex gap-1 ml-auto flex-wrap">
+          {(['', 'DEBUG', 'INFO', 'WARNING', 'ERROR'] as const).map(l => (
+            <button
+              key={l || 'ALL'}
+              type="button"
+              onClick={() => setLevel(l)}
+              className={`px-2 py-0.5 rounded text-[10px] font-bold border transition ${
+                level === l
+                  ? 'bg-rldc-teal-primary/20 text-rldc-teal-primary border-rldc-teal-primary/40'
+                  : 'text-slate-400 border-slate-700 hover:text-slate-200'
+              }`}
+            >
+              {l || 'WSZYSTKIE'}
+            </button>
+          ))}
+          <button
+            type="button"
+            onClick={() => setPaused(p => !p)}
+            className={`px-2 py-0.5 rounded text-[10px] font-bold border transition ${
+              paused
+                ? 'bg-yellow-500/20 text-yellow-400 border-yellow-500/40'
+                : 'text-slate-400 border-slate-700 hover:text-slate-200'
+            }`}
+          >
+            {paused ? '▶ WZNÓW' : '⏸ PAUZUJ'}
+          </button>
+          <button
+            type="button"
+            onClick={() => setAutoScroll(a => !a)}
+            className={`px-2 py-0.5 rounded text-[10px] font-bold border transition ${
+              autoScroll
+                ? 'bg-teal-500/20 text-teal-400 border-teal-500/40'
+                : 'text-slate-400 border-slate-700 hover:text-slate-200'
+            }`}
+          >
+            SCROLL {autoScroll ? 'WŁ' : 'WYŁ'}
+          </button>
+        </div>
+      </div>
+
+      {error && <EmptyState reason="sync-stopped" detail={error} />}
+
+      <div className="grid grid-cols-1 xl:grid-cols-2 gap-4 mb-4">
+        <div className="terminal-card rounded-lg border border-rldc-dark-border p-4">
+          <div className="text-xs uppercase tracking-widest text-slate-500 mb-3">AI Chat / Command Brain</div>
+          <div className="flex gap-2">
+            <input
+              value={chatInput}
+              onChange={(e) => setChatInput(e.target.value)}
+              onKeyDown={(e) => { if (e.key === 'Enter') runAiCommand() }}
+              placeholder="np. kup btc wymus / analizuj eth / ustaw ostrozny tryb"
+              className="flex-1 bg-[#0a1219] border border-rldc-dark-border rounded px-3 py-2 text-sm text-slate-200"
+            />
+            <button
+              type="button"
+              onClick={runAiCommand}
+              disabled={chatLoading}
+              className="px-3 py-2 rounded text-xs font-semibold border border-rldc-teal-primary/40 text-rldc-teal-primary hover:bg-rldc-teal-primary/10"
+            >
+              {chatLoading ? 'Przetwarzam...' : 'Wyślij'}
+            </button>
+          </div>
+          <div className="mt-3 bg-[#060d14] border border-rldc-dark-border rounded p-3 text-xs text-slate-300 min-h-[90px] whitespace-pre-wrap">
+            {!chatOutput && <span className="text-slate-500">Brak odpowiedzi.</span>}
+            {chatOutput?.error && <span className="text-rldc-red-primary">{chatOutput.error}</span>}
+            {chatOutput && !chatOutput.error && (
+              <>
+                <div>Akcja: {chatOutput.action}</div>
+                <div>Decyzja: {chatOutput.decision}</div>
+                <div>Wynik: {chatOutput.summary}</div>
+                {chatOutput.pending_order_id && <div>Pending ID: {chatOutput.pending_order_id}</div>}
+              </>
+            )}
+          </div>
+        </div>
+
+        <div className="terminal-card rounded-lg border border-rldc-dark-border p-4">
+          <div className="text-xs uppercase tracking-widest text-slate-500 mb-3">Terminal online (guarded)</div>
+          <div className="flex gap-2">
+            <input
+              value={termInput}
+              onChange={(e) => setTermInput(e.target.value)}
+              onKeyDown={(e) => { if (e.key === 'Enter') runTerminalCommand() }}
+              placeholder="Dozwolone: pwd, ls, tail, rg, ps..."
+              className="flex-1 bg-[#0a1219] border border-rldc-dark-border rounded px-3 py-2 text-sm text-slate-200"
+            />
+            <button
+              type="button"
+              onClick={runTerminalCommand}
+              disabled={termLoading}
+              className="px-3 py-2 rounded text-xs font-semibold border border-rldc-teal-primary/40 text-rldc-teal-primary hover:bg-rldc-teal-primary/10"
+            >
+              {termLoading ? 'Uruchamiam...' : 'Run'}
+            </button>
+          </div>
+          <div className="mt-3 bg-[#060d14] border border-rldc-dark-border rounded p-3 text-xs text-slate-300 min-h-[90px] whitespace-pre-wrap overflow-auto max-h-[220px]">
+            {!termOutput && <span className="text-slate-500">Brak wykonania.</span>}
+            {termOutput?.error && <span className="text-rldc-red-primary">{termOutput.error}</span>}
+            {termOutput && !termOutput.error && (
+              <>
+                <div className="text-slate-500 mb-1">exit_code={termOutput.exit_code}</div>
+                <div>{termOutput.stdout || '(brak stdout)'}</div>
+                {!!termOutput.stderr && <div className="text-rldc-red-primary mt-2">{termOutput.stderr}</div>}
+              </>
+            )}
+          </div>
+        </div>
+      </div>
+
+      <div
+        ref={containerRef}
+        className="bg-[#060d14] rounded-lg border border-rldc-dark-border font-mono text-xs overflow-y-auto"
+        style={{ height: '520px' }}
+      >
+        {logs.length === 0 && !loading && !error && (
+          <div className="p-4 text-slate-500">Brak logów.</div>
+        )}
+        {[...logs].reverse().map((l: any, idx: number) => (
+          <div
+            key={l.id ?? idx}
+            className="flex gap-2 px-3 py-0.5 border-b border-rldc-dark-border/30 hover:bg-white/[0.02]"
+          >
+            <span className="text-slate-600 shrink-0 w-[148px]">
+              {l.timestamp ? l.timestamp.replace('T', ' ').slice(0, 19) : '--'}
+            </span>
+            <span className={`w-[60px] shrink-0 font-bold ${levelColor(l.level)}`}>{l.level}</span>
+            <span className="text-slate-500 w-[80px] shrink-0 truncate">{l.module}</span>
+            <span className="text-slate-300 break-all">{l.message}</span>
+            {l.exception && (
+              <span className="text-rldc-red-primary/80 ml-1 break-all">{l.exception.slice(0, 120)}</span>
+            )}
+          </div>
+        ))}
+      </div>
+      <div className="text-[10px] text-slate-600 mt-1">
+        {logs.length} wpisów · odświeżanie co 5s{paused ? ' (ZATRZYMANE)' : ''}
+      </div>
+    </div>
+  )
+}
+
+/* Panel 2: Aktywność bota */
+function DiagActivityTab({ mode }: { mode: 'demo' | 'live' }) {
+  const [minutes, setMinutes] = React.useState(15)
+  const { data, loading, error, lastUpdated } = useFetch<any>(
+    `/api/account/bot-activity?mode=${mode}&minutes=${minutes}`,
+    10000
+  )
+  const d = data?.data || {}
+  const actions: any[] = d.last_actions || []
+  const positions: any[] = d.open_positions || []
+
+  return (
+    <div>
+      <div className="flex items-center gap-3 mb-4 flex-wrap">
+        <DataStatus lastUpdated={lastUpdated} loading={loading} error={error} refreshMs={10000} />
+        <div className="flex gap-1 ml-auto">
+          {[5, 15, 30, 60].map(m => (
+            <button
+              key={m}
+              type="button"
+              onClick={() => setMinutes(m)}
+              className={`px-2 py-0.5 rounded text-[10px] font-bold border transition ${
+                minutes === m
+                  ? 'bg-rldc-teal-primary/20 text-rldc-teal-primary border-rldc-teal-primary/40'
+                  : 'text-slate-400 border-slate-700 hover:text-slate-200'
+              }`}
+            >
+              {m} min
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {error && <EmptyState reason="sync-stopped" detail={error} />}
+
+      {/* KPI kafelki */}
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-5">
+        {[
+          { label: 'Rozważane symbole', value: d.considered ?? '—', color: 'text-slate-100' },
+          { label: 'Odrzucone', value: d.rejected ?? '—', color: 'text-yellow-400' },
+          { label: 'Kupione', value: d.bought ?? '—', color: 'text-rldc-green-primary' },
+          { label: 'Zamknięte', value: d.closed ?? '—', color: 'text-rldc-red-primary' },
+        ].map(tile => (
+          <div key={tile.label} className="bg-rldc-dark-card rounded-lg p-4 border border-rldc-dark-border">
+            <div className="text-xs text-slate-500 mb-1">{tile.label}</div>
+            <div className={`text-2xl font-bold ${tile.color}`}>{tile.value}</div>
+          </div>
+        ))}
+      </div>
+
+      {/* Ostatnie akcje */}
+      <div className="bg-rldc-dark-card rounded-lg p-4 border border-rldc-dark-border mb-4">
+        <div className="text-xs text-slate-400 font-semibold uppercase tracking-wider mb-3">Ostatnie akcje bota</div>
+        {actions.length === 0 && <div className="text-sm text-slate-500">Brak akcji w tym oknie czasowym.</div>}
+        {actions.map((a: any, i: number) => (
+          <div key={i} className="flex items-start gap-2 mb-2 text-sm">
+            <span className="shrink-0 text-[10px] text-slate-500 w-[140px] mt-0.5">
+              {a.ts ? a.ts.replace('T', ' ').slice(0, 19) : '--'}
+            </span>
+            <span className="text-slate-200">{a.description || `${a.symbol}: ${a.reason_code}`}</span>
+          </div>
+        ))}
+      </div>
+
+      {/* Otwarte pozycje */}
+      <div className="bg-rldc-dark-card rounded-lg p-4 border border-rldc-dark-border">
+        <div className="text-xs text-slate-400 font-semibold uppercase tracking-wider mb-3">
+          Otwarte pozycje ({positions.length})
+        </div>
+        {positions.length === 0 && <div className="text-sm text-slate-500">Brak otwartych pozycji.</div>}
+        {positions.map((p: any, i: number) => {
+          const pnlPct = p.unrealized_pnl_pct ?? 0
+          const pnlColor = pnlPct >= 0 ? 'text-rldc-green-primary' : 'text-rldc-red-primary'
+          return (
+            <div key={p.symbol ?? i} className="flex items-center justify-between py-1.5 border-b border-rldc-dark-border/40 last:border-0">
+              <span className="text-sm font-bold text-rldc-teal-primary">{p.symbol}</span>
+              <span className="text-xs text-slate-400">wejście: {p.entry_price?.toFixed(4) ?? '—'}</span>
+              <span className="text-xs text-slate-300">bieżąca: {p.current_price?.toFixed(4) ?? '—'}</span>
+              <span className={`text-xs font-semibold ${pnlColor}`}>
+                {pnlPct >= 0 ? '+' : ''}{(pnlPct * 100).toFixed(2)}%
+              </span>
+            </div>
+          )
+        })}
+      </div>
+    </div>
+  )
+}
+
+/* Panel 3: Ślad AI — execution-trace */
+function DiagTraceTab({ mode }: { mode: 'demo' | 'live' }) {
+  const [minutes, setMinutes] = React.useState(30)
+  const { data, loading, error, lastUpdated } = useFetch<any>(
+    `/api/signals/execution-trace?mode=${mode}&limit_minutes=${minutes}`,
+    30000
+  )
+  const { data: aiStatusData } = useFetch<any>(`/api/account/ai-status`, 60000)
+  const items: any[] = data?.data || []
+
+  const aiProviders: any[] = (() => {
+    const d = aiStatusData?.data
+    if (!d) return []
+    const ps = d.providers || {}
+    return Object.entries(ps).map(([name, info]: [string, any]) => ({
+      name,
+      configured: info.configured,
+      model: info.model,
+      runtime: info.runtime || {},
+    }))
+  })()
+  const activeProvider: string = aiStatusData?.data?.active_provider || '--'
+
+  const reasonColor = (reason: string) => {
+    if (!reason) return 'text-slate-400'
+    const r = reason.toLowerCase()
+    if (r.includes('executed') || r.includes('position_opened') || r.includes('buy')) return 'text-rldc-green-primary'
+    if (r.includes('closed') || r.includes('exit') || r.includes('sell')) return 'text-rldc-red-primary'
+    if (r.includes('blocked') || r.includes('insufficient') || r.includes('cooldown') || r.includes('gate')) return 'text-yellow-400'
+    return 'text-slate-300'
+  }
+
+  const providerStatusColor = (status: string) => {
+    if (status === 'ok') return 'text-rldc-green-primary border-rldc-green-primary/30 bg-rldc-green-primary/5'
+    if (status === 'backoff') return 'text-yellow-400 border-yellow-400/30 bg-yellow-400/5'
+    if (status === 'unconfigured') return 'text-slate-500 border-slate-700 bg-slate-800/40'
+    return 'text-slate-400 border-slate-700'
+  }
+
+  return (
+    <div>
+      {/* Panel statusu AI Providerów */}
+      {aiProviders.length > 0 && (
+        <div className="mb-4 bg-rldc-dark-card rounded-lg p-3 border border-rldc-dark-border">
+          <div className="flex items-center gap-2 mb-2">
+            <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">AI Providers</span>
+            <span className="text-[10px] text-slate-500">aktywny:</span>
+            <span className="text-[10px] font-bold text-rldc-teal-primary">{activeProvider}</span>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            {aiProviders.map((p: any) => {
+              const rt = p.runtime || {}
+              const status: string = rt.status || (p.configured ? 'ok' : 'unconfigured')
+              const label: string = rt.label || (p.configured ? 'aktywny' : 'brak klucza')
+              return (
+                <div key={p.name} className={`px-2 py-1 rounded border text-[10px] font-mono ${providerStatusColor(status)}`}>
+                  <span className="font-bold">{p.name}</span>
+                  {p.model && <span className="ml-1 opacity-60">{p.model}</span>}
+                  <span className="ml-1.5 opacity-80">· {label}</span>
+                </div>
+              )
+            })}
+          </div>
+        </div>
+      )}
+      <div className="flex items-center gap-3 mb-4 flex-wrap">
+        <DataStatus lastUpdated={lastUpdated} loading={loading} error={error} refreshMs={30000} />
+        <div className="flex gap-1 ml-auto">
+          {[15, 30, 60, 120].map(m => (
+            <button
+              key={m}
+              type="button"
+              onClick={() => setMinutes(m)}
+              className={`px-2 py-0.5 rounded text-[10px] font-bold border transition ${
+                minutes === m
+                  ? 'bg-rldc-teal-primary/20 text-rldc-teal-primary border-rldc-teal-primary/40'
+                  : 'text-slate-400 border-slate-700 hover:text-slate-200'
+              }`}
+            >
+              {m} min
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {error && <EmptyState reason="sync-stopped" detail={error} />}
+
+      {items.length === 0 && !loading && !error && (
+        <EmptyState reason="no-data" detail="Brak śladów decyzji w tym oknie czasowym." />
+      )}
+
+      {items.length > 0 && (
+        <div className="space-y-2">
+          {items.map((item: any, i: number) => (
+            <div
+              key={item.symbol ?? i}
+              className="bg-rldc-dark-card rounded-lg p-3 border border-rldc-dark-border hover:border-rldc-teal-primary/20 transition"
+            >
+              <div className="flex items-center justify-between mb-1.5 flex-wrap gap-1">
+                <span className="text-sm font-bold text-rldc-teal-primary">{item.symbol}</span>
+                <span className={`text-xs font-semibold ${reasonColor(item.reason_code)}`}>
+                  {item.reason_code_pl || item.reason_code}
+                </span>
+                <span className="text-[10px] text-slate-500">
+                  {item.timestamp ? item.timestamp.replace('T', ' ').slice(0, 19) : '--'}
+                </span>
+              </div>
+              {item.signal_summary && (
+                <div className="text-xs text-slate-400 mb-1">
+                  <span className="text-slate-500">Sygnał: </span>{item.signal_summary}
+                </div>
+              )}
+              <div className="flex gap-4 text-[10px] text-slate-500 flex-wrap">
+                {item.action_type && <span>Akcja: <span className="text-slate-300">{item.action_type}</span></span>}
+                {item.strategy_name && <span>Strategia: <span className="text-slate-300">{item.strategy_name}</span></span>}
+                {item.timeframe && <span>TF: <span className="text-slate-300">{item.timeframe}</span></span>}
+              </div>
+              {item.cost_gate_result && (
+                <div className="text-[10px] text-yellow-400/80 mt-1">Koszt: {item.cost_gate_result}</div>
+              )}
+              {item.risk_gate_result && (
+                <div className="text-[10px] text-rldc-red-primary/80 mt-0.5">Ryzyko: {item.risk_gate_result}</div>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+      <div className="text-[10px] text-slate-600 mt-2">
+        {items.length} śladów · odświeżanie co 30s
+      </div>
+    </div>
+  )
+}
+
+/* ─────────────────────────────────────────────────────────────────────────────
+ * Zakładka 4: Status handlu — pipeline + blokery + kapitał
+ * ───────────────────────────────────────────────────────────────────────────── */
+function DiagTradingTab({ mode }: { mode: 'demo' | 'live' }) {
+  const { data: tsRaw, loading, error, lastUpdated } = useFetch<any>(`/api/account/trading-status?mode=${mode}`, 15000)
+  const { data: csRaw } = useFetch<any>(`/api/account/capital-snapshot?mode=${mode}`, 20000)
+  const ts = tsRaw?.data
+  const cs = csRaw?.data
+
+  const severityOrder: Record<string, number> = { critical: 0, warning: 1, info: 2 }
+
+  return (
+    <div>
+      <div className="flex items-center gap-3 mb-4">
+        <DataStatus lastUpdated={lastUpdated} loading={loading} error={error} refreshMs={15000} />
+        {ts && (
+          <span className={`ml-2 text-xs font-bold px-2 py-0.5 rounded border ${
+            ts.status_color === 'green' ? 'text-rldc-green-primary border-rldc-green-primary/40 bg-rldc-green-primary/10' :
+            ts.status_color === 'yellow' ? 'text-yellow-400 border-yellow-500/40 bg-yellow-500/10' :
+            'text-rldc-red-primary border-rldc-red-primary/40 bg-rldc-red-primary/10'
+          }`}>
+            {ts.status_color === 'green' ? '● AKTYWNY' : ts.status_color === 'yellow' ? '◐ OGRANICZONY' : '○ ZABLOKOWANY'}
+          </span>
+        )}
+      </div>
+
+      {error && <EmptyState reason="sync-stopped" detail={error} />}
+
+      {ts && (
+        <>
+          {/* ── Flagi ── */}
+          <div className="flex flex-wrap gap-2 mb-5">
+            {[
+              { label: 'Handel', val: ts.trading_enabled },
+              { label: 'Handel live', val: ts.live_trading_enabled },
+              { label: 'Binance OK', val: ts.exchange_connected },
+              { label: 'WebSocket', val: ts.websocket_enabled },
+              { label: 'Kolektor', val: ts.collector_running },
+              { label: 'Dane świeże', val: !ts.data_stale },
+            ].map(f => (
+              <div key={f.label} className={`px-2 py-1 rounded text-[10px] font-bold border ${
+                f.val ? 'text-rldc-green-primary border-rldc-green-primary/30 bg-rldc-green-primary/8' :
+                'text-rldc-red-primary border-rldc-red-primary/30 bg-rldc-red-primary/8'
+              }`}>
+                {f.val ? '✓' : '✗'} {f.label}
+              </div>
+            ))}
+          </div>
+
+          {/* ── Blokery ── */}
+          {ts.blockers && ts.blockers.length > 0 ? (
+            <div className="mb-5">
+              <div className="text-[10px] uppercase tracking-widest text-slate-500 mb-2">Aktywne blokery ({ts.blockers.length})</div>
+              <div className="space-y-1.5">
+                {[...(ts.blockers as any[])].sort((a, b) => (severityOrder[a.severity] ?? 9) - (severityOrder[b.severity] ?? 9)).map((b: any, i: number) => (
+                  <div key={i} className={`flex items-start gap-3 px-3 py-2 rounded-lg text-xs border ${
+                    b.severity === 'critical' ? 'bg-rldc-red-primary/10 border-rldc-red-primary/30' :
+                    b.severity === 'warning'  ? 'bg-yellow-500/10 border-yellow-500/30' :
+                    'bg-slate-800 border-slate-700'
+                  }`}>
+                    <div className="flex-1">
+                      <div className="flex items-baseline gap-2">
+                        <span className={`font-mono font-bold text-[10px] ${
+                          b.severity === 'critical' ? 'text-rldc-red-primary' :
+                          b.severity === 'warning'  ? 'text-yellow-400' :
+                          'text-slate-400'
+                        }`}>{b.code}</span>
+                        <span className="text-[10px] text-slate-500">[{b.stage}]</span>
+                        {b.symbol && <span className="text-rldc-teal-primary text-[10px]">{b.symbol}</span>}
+                      </div>
+                      <div className="text-slate-300 mt-0.5">{b.message}</div>
+                    </div>
+                    {b.timestamp && (
+                      <span className="text-[9px] text-slate-600 shrink-0">{String(b.timestamp).replace('T', ' ').slice(0, 16)}</span>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+          ) : (
+            <div className="mb-5 text-xs text-rldc-green-primary bg-rldc-green-primary/8 border border-rldc-green-primary/20 rounded-lg px-3 py-2">
+              ✓ Brak aktywnych blokerów — system może handlować
+            </div>
+          )}
+
+          {/* ── Pipeline 15 min ── */}
+          <div className="mb-5">
+            <div className="text-[10px] uppercase tracking-widest text-slate-500 mb-2">Pipeline (ostatnie 15 min)</div>
+            <div className="flex flex-wrap gap-3">
+              {[
+                { label: 'Kandydatów', value: ts.candidate_count, c: 'text-slate-300' },
+                { label: 'Kupiono', value: ts.bought_count_15m, c: 'text-rldc-green-primary' },
+                { label: 'Zamknięto', value: ts.closed_count_15m, c: 'text-rldc-red-primary' },
+                { label: 'Pominięto', value: ts.skipped_count_15m, c: 'text-yellow-400' },
+              ].map(s => (
+                <div key={s.label} className="terminal-card rounded-lg px-4 py-3 border border-rldc-dark-border min-w-[80px] text-center">
+                  <div className="text-[9px] text-slate-500 uppercase tracking-widest">{s.label}</div>
+                  <div className={`text-xl font-bold font-mono mt-1 ${s.c}`}>{s.value ?? '--'}</div>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          {/* ── Ostatnia decyzja ── */}
+          {(ts.last_decision_time || ts.last_rejection_reason || ts.last_order_error) && (
+            <div className="mb-5 terminal-card rounded-lg border border-rldc-dark-border px-4 py-3">
+              <div className="text-[10px] uppercase tracking-widest text-slate-500 mb-2">Ostatnia aktywność decyzyjna</div>
+              <div className="space-y-1 text-xs">
+                {ts.last_decision_time && (
+                  <div className="flex gap-2">
+                    <span className="text-slate-500 w-28 shrink-0">Czas decyzji:</span>
+                    <span className="text-slate-300">{String(ts.last_decision_time).replace('T', ' ').slice(0, 19)}</span>
+                  </div>
+                )}
+                {ts.last_attempted_symbol && (
+                  <div className="flex gap-2">
+                    <span className="text-slate-500 w-28 shrink-0">Symbol:</span>
+                    <span className="text-rldc-teal-primary font-mono">{ts.last_attempted_symbol}</span>
+                  </div>
+                )}
+                {ts.last_rejection_reason && (
+                  <div className="flex gap-2">
+                    <span className="text-slate-500 w-28 shrink-0">Przyczyna odrzucenia:</span>
+                    <span className="text-yellow-400">{ts.last_rejection_reason}</span>
+                  </div>
+                )}
+                {ts.last_order_error && (
+                  <div className="flex gap-2">
+                    <span className="text-slate-500 w-28 shrink-0">Błąd zlecenia:</span>
+                    <span className="text-rldc-red-primary">{ts.last_order_error}</span>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+        </>
+      )}
+
+      {/* ── Snapshot kapitału ── */}
+      {cs && (
+        <div className="terminal-card rounded-lg border border-rldc-dark-border px-4 py-3">
+          <div className="text-[10px] uppercase tracking-widest text-slate-500 mb-3">Snapshot kapitału</div>
+          <div className="grid grid-cols-2 gap-x-8 gap-y-2 text-xs">
+            {[
+              { label: 'Łączna wartość', value: cs.total_account_value != null ? `${Number(cs.total_account_value).toFixed(2)} ${cs.base_currency}` : '--', c: 'text-rldc-green-primary font-bold' },
+              { label: 'Wolne środki', value: cs.free_cash != null ? `${Number(cs.free_cash).toFixed(2)} ${cs.base_currency}` : '--', c: 'text-slate-100' },
+              { label: 'W pozycjach', value: cs.active_positions_value != null ? `${Number(cs.active_positions_value).toFixed(2)} ${cs.base_currency}` : '--', c: 'text-slate-100' },
+              { label: 'Wartość pyłu', value: cs.dust_value != null ? `${Number(cs.dust_value).toFixed(4)} ${cs.base_currency}` : '--', c: 'text-slate-500' },
+              { label: 'Aktywne pozycje', value: cs.active_positions_count ?? '--', c: 'text-slate-300' },
+              { label: 'Pył', value: cs.dust_positions_count ?? '--', c: 'text-slate-500' },
+              { label: 'Gotówka', value: cs.cash_assets_count ?? '--', c: 'text-slate-300' },
+              { label: 'Wszystkie aktywa', value: cs.all_assets_count ?? '--', c: 'text-slate-300' },
+            ].map(r => (
+              <div key={r.label} className="flex gap-2 items-baseline">
+                <span className="text-slate-600 w-32 shrink-0">{r.label}:</span>
+                <span className={r.c}>{String(r.value)}</span>
+              </div>
+            ))}
+          </div>
+          <div className="mt-3 pt-3 border-t border-rldc-dark-border/50 flex flex-wrap gap-3 text-[10px]">
+            <span className="text-slate-500">Źródło: <span className="text-slate-300">{cs.source_of_truth}</span></span>
+            <span className="text-slate-500">Sync: {cs.sync_status === 'ok' ? <span className="text-rldc-green-primary">OK</span> : <span className="text-yellow-400">{cs.sync_status}</span>}</span>
+            {cs.stale && <span className="text-yellow-400">⚠ Dane mogą być nieaktualne ({cs.age_seconds}s temu)</span>}
+            {cs.sync_warning && <span className="text-yellow-400">⚠ {cs.sync_warning}</span>}
+          </div>
         </div>
       )}
     </div>
@@ -5091,12 +6206,16 @@ function signalLabel(type: string): string {
 function decisionColor(d: string) {
   if (d === 'SPRZEDAJ') return 'text-rldc-red-primary'
   if (d === 'TRZYMAJ') return 'text-rldc-green-primary'
+  if (d === 'DUST') return 'text-slate-500'
+  if (d === 'BRAK DANYCH') return 'text-yellow-500'
   return 'text-rldc-orange-primary'
 }
 
 function decisionBg(d: string) {
   if (d === 'SPRZEDAJ') return 'bg-rldc-red-primary/10 border-rldc-red-primary/30'
   if (d === 'TRZYMAJ') return 'bg-rldc-green-primary/10 border-rldc-green-primary/30'
+  if (d === 'DUST') return 'bg-slate-700/20 border-slate-600/30'
+  if (d === 'BRAK DANYCH') return 'bg-yellow-500/5 border-yellow-500/20'
   return 'bg-rldc-orange-primary/10 border-rldc-orange-primary/30'
 }
 
@@ -5179,32 +6298,65 @@ function PositionAnalysisView({ mode, onSymbolClick }: { mode: 'demo' | 'live'; 
 
       {/* Podsumowanie */}
       {summary.positions_count !== undefined && (
-        <div className="grid grid-cols-2 md:grid-cols-5 gap-3 mb-6">
-          <div className="terminal-card border border-rldc-dark-border rounded-lg px-4 py-3 neon-card">
-            <div className="text-[10px] uppercase tracking-widest text-slate-500">Pozycje</div>
-            <div className="text-xl font-bold text-slate-100 mt-1">{summary.positions_count}</div>
-          </div>
-          <div className="terminal-card border border-rldc-dark-border rounded-lg px-4 py-3 neon-card">
-            <div className="text-[10px] uppercase tracking-widest text-slate-500">Wartość teraz</div>
-            <div className="text-xl font-bold text-slate-100 mt-1">{summary.total_value_eur != null ? `${summary.total_value_eur.toFixed(2)} EUR` : '--'}</div>
-          </div>
-          <div className="terminal-card border border-rldc-dark-border rounded-lg px-4 py-3 neon-card">
-            <div className="text-[10px] uppercase tracking-widest text-slate-500">Zainwestowano</div>
-            <div className="text-xl font-bold text-slate-100 mt-1">{summary.total_cost_eur != null ? `${summary.total_cost_eur.toFixed(2)} EUR` : <span className="text-slate-500">brak danych</span>}</div>
-          </div>
-          <div className="terminal-card border border-rldc-dark-border rounded-lg px-4 py-3 neon-card">
-            <div className="text-[10px] uppercase tracking-widest text-slate-500">Łączny wynik</div>
-            <div className={`text-xl font-bold mt-1 ${summary.total_pnl_eur != null ? pnlColor(summary.total_pnl_eur) : 'text-slate-500'}`}>
-              {summary.total_pnl_eur != null ? `${summary.total_pnl_eur >= 0 ? '+' : ''}${summary.total_pnl_eur.toFixed(2)} EUR` : 'brak danych'}
+        <>
+          {/* Ostrzeżenie gdy brak pełnych pozycji */}
+          {summary.valid_positions_count === 0 && summary.positions_count > 0 && (
+            <div className="mb-4 px-4 py-3 rounded-lg border border-yellow-500/30 bg-yellow-500/10 text-yellow-300 text-sm">
+              Brak pełnych pozycji tradingowych do analizy. Widoczne są jedynie resztki aktywów
+              {summary.missing_entry_count > 0 && ` lub pozycje bez historii wejścia (${summary.missing_entry_count})`}.
+            </div>
+          )}
+          <div className="grid grid-cols-2 md:grid-cols-5 gap-3 mb-6">
+            <div className="terminal-card border border-rldc-dark-border rounded-lg px-4 py-3 neon-card">
+              <div className="text-[10px] uppercase tracking-widest text-slate-500">Aktywne pozycje</div>
+              <div className="text-xl font-bold text-slate-100 mt-1">{summary.valid_positions_count ?? summary.positions_count}</div>
+              {(summary.dust_positions_count > 0 || summary.missing_entry_count > 0) && (
+                <div className="text-[10px] text-slate-500 mt-0.5">
+                  {summary.dust_positions_count > 0 && `+${summary.dust_positions_count} pył`}
+                  {summary.dust_positions_count > 0 && summary.missing_entry_count > 0 && ', '}
+                  {summary.missing_entry_count > 0 && `+${summary.missing_entry_count} bez wejścia`}
+                </div>
+              )}
+            </div>
+            <div className="terminal-card border border-rldc-dark-border rounded-lg px-4 py-3 neon-card">
+              <div className="text-[10px] uppercase tracking-widest text-slate-500">Wartość aktywnych</div>
+              <div className="text-xl font-bold text-slate-100 mt-1">
+                {summary.total_value_eur != null && summary.total_value_eur > 0
+                  ? `${summary.total_value_eur.toFixed(2)} EUR`
+                  : summary.all_assets_value_eur != null
+                    ? <span className="text-slate-400">{summary.all_assets_value_eur.toFixed(2)} EUR</span>
+                    : '--'}
+              </div>
+              {summary.total_value_eur === 0 && summary.dust_value_eur != null && (
+                <div className="text-[10px] text-slate-500 mt-0.5">pył: {summary.dust_value_eur.toFixed(4)} EUR</div>
+              )}
+            </div>
+            <div className="terminal-card border border-rldc-dark-border rounded-lg px-4 py-3 neon-card">
+              <div className="text-[10px] uppercase tracking-widest text-slate-500">Zainwestowano</div>
+              <div className="text-xl font-bold text-slate-100 mt-1">
+                {summary.total_cost_eur != null
+                  ? `${summary.total_cost_eur.toFixed(2)} EUR`
+                  : <span className="text-slate-500 text-sm">brak potwierdzonych danych</span>}
+              </div>
+            </div>
+            <div className="terminal-card border border-rldc-dark-border rounded-lg px-4 py-3 neon-card">
+              <div className="text-[10px] uppercase tracking-widest text-slate-500">Łączny wynik</div>
+              <div className={`text-xl font-bold mt-1 ${summary.total_pnl_eur != null ? pnlColor(summary.total_pnl_eur) : 'text-slate-500'}`}>
+                {summary.total_pnl_eur != null
+                  ? `${summary.total_pnl_eur >= 0 ? '+' : ''}${summary.total_pnl_eur.toFixed(2)} EUR`
+                  : <span className="text-sm">brak danych</span>}
+              </div>
+            </div>
+            <div className="terminal-card border border-rldc-dark-border rounded-lg px-4 py-3 neon-card">
+              <div className="text-[10px] uppercase tracking-widest text-slate-500">Wynik %</div>
+              <div className={`text-xl font-bold mt-1 ${summary.total_pnl_pct != null && summary.total_pnl_pct !== 0 ? pnlColor(summary.total_pnl_pct) : 'text-slate-500'}`}>
+                {summary.total_pnl_pct != null && summary.total_cost_eur != null
+                  ? `${summary.total_pnl_pct >= 0 ? '+' : ''}${summary.total_pnl_pct.toFixed(2)}%`
+                  : <span className="text-sm">brak danych</span>}
+              </div>
             </div>
           </div>
-          <div className="terminal-card border border-rldc-dark-border rounded-lg px-4 py-3 neon-card">
-            <div className="text-[10px] uppercase tracking-widest text-slate-500">Wynik %</div>
-            <div className={`text-xl font-bold mt-1 ${summary.total_pnl_pct != null && summary.total_pnl_pct !== 0 ? pnlColor(summary.total_pnl_pct) : 'text-slate-500'}`}>
-              {summary.total_pnl_pct != null && summary.total_cost_eur != null ? `${summary.total_pnl_pct >= 0 ? '+' : ''}${summary.total_pnl_pct.toFixed(2)}%` : 'brak danych'}
-            </div>
-          </div>
-        </div>
+        </>
       )}
 
       {cards.length === 0 && !loading && !error && (
@@ -5221,16 +6373,28 @@ function PositionAnalysisView({ mode, onSymbolClick }: { mode: 'demo' | 'live'; 
             : null
           const realism = pctNeeded !== null ? assessGoalRealism(pctNeeded, c.trend, c.rsi) : null
 
+          // Klasyfikacja wizualna na podstawie pól z backendu
+          const isDust = c.is_dust === true || c.classification === 'dust_position'
+          const isMissingEntry = !isDust && c.classification === 'missing_entry_price'
+          const isValid = c.classification === 'valid_position'
+
+          // Style karty wg klasyfikacji
+          const cardBorderClass = isDust
+            ? 'border-slate-700/40 opacity-60'
+            : isMissingEntry
+              ? 'border-yellow-500/30'
+              : 'border-rldc-dark-border'
+
           return (
             <div
               key={c.symbol}
-              className="bg-rldc-dark-card rounded-lg border border-rldc-dark-border neon-card overflow-hidden"
+              className={`bg-rldc-dark-card rounded-lg border neon-card overflow-hidden ${cardBorderClass}`}
             >
               {/* Nagłówek karty */}
               <div className="flex items-center justify-between px-5 py-3 border-b border-rldc-dark-border/50">
                 <div className="flex items-center gap-3">
                   <span
-                    className="text-lg font-bold text-rldc-teal-primary cursor-pointer hover:underline"
+                    className={`text-lg font-bold cursor-pointer hover:underline ${isDust ? 'text-slate-400' : 'text-rldc-teal-primary'}`}
                     onClick={() => onSymbolClick?.(c.symbol)}
                     title="Kliknij aby otworzyć panel szczegółów"
                   >
@@ -5241,25 +6405,60 @@ function PositionAnalysisView({ mode, onSymbolClick }: { mode: 'demo' | 'live'; 
                       HOLD
                     </span>
                   )}
-                  {c.source === 'binance_spot' && (
+                  {/* Badge klasyfikacji */}
+                  {isDust && (
+                    <span className="px-2 py-0.5 rounded bg-slate-700/40 text-slate-400 text-[10px] font-semibold border border-slate-600/40">
+                      PYŁ
+                    </span>
+                  )}
+                  {isMissingEntry && (
+                    <span className="px-2 py-0.5 rounded bg-yellow-500/15 text-yellow-400 text-[10px] font-semibold border border-yellow-500/30">
+                      BRAK DANYCH WEJŚCIA
+                    </span>
+                  )}
+                  {isValid && c.source === 'binance_spot' && (
                     <span className="px-2 py-0.5 rounded bg-rldc-teal-primary/20 text-rldc-teal-primary text-[10px] font-semibold border border-rldc-teal-primary/30">
                       LIVE Spot
                     </span>
                   )}
-                  <span className="text-xs text-slate-500">{c.side} • {c.opened_at ? `otwarcie ${c.opened_at.slice(0, 10)}` : c.source === 'binance_spot' ? 'Binance' : '--'}</span>
-                </div>
-                <div className={`px-4 py-1.5 rounded-lg border text-sm font-bold ${decisionBg(c.decision)}`}>
-                  <span className={decisionColor(c.decision)}>
-                    {c.decision}
-                  </span>
-                  {c.strength && c.strength !== 'NEUTRALNY' && (
-                    <span className="text-[10px] text-slate-400 ml-2">({c.strength})</span>
+                  {isValid && c.source !== 'binance_spot' && (
+                    <span className="px-2 py-0.5 rounded bg-rldc-green-primary/20 text-rldc-green-primary text-[10px] font-semibold border border-rldc-green-primary/30">
+                      AKTYWNA POZYCJA
+                    </span>
                   )}
+                  <span className="text-xs text-slate-500">
+                    {c.side} • {c.opened_at ? `otwarcie ${c.opened_at.slice(0, 10)}` : c.source === 'binance_spot' || c.source === 'binance_spot_dust' ? 'Binance' : '--'}
+                  </span>
                 </div>
+                {/* Badge decyzji — TYLKO dla valid_position */}
+                {isValid ? (
+                  <div className={`px-4 py-1.5 rounded-lg border text-sm font-bold ${decisionBg(c.decision)}`}>
+                    <span className={decisionColor(c.decision)}>{c.decision}</span>
+                    {c.strength && c.strength !== 'NEUTRALNY' && (
+                      <span className="text-[10px] text-slate-400 ml-2">({c.strength})</span>
+                    )}
+                  </div>
+                ) : isDust ? (
+                  <div className="px-4 py-1.5 rounded-lg border border-slate-600/40 bg-slate-700/20 text-sm font-bold text-slate-400">
+                    PYŁ
+                  </div>
+                ) : (
+                  <div className="px-4 py-1.5 rounded-lg border border-yellow-500/30 bg-yellow-500/10 text-sm font-bold text-yellow-400">
+                    BRAK DANYCH
+                  </div>
+                )}
               </div>
 
+              {/* Baner ostrzegawczy dla pozycji bez danych */}
+              {c.warning_message && (
+                <div className={`px-5 py-2 text-xs flex items-center gap-2 ${isDust ? 'bg-slate-800/40 text-slate-500' : 'bg-yellow-500/10 text-yellow-300 border-b border-yellow-500/20'}`}>
+                  <span>{isDust ? 'ℹ' : '⚠'}</span>
+                  <span>{c.warning_message}</span>
+                </div>
+              )}
+
               {/* Zawartość karty */}
-              <div className="px-5 py-4">
+              <div className={`px-5 py-4 ${isDust ? 'opacity-70' : ''}`}>
                 {/* Wiersz 1: ceny i P&L */}
                 <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4 mb-4">
                   <div>
@@ -5268,11 +6467,14 @@ function PositionAnalysisView({ mode, onSymbolClick }: { mode: 'demo' | 'live'; 
                   </div>
                   <div>
                     <div className="text-[10px] uppercase tracking-widest text-slate-500 mb-1">Kupiono po</div>
-                    <div className="text-sm font-mono text-slate-200">{c.entry_price != null ? `${c.entry_price.toFixed(c.entry_price > 10 ? 2 : 6)} EUR` : <span className="text-slate-500">brak danych</span>}</div>
+                    {c.has_entry_price
+                      ? <div className="text-sm font-mono text-slate-200">{c.entry_price < 0.0001 ? c.entry_price.toFixed(8) : c.entry_price > 10 ? c.entry_price.toFixed(2) : c.entry_price.toFixed(6)} EUR</div>
+                      : <div className="text-sm font-mono text-amber-500/80 italic">nieznana</div>
+                    }
                   </div>
                   <div>
                     <div className="text-[10px] uppercase tracking-widest text-slate-500 mb-1">Teraz</div>
-                    <div className="text-sm font-mono text-slate-200">{c.current_price != null ? `${c.current_price.toFixed(c.current_price > 10 ? 2 : 6)} EUR` : '--'}</div>
+                    <div className="text-sm font-mono text-slate-200">{c.current_price != null ? `${c.current_price < 0.0001 ? c.current_price.toFixed(8) : c.current_price > 10 ? c.current_price.toFixed(2) : c.current_price.toFixed(6)} EUR` : '--'}</div>
                   </div>
                   <div>
                     <div className="text-[10px] uppercase tracking-widest text-slate-500 mb-1">Wartość pozycji</div>
@@ -5280,138 +6482,146 @@ function PositionAnalysisView({ mode, onSymbolClick }: { mode: 'demo' | 'live'; 
                   </div>
                   <div>
                     <div className="text-[10px] uppercase tracking-widest text-slate-500 mb-1">Wynik (EUR)</div>
-                    <div className={`text-sm font-mono font-bold ${c.pnl_eur != null ? pnlColor(c.pnl_eur) : 'text-slate-500'}`}>
-                      {c.pnl_eur != null ? `${c.pnl_eur >= 0 ? '+' : ''}${c.pnl_eur.toFixed(4)} EUR` : 'brak danych'}
-                    </div>
+                    {c.can_compute_pnl && c.pnl_eur != null
+                      ? <div className={`text-sm font-mono font-bold ${pnlColor(c.pnl_eur)}`}>{c.pnl_eur >= 0 ? '+' : ''}{c.pnl_eur.toFixed(4)} EUR</div>
+                      : <div className="text-sm font-mono text-slate-600 italic">—</div>
+                    }
                   </div>
                   <div>
                     <div className="text-[10px] uppercase tracking-widest text-slate-500 mb-1">Wynik (%)</div>
-                    <div className={`text-sm font-mono font-bold ${c.pnl_pct != null ? pnlColor(c.pnl_pct) : 'text-slate-500'}`}>
-                      {c.pnl_pct != null ? `${c.pnl_pct >= 0 ? '+' : ''}${c.pnl_pct.toFixed(2)}%` : 'brak danych'}
-                    </div>
+                    {c.can_compute_pnl && c.pnl_pct != null
+                      ? <div className={`text-sm font-mono font-bold ${pnlColor(c.pnl_pct)}`}>{c.pnl_pct >= 0 ? '+' : ''}{c.pnl_pct.toFixed(2)}%</div>
+                      : <div className="text-sm font-mono text-slate-600 italic">—</div>
+                    }
                   </div>
                 </div>
 
-                {/* Wiersz 2: analiza techniczna */}
-                <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-4">
-                  <div>
-                    <div className="text-[10px] uppercase tracking-widest text-slate-500 mb-1">Trend</div>
-                    <div className={`text-sm font-semibold ${c.trend === 'WZROSTOWY' ? 'text-rldc-green-primary' : c.trend === 'SPADKOWY' ? 'text-rldc-red-primary' : 'text-slate-400'}`}>
-                      {c.trend === 'WZROSTOWY' ? '▲ Wzrostowy' : c.trend === 'SPADKOWY' ? '▼ Spadkowy' : '— Brak danych'}
-                    </div>
-                  </div>
-                  <div>
-                    <div className="text-[10px] uppercase tracking-widest text-slate-500 mb-1">RSI (moc rynku)</div>
-                    <div className={`text-sm font-mono ${c.rsi !== null ? (c.rsi < 30 ? 'text-rldc-green-primary' : c.rsi > 70 ? 'text-rldc-red-primary' : 'text-slate-200') : 'text-slate-500'}`}>
-                      {c.rsi !== null ? `${c.rsi}${c.rsi < 30 ? ' (wyprzedany)' : c.rsi > 70 ? ' (wykupiony)' : ''}` : '--'}
-                    </div>
-                  </div>
-                  {c.planned_tp !== null && (
+                {/* Sekcja analizy technicznej — tylko dla valid_position */}
+                {isValid && (
+                  <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-4">
                     <div>
-                      <div className="text-[10px] uppercase tracking-widest text-slate-500 mb-1">Cel zysku (TP)</div>
-                      <div className="text-sm font-mono text-rldc-green-primary">{c.planned_tp?.toFixed(c.planned_tp > 10 ? 2 : 6)}</div>
-                    </div>
-                  )}
-                  {c.planned_sl !== null && (
-                    <div>
-                      <div className="text-[10px] uppercase tracking-widest text-slate-500 mb-1">Ochrona straty (SL)</div>
-                      <div className="text-sm font-mono text-rldc-red-primary">{c.planned_sl?.toFixed(c.planned_sl > 10 ? 2 : 6)}</div>
-                    </div>
-                  )}
-                  {c.is_hold && c.hold_target_eur !== undefined && (
-                    <div>
-                      <div className="text-[10px] uppercase tracking-widest text-slate-500 mb-1">Cel wyceny (HOLD)</div>
-                      <div className="text-sm font-mono text-rldc-orange-primary">
-                        {c.hold_target_eur} EUR
-                        {typeof c.hold_remaining_eur === 'number' && (
-                          <span className="text-[10px] text-slate-400 ml-1">(brakuje {c.hold_remaining_eur.toFixed(2)} EUR)</span>
-                        )}
+                      <div className="text-[10px] uppercase tracking-widest text-slate-500 mb-1">Trend</div>
+                      <div className={`text-sm font-semibold ${c.trend === 'WZROSTOWY' ? 'text-rldc-green-primary' : c.trend === 'SPADKOWY' ? 'text-rldc-red-primary' : 'text-slate-400'}`}>
+                        {c.trend === 'WZROSTOWY' ? '▲ Wzrostowy' : c.trend === 'SPADKOWY' ? '▼ Spadkowy' : '— Brak danych'}
                       </div>
                     </div>
-                  )}
-                </div>
-
-                {/* Sekcja celu użytkownika */}
-                <div className="bg-[#0b121a] rounded-lg border border-rldc-dark-border/40 px-4 py-3 mb-3">
-                  <div className="flex items-center justify-between mb-2">
-                    <div className="text-[10px] uppercase tracking-widest text-slate-500">Twój cel wartości pozycji (EUR)</div>
-                    <button
-                      onClick={() => setGoalEdit(goalEdit === c.symbol ? null : c.symbol)}
-                      className="text-[10px] text-rldc-teal-primary hover:underline"
-                    >
-                      {goal ? 'Zmień' : 'Ustaw cel'}
-                    </button>
-                  </div>
-                  {goalEdit === c.symbol && (
-                    <div className="flex items-center gap-2 mb-2">
-                      <input
-                        type="number"
-                        min="0"
-                        step="0.01"
-                        placeholder="np. 300"
-                        value={goalInput[c.symbol] || ''}
-                        onChange={(e) => setGoalInput((p) => ({ ...p, [c.symbol]: e.target.value }))}
-                        className="w-28 px-2 py-1 text-xs rounded bg-rldc-dark-bg border border-rldc-dark-border text-slate-200 font-mono"
-                      />
-                      <button
-                        onClick={() => handleSaveGoal(c.symbol)}
-                        className="px-3 py-1 text-[10px] rounded bg-rldc-teal-primary/20 text-rldc-teal-primary hover:bg-rldc-teal-primary/30 transition"
-                      >
-                        Zapisz
-                      </button>
-                      {goal && (
-                        <button
-                          onClick={() => {
-                            fetch(`${getApiBase()}/api/positions/goal/${c.symbol}`, {
-                              method: 'DELETE',
-                              headers: withAdminToken(),
-                            }).catch(() => null)
-                            removeGoal(c.symbol)
-                            setGoals((p) => { const n = { ...p }; delete n[c.symbol]; return n })
-                            setGoalEdit(null)
-                          }}
-                          className="px-3 py-1 text-[10px] rounded bg-slate-500/10 text-slate-400 hover:bg-slate-500/20 transition"
-                        >
-                          Usuń
-                        </button>
-                      )}
-                    </div>
-                  )}
-                  {goal ? (
-                    <div className="space-y-1.5">
-                      <div className="flex items-center gap-4 flex-wrap text-sm">
-                        <span className="text-slate-300">Cel: <span className="font-mono font-bold text-slate-100">{goal.targetEur} EUR</span></span>
-                        {goalRemaining !== null && (
-                          <span className={`font-mono font-bold ${goalRemaining <= 0 ? 'text-rldc-green-primary' : 'text-yellow-400'}`}>
-                            {goalRemaining <= 0 ? '✓ Cel osiągnięty!' : `Brakuje: ${goalRemaining.toFixed(2)} EUR`}
-                          </span>
-                        )}
-                        {pctNeeded !== null && goalRemaining !== null && goalRemaining > 0 && (
-                          <span className="text-slate-400 text-xs">
-                            Potrzebny ruch: <span className="font-mono font-semibold text-slate-200">{pctNeeded > 0 ? '+' : ''}{pctNeeded.toFixed(1)}%</span>
-                          </span>
-                        )}
+                    <div>
+                      <div className="text-[10px] uppercase tracking-widest text-slate-500 mb-1">RSI (moc rynku)</div>
+                      <div className={`text-sm font-mono ${c.rsi !== null ? (c.rsi < 30 ? 'text-rldc-green-primary' : c.rsi > 70 ? 'text-rldc-red-primary' : 'text-slate-200') : 'text-slate-500'}`}>
+                        {c.rsi !== null ? `${c.rsi}${c.rsi < 30 ? ' (wyprzedany)' : c.rsi > 70 ? ' (wykupiony)' : ''}` : '--'}
                       </div>
-                      {realism && goalRemaining !== null && goalRemaining > 0 && (
-                        <div className="flex items-center gap-2 text-xs">
-                          <span className="text-slate-500">Ocena celu:</span>
-                          <span className={`font-semibold ${realism.color}`}>{realism.label}</span>
-                          <span className="text-slate-500">— {realism.explanation}</span>
+                    </div>
+                    {c.planned_tp !== null && (
+                      <div>
+                        <div className="text-[10px] uppercase tracking-widest text-slate-500 mb-1">Cel zysku (TP)</div>
+                        <div className="text-sm font-mono text-rldc-green-primary">{c.planned_tp?.toFixed(c.planned_tp > 10 ? 2 : 6)}</div>
+                      </div>
+                    )}
+                    {c.planned_sl !== null && (
+                      <div>
+                        <div className="text-[10px] uppercase tracking-widest text-slate-500 mb-1">Ochrona straty (SL)</div>
+                        <div className="text-sm font-mono text-rldc-red-primary">{c.planned_sl?.toFixed(c.planned_sl > 10 ? 2 : 6)}</div>
+                      </div>
+                    )}
+                    {c.is_hold && c.hold_target_eur !== undefined && (
+                      <div>
+                        <div className="text-[10px] uppercase tracking-widest text-slate-500 mb-1">Cel wyceny (HOLD)</div>
+                        <div className="text-sm font-mono text-rldc-orange-primary">
+                          {c.hold_target_eur} EUR
+                          {typeof c.hold_remaining_eur === 'number' && (
+                            <span className="text-[10px] text-slate-400 ml-1">(brakuje {c.hold_remaining_eur.toFixed(2)} EUR)</span>
+                          )}
                         </div>
-                      )}
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {/* Sekcja celu użytkownika — tylko gdy można liczyć wartość */}
+                {!isDust && (
+                  <div className="bg-[#0b121a] rounded-lg border border-rldc-dark-border/40 px-4 py-3 mb-3">
+                    <div className="flex items-center justify-between mb-2">
+                      <div className="text-[10px] uppercase tracking-widest text-slate-500">Twój cel wartości pozycji (EUR)</div>
+                      <button
+                        onClick={() => setGoalEdit(goalEdit === c.symbol ? null : c.symbol)}
+                        className="text-[10px] text-rldc-teal-primary hover:underline"
+                      >
+                        {goal ? 'Zmień' : 'Ustaw cel'}
+                      </button>
                     </div>
-                  ) : (
-                    <div className="text-xs text-slate-500">Nie ustawiono celu. Kliknij „Ustaw cel" aby śledzić dystans do wartości docelowej.</div>
-                  )}
-                </div>
+                    {goalEdit === c.symbol && (
+                      <div className="flex items-center gap-2 mb-2">
+                        <input
+                          type="number"
+                          min="0"
+                          step="0.01"
+                          placeholder="np. 300"
+                          value={goalInput[c.symbol] || ''}
+                          onChange={(e) => setGoalInput((p) => ({ ...p, [c.symbol]: e.target.value }))}
+                          className="w-28 px-2 py-1 text-xs rounded bg-rldc-dark-bg border border-rldc-dark-border text-slate-200 font-mono"
+                        />
+                        <button
+                          onClick={() => handleSaveGoal(c.symbol)}
+                          className="px-3 py-1 text-[10px] rounded bg-rldc-teal-primary/20 text-rldc-teal-primary hover:bg-rldc-teal-primary/30 transition"
+                        >
+                          Zapisz
+                        </button>
+                        {goal && (
+                          <button
+                            onClick={() => {
+                              fetch(`${getApiBase()}/api/positions/goal/${c.symbol}`, {
+                                method: 'DELETE',
+                                headers: withAdminToken(),
+                              }).catch(() => null)
+                              removeGoal(c.symbol)
+                              setGoals((p) => { const n = { ...p }; delete n[c.symbol]; return n })
+                              setGoalEdit(null)
+                            }}
+                            className="px-3 py-1 text-[10px] rounded bg-slate-500/10 text-slate-400 hover:bg-slate-500/20 transition"
+                          >
+                            Usuń
+                          </button>
+                        )}
+                      </div>
+                    )}
+                    {goal ? (
+                      <div className="space-y-1.5">
+                        <div className="flex items-center gap-4 flex-wrap text-sm">
+                          <span className="text-slate-300">Cel: <span className="font-mono font-bold text-slate-100">{goal.targetEur} EUR</span></span>
+                          {goalRemaining !== null && (
+                            <span className={`font-mono font-bold ${goalRemaining <= 0 ? 'text-rldc-green-primary' : 'text-yellow-400'}`}>
+                              {goalRemaining <= 0 ? '✓ Cel osiągnięty!' : `Brakuje: ${goalRemaining.toFixed(2)} EUR`}
+                            </span>
+                          )}
+                          {pctNeeded !== null && goalRemaining !== null && goalRemaining > 0 && (
+                            <span className="text-slate-400 text-xs">
+                              Potrzebny ruch: <span className="font-mono font-semibold text-slate-200">{pctNeeded > 0 ? '+' : ''}{pctNeeded.toFixed(1)}%</span>
+                            </span>
+                          )}
+                        </div>
+                        {realism && goalRemaining !== null && goalRemaining > 0 && (
+                          <div className="flex items-center gap-2 text-xs">
+                            <span className="text-slate-500">Ocena celu:</span>
+                            <span className={`font-semibold ${realism.color}`}>{realism.label}</span>
+                            <span className="text-slate-500">— {realism.explanation}</span>
+                          </div>
+                        )}
+                      </div>
+                    ) : (
+                      <div className="text-xs text-slate-500">Nie ustawiono celu. Kliknij „Ustaw cel" aby śledzić dystans do wartości docelowej.</div>
+                    )}
+                  </div>
+                )}
 
                 {/* Powody decyzji */}
-                <div className="bg-[#0b121a] rounded-lg border border-rldc-dark-border/50 px-4 py-3">
-                  <div className="text-[10px] uppercase tracking-widest text-slate-500 mb-2">Dlaczego system tak uważa</div>
+                <div className={`rounded-lg border px-4 py-3 ${isMissingEntry ? 'bg-yellow-500/5 border-yellow-500/20' : 'bg-[#0b121a] border-rldc-dark-border/50'}`}>
+                  <div className="text-[10px] uppercase tracking-widest text-slate-500 mb-2">
+                    {isValid ? 'Dlaczego system tak uważa' : 'Informacja o pozycji'}
+                  </div>
                   <ul className="space-y-1">
                     {(c.reasons || []).map((r: string, i: number) => (
-                      <li key={i} className="text-sm text-slate-300 flex items-start gap-2">
-                        <span className="text-rldc-teal-primary mt-0.5">•</span>
+                      <li key={i} className={`text-sm flex items-start gap-2 ${isMissingEntry ? 'text-yellow-200/80' : isDust ? 'text-slate-500' : 'text-slate-300'}`}>
+                        <span className={`mt-0.5 ${isMissingEntry ? 'text-yellow-500' : isDust ? 'text-slate-600' : 'text-rldc-teal-primary'}`}>•</span>
                         <span>{r}</span>
                       </li>
                     ))}
@@ -5420,19 +6630,22 @@ function PositionAnalysisView({ mode, onSymbolClick }: { mode: 'demo' | 'live'; 
                     )}
                   </ul>
                 </div>
-                {/* Co zrobić? */}
-                <div className={`mt-3 rounded-lg border px-4 py-3 ${decisionBg(c.decision)}`}>
-                  <div className="text-[10px] uppercase tracking-widest text-slate-500 mb-1">Co teraz zrobić?</div>
-                  <p className={`text-sm font-medium ${decisionColor(c.decision)}`}>
-                    {c.decision === 'TRZYMAJ'
-                      ? 'Nic nie rób. System uważa, że warto jeszcze poczekać — pozycja ma potencjał wzrostu.'
-                      : c.decision === 'SPRZEDAJ'
-                      ? 'Rozważ zamknięcie pozycji. System widzi dobry moment realizacji zysku lub chce ograniczyć ryzyko.'
-                      : c.decision === 'REDUKUJ'
-                      ? 'Rozważ częściowe wyjście. System widzi sygnały, że część zysku warto zabezpieczyć.'
-                      : 'Obserwuj sytuację. System nie widzi jeszcze wyraźnego sygnału — poczekaj na potwierdzenie.'}
-                  </p>
-                </div>
+
+                {/* Co zrobić? — TYLKO dla valid_position */}
+                {isValid && (
+                  <div className={`mt-3 rounded-lg border px-4 py-3 ${decisionBg(c.decision)}`}>
+                    <div className="text-[10px] uppercase tracking-widest text-slate-500 mb-1">Co teraz zrobić?</div>
+                    <p className={`text-sm font-medium ${decisionColor(c.decision)}`}>
+                      {c.decision === 'TRZYMAJ'
+                        ? 'Nic nie rób. System uważa, że warto jeszcze poczekać — pozycja ma potencjał wzrostu.'
+                        : c.decision === 'SPRZEDAJ'
+                          ? 'Rozważ zamknięcie pozycji. System widzi dobry moment realizacji zysku lub chce ograniczyć ryzyko.'
+                          : c.decision === 'REDUKUJ'
+                            ? 'Rozważ częściowe wyjście. System widzi sygnały, że część zysku warto zabezpieczyć.'
+                            : 'Obserwuj sytuację. System nie widzi jeszcze wyraźnego sygnału — poczekaj na potwierdzenie.'}
+                    </p>
+                  </div>
+                )}
               </div>
             </div>
           )
@@ -5441,7 +6654,6 @@ function PositionAnalysisView({ mode, onSymbolClick }: { mode: 'demo' | 'live'; 
     </div>
   )
 }
-
 
 function SettingsView({ activeView, mode }: { activeView: string, mode: 'demo' | 'live' }) {
   const isLogs = activeView === 'logs'
@@ -5519,20 +6731,28 @@ function SettingsView({ activeView, mode }: { activeView: string, mode: 'demo' |
           Wartość konta: {data?.total_equity?.toFixed(2) || '--'} EUR &nbsp;|&nbsp; Saldo: {data?.balance?.toFixed(2) || '--'} EUR
         </div>
         <div className="mt-4">
-          <div className="text-xs text-slate-500 mb-2">Admin token (opcjonalny, localStorage)</div>
-          <input
-            value={adminToken}
-            onChange={(e) => {
-              const v = e.target.value
-              setAdminToken(v)
-              if (typeof window !== 'undefined') {
-                if (v.trim()) localStorage.setItem(ADMIN_TOKEN_STORAGE_KEY, v.trim())
-                else localStorage.removeItem(ADMIN_TOKEN_STORAGE_KEY)
-              }
-            }}
-            placeholder="X-Admin-Token"
-            className="w-full max-w-md px-3 py-2 text-xs rounded bg-rldc-dark-bg border border-rldc-dark-border text-slate-200"
-          />
+          <div className="text-xs text-slate-500 mb-2">Admin token (opcjonalny, zapisany lokalnie)</div>
+          <div className="flex items-center gap-2 max-w-md">
+            <input
+              type="password"
+              value={adminToken}
+              onChange={(e) => {
+                const v = e.target.value
+                setAdminToken(v)
+                if (typeof window !== 'undefined') {
+                  if (v.trim()) localStorage.setItem(ADMIN_TOKEN_STORAGE_KEY, v.trim())
+                  else localStorage.removeItem(ADMIN_TOKEN_STORAGE_KEY)
+                }
+              }}
+              autoComplete="new-password"
+              placeholder="wprowadź token"
+              className="flex-1 px-3 py-2 text-xs rounded bg-rldc-dark-bg border border-rldc-dark-border text-slate-200"
+            />
+            {adminToken && (
+              <span className="text-[10px] text-rldc-green-primary shrink-0">zapisany</span>
+            )}
+          </div>
+          <div className="text-[10px] text-slate-600 mt-1">Token nie jest wyświetlany w trybie plain-text.</div>
         </div>
         <div className="mt-4 flex items-center gap-3">
           <button
@@ -5562,20 +6782,20 @@ function SettingsView({ activeView, mode }: { activeView: string, mode: 'demo' |
 
           <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
             <div className="terminal-card border border-rldc-dark-border rounded-lg px-4 py-3">
-              <div className="text-[10px] uppercase tracking-widest text-slate-500">DEMO — handel włączony</div>
+              <div className="text-[10px] uppercase tracking-widest text-slate-500">LIVE TRADING — handel włączony</div>
               <div className="mt-2 flex items-center gap-2">
                 <button
-                  onClick={() => postControl({ demo_trading_enabled: !Boolean(controlState?.data?.demo_trading_enabled) })}
+                  onClick={() => postControl({ allow_live_trading: !Boolean(controlState?.data?.live_trading_enabled) })}
                   className={`px-3 py-2 text-xs rounded border transition ${
-                    controlState?.data?.demo_trading_enabled
+                    controlState?.data?.live_trading_enabled
                       ? 'bg-rldc-green-primary/15 text-rldc-green-primary border-rldc-green-primary/20'
                       : 'bg-rldc-red-primary/15 text-rldc-red-primary border-rldc-red-primary/20'
                   }`}
                 >
-                  {controlState?.data?.demo_trading_enabled ? 'ON' : 'OFF'}
+                  {controlState?.data?.live_trading_enabled ? 'ON' : 'OFF'}
                 </button>
-                <div className="text-xs text-slate-500">
-                  updated: {String(controlState?.data?.updated_at || '--')}
+                <div className="text-[10px] text-slate-500">
+                  aktualizacja: {controlState?.data?.updated_at ? String(controlState.data.updated_at).replace('T', ' ').slice(0, 19) : '--'}
                 </div>
               </div>
             </div>
@@ -5613,7 +6833,7 @@ function SettingsView({ activeView, mode }: { activeView: string, mode: 'demo' |
             </div>
 
             <div className="terminal-card border border-rldc-dark-border rounded-lg px-4 py-3">
-              <div className="text-[10px] uppercase tracking-widest text-slate-500">Waluta kwotowania (DEMO)</div>
+              <div className="text-[10px] uppercase tracking-widest text-slate-500">Waluta kwotowania</div>
               <div className="mt-2 text-sm font-mono text-slate-200">{String(controlState?.data?.demo_quote_ccy || '--')}</div>
             </div>
           </div>

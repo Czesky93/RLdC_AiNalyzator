@@ -1,10 +1,20 @@
 /** @type {import('next').NextConfig} */
+const os = require('os')
+
+function getLanIps() {
+  const ifaces = os.networkInterfaces()
+  const ips = []
+  for (const iface of Object.values(ifaces)) {
+    for (const addr of iface) {
+      if (addr.family === 'IPv4' && !addr.internal) ips.push(addr.address)
+    }
+  }
+  return ips
+}
+
 const nextConfig = {
   reactStrictMode: true,
-  allowedDevOrigins: ['192.168.0.109'],
-  turbopack: {
-    root: __dirname,
-  },
+  allowedDevOrigins: getLanIps(),
   async rewrites() {
     return [
       {

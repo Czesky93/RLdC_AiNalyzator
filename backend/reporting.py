@@ -5,14 +5,12 @@ Reporting and analytics layer built on top of accounting and risk.
 from __future__ import annotations
 
 from collections import defaultdict
-from datetime import datetime, timezone
 from typing import Dict, List
 
 from sqlalchemy.orm import Session
 
 from backend.accounting import (
     blocked_decisions_summary,
-    compute_daily_performance,
     compute_demo_account_state,
     compute_risk_snapshot,
     compute_strategy_performance,
@@ -22,6 +20,7 @@ from backend.accounting import (
     summarize_positions,
 )
 from backend.database import (
+    AccountSnapshot,
     CostLedger,
     DecisionTrace,
     Order,
@@ -33,31 +32,105 @@ from backend.database import (
 )
 
 
+def _compute_overtrading_score(activity_gate_blocks: int, closed_orders: int) -> float:
+    """
+    Ratio 0..1: im więcej blokad aktywności względem zamkniętych transakcji,
+    tym większe ryzyko overtradingu.
+    """
+    if activity_gate_blocks <= 0:
+        return 0.0
+    base = max(int(closed_orders), 1)
+    return float(min(float(activity_gate_blocks) / float(base), 1.0))
+
+
+def _compute_gross_to_net_retention(gross_pnl: float, net_pnl: float) -> float:
+    """
+    Retencja 0..1: jaka część PnL brutto zostaje po kosztach.
+    Dla braku dodatniego brutto zwracamy 0, aby uniknąć mylących wartości.
+    """
+    if gross_pnl <= 0:
+        return 0.0
+    ratio = net_pnl / gross_pnl
+    return float(max(0.0, min(ratio, 1.0)))
+
+
 def performance_overview(db: Session, mode: str = "demo") -> Dict[str, object]:
     orders = db.query(Order).filter(Order.mode == mode, Order.status == "FILLED").all()
-    summary = summarize_orders(orders, db=db, label="overview")
+    closed_orders = [o for o in orders if (o.side or "").upper() == "SELL"]
+    summary = summarize_orders(closed_orders, db=db, label="overview")
     risk = compute_risk_snapshot(db, mode=mode)
     blocked = blocked_decisions_summary(db, mode=mode)
-    state = compute_demo_account_state(db) if mode == "demo" else None
+    if mode == "demo":
+        state = compute_demo_account_state(db)
+    else:
+        snap = (
+            db.query(AccountSnapshot)
+            .filter(AccountSnapshot.mode == mode)
+            .order_by(AccountSnapshot.timestamp.desc())
+            .first()
+        )
+        positions = (
+            db.query(Position)
+            .filter(Position.mode == mode, Position.exit_reason_code.is_(None))
+            .all()
+        )
+        positions_value = sum(
+            float(p.quantity or 0.0) * float(p.current_price or p.entry_price or 0.0)
+            for p in positions
+        )
+        equity = float(snap.equity or 0.0) if snap else positions_value
+        cash = float(snap.free_margin or 0.0) if snap else 0.0
+        state = {
+            "equity": equity,
+            "cash": cash,
+            "positions_value": positions_value,
+        }
 
     cooldown_count = (
         db.query(DecisionTrace)
-        .filter(DecisionTrace.mode == mode, DecisionTrace.reason_code.in_(["loss_streak_gate", "activity_gate_day", "activity_gate_symbol_hour"]))
+        .filter(
+            DecisionTrace.mode == mode,
+            DecisionTrace.reason_code.in_(
+                ["loss_streak_gate", "activity_gate_day", "activity_gate_symbol_hour"]
+            ),
+        )
         .count()
     )
     kill_switch_count = (
         db.query(DecisionTrace)
-        .filter(DecisionTrace.mode == mode, DecisionTrace.reason_code == "kill_switch_gate")
+        .filter(
+            DecisionTrace.mode == mode, DecisionTrace.reason_code == "kill_switch_gate"
+        )
         .count()
     )
+    activity_gate_blocks = (
+        db.query(DecisionTrace)
+        .filter(
+            DecisionTrace.mode == mode,
+            DecisionTrace.reason_code.in_(
+                ["activity_gate_day", "activity_gate_symbol_hour"]
+            ),
+        )
+        .count()
+    )
+    closed_orders = int(summary.get("closed_orders") or 0)
+    overtrading_score = _compute_overtrading_score(activity_gate_blocks, closed_orders)
+    gross_to_net_retention_ratio = _compute_gross_to_net_retention(
+        float(summary["gross_pnl"]),
+        float(summary["net_pnl"]),
+    )
+    gross_net_gap = float(summary["gross_pnl"]) - float(summary["net_pnl"])
+
     return {
         "mode": mode,
         "gross_pnl": summary["gross_pnl"],
         "net_pnl": summary["net_pnl"],
+        "gross_net_gap": gross_net_gap,
         "total_cost": summary["total_cost"],
         "fee_cost": summary["fee_cost"],
         "slippage_cost": summary["slippage_cost"],
         "spread_cost": summary["spread_cost"],
+        "closed_orders": closed_orders,
         "net_win_rate": summary["win_rate_net"],
         "net_expectancy": summary["net_expectancy"],
         "profit_factor_net": summary["profit_factor_net"],
@@ -65,13 +138,18 @@ def performance_overview(db: Session, mode: str = "demo") -> Dict[str, object]:
         "blocked_decisions_count": int(sum(blocked.values())),
         "cooldown_activations": cooldown_count,
         "kill_switch_activations": kill_switch_count,
+        "overtrading_activity_blocks": activity_gate_blocks,
+        "overtrading_score": overtrading_score,
+        "gross_to_net_retention_ratio": gross_to_net_retention_ratio,
         "cost_leakage_ratio": summary["cost_leakage_ratio"],
         "risk_snapshot": risk,
         "account_state": state,
     }
 
 
-def daily_performance_report(db: Session, mode: str = "demo") -> List[Dict[str, object]]:
+def daily_performance_report(
+    db: Session, mode: str = "demo"
+) -> List[Dict[str, object]]:
     orders = db.query(Order).filter(Order.mode == mode, Order.status == "FILLED").all()
     grouped: Dict[str, List[Order]] = defaultdict(list)
     for order in orders:
@@ -81,14 +159,20 @@ def daily_performance_report(db: Session, mode: str = "demo") -> List[Dict[str, 
     blocked_by_day: Dict[str, int] = defaultdict(int)
     traces = db.query(DecisionTrace).filter(DecisionTrace.mode == mode).all()
     for trace in traces:
-        if "SKIP" in (trace.action_type or "").upper() or "BLOCK" in (trace.action_type or "").upper() or "REJECT" in (trace.action_type or "").upper():
+        if (
+            "SKIP" in (trace.action_type or "").upper()
+            or "BLOCK" in (trace.action_type or "").upper()
+            or "REJECT" in (trace.action_type or "").upper()
+        ):
             ts = trace.timestamp or utc_now_naive()
             blocked_by_day[ts.date().isoformat()] += 1
 
     cost_by_day: Dict[str, float] = defaultdict(float)
     for ledger in db.query(CostLedger).all():
         ts = ledger.timestamp or utc_now_naive()
-        cost_by_day[ts.date().isoformat()] += float(ledger.actual_value or ledger.expected_value or 0.0)
+        cost_by_day[ts.date().isoformat()] += float(
+            ledger.actual_value or ledger.expected_value or 0.0
+        )
 
     result = []
     for day, items in sorted(grouped.items()):
@@ -112,13 +196,26 @@ def reason_code_breakdown(db: Session, mode: str = "demo") -> List[Dict[str, obj
 
 
 def cost_breakdown_by_type(db: Session, mode: str = "demo") -> List[Dict[str, object]]:
-    orders = {int(o.id) for o in db.query(Order).filter(Order.mode == mode, Order.status == "FILLED").all() if o.id is not None}
+    orders = {
+        int(o.id)
+        for o in db.query(Order)
+        .filter(Order.mode == mode, Order.status == "FILLED")
+        .all()
+        if o.id is not None
+    }
     totals: Dict[str, float] = defaultdict(float)
     for row in db.query(CostLedger).all():
         if row.order_id is not None and int(row.order_id) not in orders:
             continue
-        totals[row.cost_type] += float(row.actual_value if row.actual_value is not None else row.expected_value or 0.0)
-    return [{"cost_type": key, "total_cost": value} for key, value in sorted(totals.items(), key=lambda item: item[1], reverse=True)]
+        totals[row.cost_type] += float(
+            row.actual_value
+            if row.actual_value is not None
+            else row.expected_value or 0.0
+        )
+    return [
+        {"cost_type": key, "total_cost": value}
+        for key, value in sorted(totals.items(), key=lambda item: item[1], reverse=True)
+    ]
 
 
 def risk_effectiveness_report(db: Session, mode: str = "demo") -> Dict[str, object]:
@@ -159,13 +256,20 @@ def config_snapshot_report(db: Session, mode: str = "demo") -> List[Dict[str, ob
     return result
 
 
-def config_snapshot_payload_report(db: Session, snapshot_id: str) -> Dict[str, object] | None:
+def config_snapshot_payload_report(
+    db: Session, snapshot_id: str
+) -> Dict[str, object] | None:
     return get_config_snapshot(db, snapshot_id)
 
 
-def config_snapshot_compare_report(db: Session, snapshot_a: str, snapshot_b: str, mode: str = "demo") -> Dict[str, object]:
+def config_snapshot_compare_report(
+    db: Session, snapshot_a: str, snapshot_b: str, mode: str = "demo"
+) -> Dict[str, object]:
     comparison = compare_config_snapshots(db, snapshot_a, snapshot_b)
-    grouped = {item.get("config_snapshot_id"): item for item in config_snapshot_report(db, mode=mode)}
+    grouped = {
+        item.get("config_snapshot_id"): item
+        for item in config_snapshot_report(db, mode=mode)
+    }
     comparison["performance_a"] = grouped.get(snapshot_a)
     comparison["performance_b"] = grouped.get(snapshot_b)
     comparison["mode"] = mode

@@ -1,18 +1,21 @@
 """
 Binance REST API Client for RLdC Trading Bot
 """
+
+import hashlib
+import hmac
+import logging
+import math
 import os
 import time
-import hmac
-import hashlib
-from typing import List, Dict, Optional, Any
-from urllib.parse import urlencode, quote
+from functools import lru_cache
+from typing import Any, Dict, List, Optional
+from urllib.parse import quote, urlencode
+
 import requests
 from binance.client import Client
 from binance.exceptions import BinanceAPIException, BinanceRequestException
 from dotenv import load_dotenv
-import logging
-from functools import lru_cache
 
 _ENV_PATH = os.path.join(os.path.dirname(__file__), "..", ".env")
 load_dotenv(dotenv_path=_ENV_PATH, override=False)
@@ -48,7 +51,10 @@ def _binance_retry(func):
                 if code in _TRANSIENT_CODES and attempt < _MAX_RETRIES:
                     logger.warning(
                         "⏳ Binance rate limit / przeciążenie (kod %s), próba %d/%d, czekam %.0fs…",
-                        code, attempt, _MAX_RETRIES, delay,
+                        code,
+                        attempt,
+                        _MAX_RETRIES,
+                        delay,
                     )
                     time.sleep(delay)
                     delay *= 2
@@ -58,7 +64,10 @@ def _binance_retry(func):
                 if attempt < _MAX_RETRIES:
                     logger.warning(
                         "⏳ Błąd sieciowy Binance, próba %d/%d, czekam %.0fs… (%s)",
-                        attempt, _MAX_RETRIES, delay, exc,
+                        attempt,
+                        _MAX_RETRIES,
+                        delay,
+                        exc,
                     )
                     time.sleep(delay)
                     delay *= 2
@@ -71,11 +80,11 @@ def _binance_retry(func):
 
 class BinanceClient:
     """Klient REST API Binance z obsługą błędów i rate limiting"""
-    
+
     def __init__(self, api_key: Optional[str] = None, api_secret: Optional[str] = None):
         """
         Inicjalizacja klienta Binance
-        
+
         Args:
             api_key: Klucz API Binance (opcjonalny dla publicznych danych)
             api_secret: Sekret API Binance (opcjonalny dla publicznych danych)
@@ -83,14 +92,16 @@ class BinanceClient:
         self.api_key = api_key or os.getenv("BINANCE_API_KEY", "")
         self.api_secret = api_secret or os.getenv("BINANCE_API_SECRET", "")
         self.time_offset_ms = 0
-        
+
         # Inicjalizacja klienta - działa bez kluczy dla publicznych danych
         if self.api_key and self.api_secret:
             self.client = Client(self.api_key, self.api_secret)
             logger.info("✅ Binance client initialized with API keys")
         else:
             self.client = Client()
-            logger.info("⚠️  Binance client initialized without API keys (public data only)")
+            logger.info(
+                "⚠️  Binance client initialized without API keys (public data only)"
+            )
 
         self._sync_time()
 
@@ -99,7 +110,9 @@ class BinanceClient:
         try:
             server_time = self.client.get_server_time()
             local_ms = int(time.time() * 1000)
-            self.time_offset_ms = int(server_time.get("serverTime", local_ms)) - local_ms
+            self.time_offset_ms = (
+                int(server_time.get("serverTime", local_ms)) - local_ms
+            )
             # python-binance używa timestamp_offset w częściach klienta
             try:
                 self.client.timestamp_offset = self.time_offset_ms
@@ -107,27 +120,24 @@ class BinanceClient:
                 pass
         except Exception as exc:
             logger.warning(f"⚠️  Cannot sync Binance server time: {str(exc)}")
-    
+
     @_binance_retry
     def get_ticker_price(self, symbol: str) -> Optional[Dict]:
         """
         Pobierz aktualną cenę symbolu
-        
+
         Args:
             symbol: Symbol (np. BTCUSDT)
-        
+
         Returns:
             Dict z ceną lub None w przypadku błędu
         """
         try:
             ticker = self.client.get_symbol_ticker(symbol=symbol)
-            return {
-                "symbol": ticker["symbol"],
-                "price": float(ticker["price"])
-            }
+            return {"symbol": ticker["symbol"], "price": float(ticker["price"])}
         except BinanceAPIException as e:
             # -1121 = Invalid symbol — normalny fallback przy sprawdzaniu par, logujemy na DEBUG
-            if getattr(e, 'code', None) == -1121:
+            if getattr(e, "code", None) == -1121:
                 logger.debug(f"⚠️ Symbol {symbol} nie istnieje na Binance (fallback)")
             else:
                 logger.error(f"❌ Binance API error for {symbol}: {e.message}")
@@ -138,83 +148,79 @@ class BinanceClient:
         except Exception as e:
             logger.error(f"❌ Unexpected error getting ticker for {symbol}: {str(e)}")
             return None
-    
+
     def get_all_tickers(self) -> List[Dict]:
         """
         Pobierz ceny wszystkich symboli
-        
+
         Returns:
             Lista słowników z cenami
         """
         try:
             tickers = self.client.get_all_tickers()
             return [
-                {"symbol": t["symbol"], "price": float(t["price"])}
-                for t in tickers
+                {"symbol": t["symbol"], "price": float(t["price"])} for t in tickers
             ]
         except Exception as e:
             logger.error(f"❌ Error getting all tickers: {str(e)}")
             return []
-    
+
     @_binance_retry
     def get_klines(
-        self, 
-        symbol: str, 
-        interval: str = "1h", 
-        limit: int = 100
+        self, symbol: str, interval: str = "1h", limit: int = 100
     ) -> Optional[List[Dict]]:
         """
         Pobierz dane świecowe (OHLCV)
-        
+
         Args:
             symbol: Symbol (np. BTCUSDT)
             interval: Timeframe (1m, 5m, 15m, 1h, 4h, 1d)
             limit: Liczba świec (max 1000)
-        
+
         Returns:
             Lista świec lub None w przypadku błędu
         """
         try:
             klines = self.client.get_klines(
-                symbol=symbol,
-                interval=interval,
-                limit=limit
+                symbol=symbol, interval=interval, limit=limit
             )
-            
+
             result = []
             for k in klines:
-                result.append({
-                    "open_time": k[0],
-                    "open": float(k[1]),
-                    "high": float(k[2]),
-                    "low": float(k[3]),
-                    "close": float(k[4]),
-                    "volume": float(k[5]),
-                    "close_time": k[6],
-                    "quote_volume": float(k[7]),
-                    "trades": int(k[8]),
-                    "taker_buy_base": float(k[9]),
-                    "taker_buy_quote": float(k[10])
-                })
-            
+                result.append(
+                    {
+                        "open_time": k[0],
+                        "open": float(k[1]),
+                        "high": float(k[2]),
+                        "low": float(k[3]),
+                        "close": float(k[4]),
+                        "volume": float(k[5]),
+                        "close_time": k[6],
+                        "quote_volume": float(k[7]),
+                        "trades": int(k[8]),
+                        "taker_buy_base": float(k[9]),
+                        "taker_buy_quote": float(k[10]),
+                    }
+                )
+
             return result
-            
+
         except BinanceAPIException as e:
             logger.error(f"❌ Binance API error for klines {symbol}: {e.message}")
             return None
         except Exception as e:
             logger.error(f"❌ Error getting klines for {symbol}: {str(e)}")
             return None
-    
+
     @_binance_retry
     def get_orderbook(self, symbol: str, limit: int = 20) -> Optional[Dict]:
         """
         Pobierz orderbook (księgę zleceń)
-        
+
         Args:
             symbol: Symbol (np. BTCUSDT)
             limit: Głębokość (5, 10, 20, 50, 100, 500, 1000)
-        
+
         Returns:
             Dict z bids i asks lub None w przypadku błędu
         """
@@ -224,24 +230,24 @@ class BinanceClient:
                 "symbol": symbol,
                 "bids": [[float(b[0]), float(b[1])] for b in orderbook["bids"][:limit]],
                 "asks": [[float(a[0]), float(a[1])] for a in orderbook["asks"][:limit]],
-                "timestamp": orderbook.get("lastUpdateId")
+                "timestamp": orderbook.get("lastUpdateId"),
             }
         except Exception as e:
             logger.error(f"❌ Error getting orderbook for {symbol}: {str(e)}")
             return None
-    
+
     def get_account_info(self) -> Optional[Dict]:
         """
         Pobierz informacje o koncie (wymaga API keys)
         TRYB LIVE - READ ONLY
-        
+
         Returns:
             Dict z informacjami o koncie lub None
         """
         if not self.api_key or not self.api_secret:
             logger.warning("⚠️  Cannot get account info without API keys")
             return None
-        
+
         try:
             try:
                 account = self.client.get_account(recvWindow=5000)
@@ -252,42 +258,44 @@ class BinanceClient:
                     account = self.client.get_account(recvWindow=5000)
                 else:
                     raise
-            
+
             # Parse balances
             balances = []
             for bal in account["balances"]:
                 free = float(bal["free"])
                 locked = float(bal["locked"])
                 if free > 0 or locked > 0:
-                    balances.append({
-                        "asset": bal["asset"],
-                        "free": free,
-                        "locked": locked,
-                        "total": free + locked
-                    })
-            
+                    balances.append(
+                        {
+                            "asset": bal["asset"],
+                            "free": free,
+                            "locked": locked,
+                            "total": free + locked,
+                        }
+                    )
+
             return {
                 "can_trade": account.get("canTrade", False),
                 "can_withdraw": account.get("canWithdraw", False),
                 "can_deposit": account.get("canDeposit", False),
                 "balances": balances,
-                "update_time": account.get("updateTime")
+                "update_time": account.get("updateTime"),
             }
-            
+
         except BinanceAPIException as e:
             logger.error(f"❌ Binance API error getting account: {e.message}")
             return None
         except Exception as e:
             logger.error(f"❌ Error getting account info: {str(e)}")
             return None
-    
+
     def get_24hr_ticker(self, symbol: str) -> Optional[Dict]:
         """
         Pobierz statystyki 24h dla symbolu
-        
+
         Args:
             symbol: Symbol (np. BTCUSDT)
-        
+
         Returns:
             Dict ze statystykami lub None
         """
@@ -309,13 +317,15 @@ class BinanceClient:
                 "quote_volume": float(ticker["quoteVolume"]),
                 "open_time": ticker["openTime"],
                 "close_time": ticker["closeTime"],
-                "count": ticker["count"]
+                "count": ticker["count"],
             }
         except Exception as e:
             logger.error(f"❌ Error getting 24h ticker for {symbol}: {str(e)}")
             return None
 
-    def _signed_request(self, base_url: str, path: str, params: Optional[Dict[str, Any]] = None) -> Optional[Any]:
+    def _signed_request(
+        self, base_url: str, path: str, params: Optional[Dict[str, Any]] = None
+    ) -> Optional[Any]:
         if not self.api_key or not self.api_secret:
             logger.warning("⚠️  Cannot call signed endpoint without API keys")
             return None
@@ -325,7 +335,7 @@ class BinanceClient:
         signature = hmac.new(
             self.api_secret.encode("utf-8"),
             query_string.encode("utf-8"),
-            hashlib.sha256
+            hashlib.sha256,
         ).hexdigest()
         url = f"{base_url}{path}?{query_string}&signature={signature}"
         headers = {"X-MBX-APIKEY": self.api_key}
@@ -338,13 +348,19 @@ class BinanceClient:
             return None
 
     def get_simple_earn_account(self) -> Optional[Dict]:
-        return self._signed_request("https://api.binance.com", "/sapi/v1/simple-earn/account")
+        return self._signed_request(
+            "https://api.binance.com", "/sapi/v1/simple-earn/account"
+        )
 
     def get_simple_earn_flexible_positions(self) -> Optional[Dict]:
-        return self._signed_request("https://api.binance.com", "/sapi/v1/simple-earn/flexible/position")
+        return self._signed_request(
+            "https://api.binance.com", "/sapi/v1/simple-earn/flexible/position"
+        )
 
     def get_simple_earn_locked_positions(self) -> Optional[Dict]:
-        return self._signed_request("https://api.binance.com", "/sapi/v1/simple-earn/locked/position")
+        return self._signed_request(
+            "https://api.binance.com", "/sapi/v1/simple-earn/locked/position"
+        )
 
     def get_futures_balance(self) -> Optional[Any]:
         return self._signed_request("https://fapi.binance.com", "/fapi/v2/balance")
@@ -356,7 +372,9 @@ class BinanceClient:
         if not symbol:
             return None
         params = {"symbol": symbol, "limit": limit}
-        return self._signed_request("https://api.binance.com", "/api/v3/myTrades", params=params)
+        return self._signed_request(
+            "https://api.binance.com", "/api/v3/myTrades", params=params
+        )
 
     def get_avg_buy_price(self, symbol: str) -> Optional[float]:
         trades = self.get_my_trades(symbol)
@@ -421,6 +439,7 @@ class BinanceClient:
         order_type: str = "MARKET",
         quantity: float = 0.0,
         price: Optional[float] = None,
+        quote_qty: float = 0.0,
     ) -> Optional[Dict]:
         """
         Złóż zlecenie na Binance (wymaga API keys).
@@ -429,17 +448,22 @@ class BinanceClient:
             symbol:     Para walutowa (np. BTCEUR)
             side:       'BUY' lub 'SELL'
             order_type: 'MARKET' lub 'LIMIT'
-            quantity:   Ilość base asset
+            quantity:   Ilość base asset (alternatywnie użyj quote_qty)
             price:      Cena (tylko dla LIMIT)
+            quote_qty:  Kwota quote currency do wydania (np. EUR) — dla market buy
 
         Returns:
             Dict z odpowiedzią Binance lub None przy błędzie.
         """
         if not self.api_key or not self.api_secret:
-            logger.error("❌ place_order: brak kluczy API — ustaw BINANCE_API_KEY i BINANCE_API_SECRET")
+            logger.error(
+                "❌ place_order: brak kluczy API — ustaw BINANCE_API_KEY i BINANCE_API_SECRET"
+            )
             return None
-        if quantity <= 0:
-            logger.error(f"❌ place_order: nieprawidłowa ilość {quantity}")
+        if quantity <= 0 and quote_qty <= 0:
+            logger.error(
+                f"❌ place_order: nieprawidłowa ilość {quantity} / quote_qty={quote_qty}"
+            )
             return None
 
         try:
@@ -447,8 +471,22 @@ class BinanceClient:
                 "symbol": symbol,
                 "side": side,
                 "type": order_type,
-                "quantity": quantity,
             }
+            if quote_qty > 0:
+                kwargs["quoteOrderQty"] = round(quote_qty, 2)
+            else:
+                # Zaokrąglij qty do step_size (LOT_SIZE filter) — zapobiega odrzuceniu przez Binance
+                try:
+                    sym_info = (self.get_allowed_symbols() or {}).get(symbol, {})
+                    step = float(sym_info.get("step_size") or 0)
+                    if step > 0:
+                        quantity = math.floor(quantity / step) * step
+                        # Normalizacja: usuń błędy zmiennoprzecinkowe
+                        decimals = max(0, -int(math.floor(math.log10(step))))
+                        quantity = round(quantity, decimals)
+                except Exception:
+                    pass
+                kwargs["quantity"] = quantity
             if order_type == "LIMIT":
                 if price is None:
                     logger.error("❌ place_order: LIMIT wymaga ceny")
@@ -467,11 +505,24 @@ class BinanceClient:
                     result = self.client.create_order(**kwargs)
                 else:
                     raise
-            logger.info(f"✅ Zlecenie Binance: {side} {quantity} {symbol} → orderId={result.get('orderId')}")
+            _log_qty = (
+                quantity
+                if quantity > 0
+                else f"quoteQty={kwargs.get('quoteOrderQty', 0)}"
+            )
+            logger.info(
+                f"✅ Zlecenie Binance: {side} {_log_qty} {symbol} → orderId={result.get('orderId')}"
+            )
             return result
         except BinanceAPIException as e:
-            logger.error(f"❌ Binance API error place_order {symbol}: code={e.status_code} msg={e.message}")
-            return {"_error": True, "error_code": e.status_code, "error_message": e.message}
+            logger.error(
+                f"❌ Binance API error place_order {symbol}: code={e.status_code} msg={e.message}"
+            )
+            return {
+                "_error": True,
+                "error_code": e.status_code,
+                "error_message": e.message,
+            }
         except Exception as e:
             logger.error(f"❌ place_order nieoczekiwany błąd {symbol}: {str(e)}")
             return None
@@ -486,11 +537,17 @@ class BinanceClient:
         if not self.api_key or not self.api_secret:
             return None
         try:
-            order = self.client.get_order(symbol=symbol, orderId=order_id, recvWindow=5000)
+            order = self.client.get_order(
+                symbol=symbol, orderId=order_id, recvWindow=5000
+            )
             fills = order.get("fills", [])
             exec_price = float(order.get("cummulativeQuoteQty", 0) or 0)
             exec_qty = float(order.get("executedQty", 0) or 0)
-            avg_price = exec_price / exec_qty if exec_qty > 0 else float(order.get("price", 0) or 0)
+            avg_price = (
+                exec_price / exec_qty
+                if exec_qty > 0
+                else float(order.get("price", 0) or 0)
+            )
             total_fee = sum(float(f.get("commission", 0)) for f in fills)
             fee_asset = fills[0].get("commissionAsset", "") if fills else ""
             return {
@@ -510,7 +567,9 @@ class BinanceClient:
     _allowed_cache_ts: float = 0.0
     _ALLOWED_TTL: float = 300.0  # 5 minut
 
-    def get_allowed_symbols(self, quotes: Optional[List[str]] = None) -> Dict[str, Dict]:
+    def get_allowed_symbols(
+        self, quotes: Optional[List[str]] = None
+    ) -> Dict[str, Dict]:
         """
         Pobierz zestaw symboli SPOT dozwolonych do handlu na giełdzie Binance.
         Buforuje wynik na 5 minut (exchangeInfo zmienia się rzadko).
@@ -523,7 +582,10 @@ class BinanceClient:
             Dict[symbol, {base_asset, quote_asset, min_qty, step_size, min_notional}]
         """
         now = time.time()
-        if self._allowed_cache_data is not None and (now - self._allowed_cache_ts) < self._ALLOWED_TTL:
+        if (
+            self._allowed_cache_data is not None
+            and (now - self._allowed_cache_ts) < self._ALLOWED_TTL
+        ):
             data = self._allowed_cache_data
         else:
             data = self._fetch_exchange_info()
@@ -579,7 +641,9 @@ class BinanceClient:
                     "step_size": step_size,
                     "min_notional": min_notional,
                 }
-            logger.info(f"✅ ExchangeInfo: {len(result)} aktywnych symboli SPOT załadowanych")
+            logger.info(
+                f"✅ ExchangeInfo: {len(result)} aktywnych symboli SPOT załadowanych"
+            )
             return result
         except Exception as exc:
             logger.error(f"❌ Błąd pobierania exchangeInfo: {str(exc)}")
@@ -605,12 +669,14 @@ class BinanceClient:
                 free = float(bal.get("free", 0))
                 locked = float(bal.get("locked", 0))
                 if free > 0 or locked > 0:
-                    balances.append({
-                        "asset": bal.get("asset"),
-                        "free": free,
-                        "locked": locked,
-                        "total": free + locked,
-                    })
+                    balances.append(
+                        {
+                            "asset": bal.get("asset"),
+                            "free": free,
+                            "locked": locked,
+                            "total": free + locked,
+                        }
+                    )
             return balances
         except Exception as e:
             logger.error(f"❌ Error getting balances: {str(e)}")
@@ -619,6 +685,7 @@ class BinanceClient:
 
 # Singleton instance
 _binance_client = None
+
 
 def get_binance_client() -> BinanceClient:
     """Get singleton Binance client instance"""
@@ -631,21 +698,21 @@ def get_binance_client() -> BinanceClient:
 if __name__ == "__main__":
     # Test
     logging.basicConfig(level=logging.INFO)
-    
+
     client = BinanceClient()
-    
+
     # Test ticker
     print("\n📊 Test: Pobieranie ceny BTC")
     btc = client.get_ticker_price("BTCUSDT")
     print(f"BTC/USDT: ${btc['price']}" if btc else "❌ Błąd")
-    
+
     # Test klines
     print("\n📈 Test: Pobieranie świec BTC (1h)")
     klines = client.get_klines("BTCUSDT", "1h", 5)
     if klines:
         print(f"Pobrano {len(klines)} świec")
         print(f"Ostatnia: Close=${klines[-1]['close']}")
-    
+
     # Test orderbook
     print("\n📖 Test: Orderbook BTC")
     ob = client.get_orderbook("BTCUSDT", 5)

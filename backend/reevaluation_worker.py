@@ -38,6 +38,9 @@ from backend.post_promotion_monitoring import evaluate_monitoring
 from backend.post_rollback_monitoring import evaluate_post_rollback_monitoring
 
 logger = logging.getLogger(__name__)
+_QUEUE_ALERT_THROTTLE = int(os.getenv("TELEGRAM_ALERT_DEDUP_SECONDS", "300") or 300)
+_LAST_QUEUE_ALERT_SIGNATURE: str = ""
+_LAST_QUEUE_ALERT_TS: float = 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -213,12 +216,21 @@ def _step_refresh_operator_queue(db) -> Dict[str, Any]:
         # Powiadom jeśli jest coś krytycznego
         if critical_count > 0 or sla_breached > 0:
             try:
-                dispatch_notification(
-                    "worker_queue_alert",
-                    f"⚙️ WORKER: Operator queue — {len(queue)} elementów, "
-                    f"critical: {critical_count}, SLA breached: {sla_breached}",
-                    priority="high",
-                )
+                global _LAST_QUEUE_ALERT_SIGNATURE, _LAST_QUEUE_ALERT_TS
+                signature = f"{len(queue)}:{critical_count}:{sla_breached}"
+                now = time.monotonic()
+                if (
+                    signature != _LAST_QUEUE_ALERT_SIGNATURE
+                    or (now - _LAST_QUEUE_ALERT_TS) >= _QUEUE_ALERT_THROTTLE
+                ):
+                    dispatch_notification(
+                        "worker_queue_alert",
+                        f"⚙️ WORKER: Operator queue — {len(queue)} elementów, "
+                        f"critical: {critical_count}, SLA breached: {sla_breached}",
+                        priority="high" if critical_count or sla_breached else "medium",
+                    )
+                    _LAST_QUEUE_ALERT_SIGNATURE = signature
+                    _LAST_QUEUE_ALERT_TS = now
             except Exception as exc:
                 logger.error("Błąd wysyłki powiadomienia queue: %s", exc)
 

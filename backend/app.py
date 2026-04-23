@@ -1,29 +1,40 @@
 """
 Main FastAPI application for RLdC Trading Bot
 """
+
 import logging
+import os
+import signal
+import subprocess
+import sys
+import threading
+import time
+import time as _time_module
+from contextlib import asynccontextmanager
+from datetime import datetime, timezone
+
+_startup_time = _time_module.time()
+
+from dotenv import load_dotenv
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from contextlib import asynccontextmanager
-import threading
-import os
-import sys
-import subprocess
-import signal
-import time
-from dotenv import load_dotenv
+
+from backend import tunnel_manager as _tunnel_mgr
+from backend.collector import DataCollector
 
 # Import database
 from backend.database import init_db
-
-# Import routers
-from backend.routers import market, portfolio, orders, signals, account, positions, blog, control
-from backend.routers import telegram_intel
-from backend.routers import debug as debug_router
-from backend.collector import DataCollector
 from backend.reevaluation_worker import start_worker, stop_worker
 
+# Import routers
+from backend.routers import account, blog, control, dashboard
+from backend.routers import debug as debug_router
+from backend.routers import market, orders, portfolio, positions, signals
+from backend.routers import system as system_router
+from backend.routers import telegram_intel
+
 _ENV_PATH = os.path.join(os.path.dirname(__file__), "..", ".env")
+# Nie nadpisuj zmiennych już ustawionych przez środowisko (np. pytest).
 load_dotenv(dotenv_path=_ENV_PATH, override=False)
 
 
@@ -45,6 +56,62 @@ async def lifespan(app: FastAPI):
     worker_started = False
     if not disable_collector:
         worker_started = start_worker()
+
+    # Warm-up cache portfela i scannera w tle (pierwsze otwarcie strony szybkie)
+    def _warmup_caches():
+        try:
+            import time as _time
+
+            _time.sleep(8)  # poczekaj aż kolektor i DB się zainicjalizują
+            from backend.database import SessionLocal
+            from backend.routers.market import (
+                _scanner_cache,
+                _scanner_cache_lock,
+                _scanner_cache_ts,
+                _scanner_cache_ttl,
+                _score_symbol,
+            )
+            from backend.routers.portfolio import _build_live_spot_portfolio
+
+            db = SessionLocal()
+            try:
+                _build_live_spot_portfolio(db)
+            except Exception:
+                pass
+            finally:
+                db.close()
+        except Exception:
+            pass
+
+    warmup_thread = threading.Thread(target=_warmup_caches, daemon=True)
+    warmup_thread.start()
+
+    # Reconcile przy starcie aplikacji (tylko LIVE, w tle)
+    def _startup_reconcile():
+        try:
+            import time as _time
+
+            _time.sleep(15)  # Poczekaj aż Binance client się zainicjalizuje
+            from backend.portfolio_reconcile import run_reconcile_cycle
+
+            trading_mode = os.getenv("TRADING_MODE", "demo").lower()
+            if trading_mode == "live":
+                run_reconcile_cycle(mode="live", trigger="startup", force=True)
+        except Exception as exc:
+            logger.warning("Startup reconcile error: %s", exc)
+
+    if not disable_collector:
+        reconcile_startup_thread = threading.Thread(
+            target=_startup_reconcile, daemon=True
+        )
+        reconcile_startup_thread.start()
+
+    # Sprawdź / napraw tunnel publiczny przy starcie (w tle, nie blokuje API)
+    tunnel_startup_thread = threading.Thread(
+        target=_tunnel_mgr.startup_ensure, daemon=True
+    )
+    tunnel_startup_thread.start()
+
     print("✅ API gotowe do użycia")
     yield
     # Shutdown
@@ -72,8 +139,10 @@ app = FastAPI(
 
 # CORS middleware - pozwala na łączenie z frontendem
 _CORS_ORIGINS = [
-    o.strip() for o in
-    os.getenv("CORS_ALLOW_ORIGINS", "http://localhost:3000,http://192.168.0.109:3000").split(",")
+    o.strip()
+    for o in os.getenv(
+        "CORS_ALLOW_ORIGINS", "http://localhost:3000,http://192.168.0.109:3000"
+    ).split(",")
     if o.strip()
 ]
 app.add_middleware(
@@ -93,18 +162,115 @@ async def root():
         "status": "online",
         "service": "RLdC Trading Bot API",
         "version": "0.7.0-beta",
-        "message": "API działa poprawnie ✅"
+        "message": "API działa poprawnie ✅",
     }
 
 
 @app.get("/health")
 async def health_check():
-    """Health check endpoint"""
+    """Health check endpoint — stan backendu, Binance, AI i uptime."""
+    import time as _time
+
+    from backend.database import SessionLocal
+
+    uptime: float = 0.0
+    try:
+        uptime = _time.time() - _startup_time
+    except Exception:
+        pass
+
+    # Binance connectivity
+    binance_status = "unknown"
+    try:
+        from backend.binance_client import BinanceClient
+
+        _bc = BinanceClient()
+        # Sprawdź czas serwera (minimalne zapytanie)
+        _ticker = _bc.get_ticker_price("BTCEUR")
+        binance_status = "ok" if _ticker else "no_data"
+    except Exception as _e:
+        binance_status = f"error: {type(_e).__name__}"
+
+    # DB connectivity
+    db_status = "unknown"
+    try:
+        db = SessionLocal()
+        db.execute(__import__("sqlalchemy").text("SELECT 1"))
+        db.close()
+        db_status = "connected"
+    except Exception as _e:
+        db_status = f"error: {type(_e).__name__}"
+
+    # AI provider status — użyj statusu z cache orchestratora
+    ai_status = os.getenv("AI_PROVIDER", "heuristic")
+    ai_local_enabled = None
+    ai_local_configured = None
+    ai_local_reachable = None
+    ai_local_selected = None
+    ai_local_last_error = None
+    ai_local_last_healthcheck = None
+    ai_local_latency_ms = None
+    ai_local_model = None
+    ai_local_endpoint = None
+    ai_local_model_installed = None
+    try:
+        from backend.ai_orchestrator import get_ai_orchestrator_status as _ai_status_fn
+
+        _ai = _ai_status_fn(force=False)
+        ai_status = _ai.get("primary") or os.getenv("AI_PROVIDER", "heuristic")
+        ai_local_enabled = _ai.get("local_ai_enabled")
+        ai_local_configured = _ai.get("local_ai_configured")
+        ai_local_reachable = _ai.get("local_ai_reachable")
+        ai_local_selected = _ai.get("local_ai_selected")
+        ai_local_last_error = _ai.get("local_ai_last_error")
+        ai_local_last_healthcheck = _ai.get("local_ai_last_healthcheck")
+        ai_local_latency_ms = _ai.get("local_ai_latency_ms")
+        ai_local_model = _ai.get("local_ai_model")
+        ai_local_endpoint = _ai.get("local_ai_endpoint")
+        ai_local_model_installed = _ai.get("local_ai_model_installed")
+    except Exception:
+        pass
+
+    # Collector / bot running
+    collector_running = False
+    try:
+        collector_running = (
+            hasattr(app.state, "collector")
+            and app.state.collector is not None
+            and getattr(app.state.collector, "running", False)
+        )
+    except Exception:
+        pass
+
     return {
-        "status": "healthy",
-        "database": "connected",
-        "timestamp": "2026-01-31T17:30:00Z"
+        "backend": "ok",
+        "database": db_status,
+        "binance": binance_status,
+        "ai": ai_status,
+        "local_ai": {
+            "enabled": ai_local_enabled,
+            "configured": ai_local_configured,
+            "reachable": ai_local_reachable,
+            "selected": ai_local_selected,
+            "model": ai_local_model,
+            "model_installed": ai_local_model_installed,
+            "endpoint": ai_local_endpoint,
+            "latency_ms": ai_local_latency_ms,
+            "last_error": ai_local_last_error,
+            "last_healthcheck": ai_local_last_healthcheck,
+        },
+        "collector": "running" if collector_running else "stopped",
+        "uptime": round(uptime, 1),
+        "uptime_h": round(uptime / 3600, 2),
+        "version": "0.7.0",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
     }
+
+
+@app.get("/api/health")
+async def api_health_check():
+    """Alias /api/health → /health"""
+    return await health_check()
 
 
 # Register routers
@@ -116,13 +282,21 @@ app.include_router(account.router, prefix="/api/account", tags=["Account"])
 app.include_router(positions.router, prefix="/api/positions", tags=["Positions"])
 app.include_router(blog.router, prefix="/api/blog", tags=["Blog"])
 app.include_router(control.router, prefix="/api/control", tags=["Control"])
-app.include_router(telegram_intel.router, prefix="/api/telegram-intel", tags=["Telegram Intelligence"])
-app.include_router(debug_router.router, prefix="/api/debug", tags=["Debug / Diagnostics"])
+app.include_router(
+    telegram_intel.router, prefix="/api/telegram-intel", tags=["Telegram Intelligence"]
+)
+app.include_router(
+    debug_router.router, prefix="/api/debug", tags=["Debug / Diagnostics"]
+)
+app.include_router(dashboard.router, prefix="/api/dashboard", tags=["Dashboard"])
+app.include_router(
+    system_router.router, prefix="/api/system", tags=["System Diagnostics"]
+)
 
 
 if __name__ == "__main__":
     import uvicorn
-    
+
     host = os.getenv("API_HOST", "0.0.0.0")
     port = int(os.getenv("API_PORT", 8000))
     env_reload = os.getenv("API_RELOAD", "false").lower() == "true"
@@ -183,7 +357,7 @@ if __name__ == "__main__":
         web_cmd = [
             "bash",
             "-lc",
-            "export NVM_DIR=\"$HOME/.nvm\" && . \"$NVM_DIR/nvm.sh\" && nvm use 20.11.1 >/dev/null && cd web_portal && npm run dev",
+            'export NVM_DIR="$HOME/.nvm" && . "$NVM_DIR/nvm.sh" && nvm use 20.11.1 >/dev/null && cd web_portal && npm run dev',
         ]
         web_proc = subprocess.Popen(
             web_cmd,
@@ -224,9 +398,5 @@ if __name__ == "__main__":
 
     print(f"🚀 Uruchamianie serwera na {host}:{port}")
     uvicorn.run(
-        "backend.app:app",
-        host=host,
-        port=port,
-        reload=reload,
-        log_level="info"
+        "backend.app:app", host=host, port=port, reload=reload, log_level="info"
     )

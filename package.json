@@ -1,0 +1,12 @@
+{
+  "private": true,
+  "scripts": {
+    "dev": "npm --prefix web_portal run dev",
+    "build": "npm --prefix web_portal run build",
+    "start": "npm --prefix web_portal run start",
+    "lint": "npm --prefix web_portal run lint"
+  },
+  "dependencies": {
+    "next": "^16.2.2"
+  }
+}

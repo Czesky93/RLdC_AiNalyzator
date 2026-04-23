@@ -35,7 +35,7 @@ _REASON_PL = {
 
 @router.get("/state-consistency")
 async def get_state_consistency(
-    mode: str = Query("demo", description="demo lub live"),
+    mode: str = Query("live", description="demo lub live"),
     db: Session = Depends(get_db),
 ):
     """
@@ -185,7 +185,7 @@ async def get_state_consistency(
 
 @router.get("/last-exits")
 async def get_last_exits(
-    mode: str = Query("demo", description="demo lub live"),
+    mode: str = Query("live", description="demo lub live"),
     limit: int = Query(20, ge=1, le=100),
     db: Session = Depends(get_db),
 ):

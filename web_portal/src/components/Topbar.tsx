@@ -7,11 +7,9 @@ import { getApiBase, withAdminToken } from '../lib/api'
 interface TopbarProps {
   activeView: string
   setActiveView: (view: string) => void
-  tradingMode: 'live' | 'demo'
-  setTradingMode: (mode: 'live' | 'demo') => void
 }
 
-export default function Topbar({ activeView, setActiveView, tradingMode, setTradingMode }: TopbarProps) {
+export default function Topbar({ activeView, setActiveView }: TopbarProps) {
   const [tradingEnabled, setTradingEnabled] = useState<boolean | null>(null)
   const [controlError, setControlError] = useState<string | null>(null)
   const [stopping, setStopping] = useState(false)
@@ -24,7 +22,7 @@ export default function Topbar({ activeView, setActiveView, tradingMode, setTrad
       { label: 'Strategie', view: 'strategies' },
       { label: 'AI Sygnały', view: 'ai-signals' },
       { label: 'Ryzyko', view: 'risk' },
-      { label: 'Operator', view: 'operator-console' },
+      { label: 'Diagnostyka', view: 'operator-console' },
     ],
     []
   )
@@ -34,7 +32,8 @@ export default function Topbar({ activeView, setActiveView, tradingMode, setTrad
       const res = await fetch(`${getApiBase()}/api/control/state`)
       if (!res.ok) throw new Error('Błąd control')
       const json = await res.json()
-      setTradingEnabled(Boolean(json?.data?.demo_trading_enabled))
+      const d = json?.data
+      setTradingEnabled(Boolean(d?.live_trading_enabled ?? d?.demo_trading_enabled))
       setControlError(null)
     } catch {
       setTradingEnabled(null)
@@ -57,33 +56,6 @@ export default function Topbar({ activeView, setActiveView, tradingMode, setTrad
         <div className="flex items-center space-x-4">
           <div className="text-2xl font-bold text-slate-100 tracking-wider">
             <span className="text-teal-primary">RLDC</span>
-          </div>
-          
-          {/* Przełącznik DEMO / LIVE */}
-          <div className="flex items-center rounded-lg overflow-hidden border border-rldc-dark-border ml-2">
-            <button
-              onClick={() => setTradingMode('demo')}
-              title="Tryb symulacyjny — brak realnych zleceń"
-              className={`px-4 py-1.5 text-xs font-bold tracking-wide transition-colors ${
-                tradingMode === 'demo'
-                  ? 'bg-rldc-green-primary text-[#0b121a]'
-                  : 'bg-rldc-dark-card text-slate-500 hover:text-slate-200 hover:bg-rldc-dark-hover'
-              }`}
-            >
-              DEMO
-            </button>
-            <div className="w-px h-5 bg-rldc-dark-border" />
-            <button
-              onClick={() => setTradingMode('live')}
-              title="Handel realny — dane z Binance"
-              className={`px-4 py-1.5 text-xs font-bold tracking-wide transition-colors ${
-                tradingMode === 'live'
-                  ? 'bg-amber-500 text-[#0b121a]'
-                  : 'bg-rldc-dark-card text-slate-500 hover:text-slate-200 hover:bg-rldc-dark-hover'
-              }`}
-            >
-              LIVE
-            </button>
           </div>
         </div>
 
@@ -108,19 +80,12 @@ export default function Topbar({ activeView, setActiveView, tradingMode, setTrad
         </nav>
       </div>
 
-      {/* Center: Status trybu */}
+      {/* Center: Status LIVE */}
       <div className="hidden xl:flex items-center space-x-3">
-        {tradingMode === 'live' ? (
-          <div className="text-[10px] text-amber-400 font-bold uppercase tracking-wider flex items-center space-x-1.5">
-            <div className="w-2 h-2 bg-amber-400 rounded-full animate-pulse"></div>
-            <span>LIVE — Handel realny — Binance</span>
-          </div>
-        ) : (
-          <div className="text-[10px] text-rldc-green-primary font-bold uppercase tracking-wider flex items-center space-x-1.5">
-            <div className="w-2 h-2 bg-rldc-green-primary rounded-full"></div>
-            <span>DEMO — Symulacja — Brak realnych zleceń</span>
-          </div>
-        )}
+        <div className="text-[10px] text-amber-400 font-bold uppercase tracking-wider flex items-center space-x-1.5">
+          <div className="w-2 h-2 bg-amber-400 rounded-full animate-pulse"></div>
+          <span>LIVE — Handel realny — Binance</span>
+        </div>
       </div>
 
       {/* Right: Controls and Actions */}

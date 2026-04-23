@@ -27,13 +27,27 @@ logger = logging.getLogger(__name__)
 # Konfiguracja
 # ---------------------------------------------------------------------------
 
+
 def _get_config() -> Dict[str, Any]:
     """Lazy config — odczytuje ENV przy każdym wywołaniu (pozwala na zmianę w runtime)."""
+    env_enabled = os.getenv("NOTIFICATIONS_ENABLED", "true").lower() in (
+        "1",
+        "true",
+        "yes",
+    )
+    test_mode = bool(os.getenv("PYTEST_CURRENT_TEST"))
+    allow_test_telegram = os.getenv("ALLOW_TEST_TELEGRAM", "false").lower() in (
+        "1",
+        "true",
+        "yes",
+    )
     return {
         "telegram_bot_token": os.getenv("TELEGRAM_BOT_TOKEN", ""),
         "telegram_chat_id": os.getenv("TELEGRAM_CHAT_ID", ""),
-        "enabled": os.getenv("NOTIFICATIONS_ENABLED", "true").lower() in ("1", "true", "yes"),
+        "enabled": env_enabled and not (test_mode and not allow_test_telegram),
         "telegram_min_priority": os.getenv("TELEGRAM_MIN_PRIORITY", "high"),
+        "test_mode": test_mode,
+        "allow_test_telegram": allow_test_telegram,
     }
 
 
@@ -111,7 +125,10 @@ def _human_reasons(summary: str | None) -> str:
 # Formattery (czyste funkcje → str)
 # ---------------------------------------------------------------------------
 
-def format_incident_created(incident: Dict[str, Any], policy_action: Dict[str, Any] | None = None) -> str:
+
+def format_incident_created(
+    incident: Dict[str, Any], policy_action: Dict[str, Any] | None = None
+) -> str:
     """Formatuj powiadomienie o nowym incydencie."""
     priority = incident.get("priority", "medium")
     icon = "🔴" if priority == "critical" else "🟠" if priority == "high" else "🟡"
@@ -197,7 +214,9 @@ def format_policy_action_created(policy_action: Dict[str, Any]) -> str:
 
     pa_id = policy_action.get("id", "?")
     source_id = policy_action.get("source_id", "?")
-    lines.append(f"\nSzczegóły: PA #{pa_id}, źródło {policy_action.get('source_type', '?')}/{source_id}")
+    lines.append(
+        f"\nSzczegóły: PA #{pa_id}, źródło {policy_action.get('source_type', '?')}/{source_id}"
+    )
     return "\n".join(lines)
 
 
@@ -247,10 +266,15 @@ def format_sla_breach(escalated: List[Dict[str, Any]]) -> str:
 # Low-level adaptery
 # ---------------------------------------------------------------------------
 
+
 def _should_send_telegram(priority: str) -> bool:
     """Sprawdź, czy priorytet zdarzenia kwalifikuje się do wysyłki Telegram."""
     cfg = _get_config()
-    if not cfg["enabled"] or not cfg["telegram_bot_token"] or not cfg["telegram_chat_id"]:
+    if (
+        not cfg["enabled"]
+        or not cfg["telegram_bot_token"]
+        or not cfg["telegram_chat_id"]
+    ):
         return False
     min_rank = _PRIORITY_RANK.get(cfg["telegram_min_priority"], 1)
     event_rank = _PRIORITY_RANK.get(priority, 3)
@@ -264,6 +288,10 @@ def send_telegram_message(text: str, source_module: str = "notification_hooks") 
     Każda wysłana wiadomość jest archiwizowana przez Telegram Intelligence Layer.
     """
     cfg = _get_config()
+    if cfg.get("test_mode") and not cfg.get("allow_test_telegram"):
+        logger.debug("Telegram: pomijam wysyłkę w trybie testowym (pytest)")
+        return False
+
     token = cfg["telegram_bot_token"]
     chat_id = cfg["telegram_chat_id"]
     if not token or not chat_id:
@@ -282,13 +310,18 @@ def send_telegram_message(text: str, source_module: str = "notification_hooks") 
             logger.info("Telegram: wiadomość wysłana pomyślnie")
             sent = True
         else:
-            logger.warning("Telegram: błąd wysyłki, status=%s, body=%s", resp.status_code, resp.text[:200])
+            logger.warning(
+                "Telegram: błąd wysyłki, status=%s, body=%s",
+                resp.status_code,
+                resp.text[:200],
+            )
     except requests.RequestException as exc:
         logger.error("Telegram: błąd połączenia: %s", exc)
 
     # Archiwizacja przez Telegram Intelligence Layer
     try:
         from backend.telegram_intelligence import log_telegram_event
+
         log_telegram_event(
             chat_id=chat_id,
             direction="outgoing",
@@ -317,6 +350,7 @@ def _log_notification(event_type: str, message: str) -> None:
 # ---------------------------------------------------------------------------
 # Dispatcher
 # ---------------------------------------------------------------------------
+
 
 def dispatch_notification(
     event_type: str,
@@ -347,6 +381,7 @@ def dispatch_notification(
 # High-level hook functions
 # ---------------------------------------------------------------------------
 
+
 def notify_incident_created(
     incident: Dict[str, Any],
     policy_action: Dict[str, Any] | None = None,
@@ -376,7 +411,11 @@ def notify_pipeline_blocked(operation: str, blocking_actions: list) -> Dict[str,
     message = format_pipeline_blocked(operation, blocking_actions)
     # Blokada jest zawsze ważna — używamy najwyższego priorytetu blokerów
     priorities = [b.get("priority", "medium") for b in blocking_actions]
-    best = min(priorities, key=lambda p: _PRIORITY_RANK.get(p, 3)) if priorities else "medium"
+    best = (
+        min(priorities, key=lambda p: _PRIORITY_RANK.get(p, 3))
+        if priorities
+        else "medium"
+    )
     return dispatch_notification(EVENT_PIPELINE_BLOCKED, message, best)
 
 
