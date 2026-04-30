@@ -17,6 +17,8 @@ from backend.database import (
     utc_now_naive,
 )
 
+from backend.portfolio_reconcile import backfill_binance_trades, backfill_trade_history_from_binance
+
 router = APIRouter()
 
 ACTIVE_PENDING_STATUSES = [
@@ -71,6 +73,18 @@ def _canonical_open_positions_count(db: Session, mode: str) -> int:
 # ---------------------------------------------------------------------------
 # /api/system/execution-status
 # ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# /api/system/backfill_trades
+# ---------------------------------------------------------------------------
+@router.post("/backfill_trades")
+def post_backfill_trades(mode: str = "live", limit: int = 1000, db: Session = Depends(get_db)):
+    """
+    Pełny backfill historii trade'ów z Binance do DB (entry_price, ordery, fallback).
+    """
+    result = backfill_trade_history_from_binance(db, mode=mode, limit=limit)
+    return result
 @router.get("/execution-status")
 def get_execution_status(db: Session = Depends(get_db)):
     """Status execution layer — flagi, tryb, pending counts."""

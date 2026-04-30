@@ -1,3 +1,79 @@
+# Dodano import Session do typowania
+from sqlalchemy.orm import Session
+# --- BACKFILL: Pełna synchronizacja historii trade'ów Binance do DB ---
+def backfill_trade_history_from_binance(db: Session, mode: str = "live", limit: int = 1000) -> dict:
+    from backend.binance_client import get_binance_client
+    from backend.database import Order, Position
+    import traceback
+    client = get_binance_client()
+    if client is None:
+        return {"ok": False, "error": "Brak klienta Binance"}
+
+    updated, skipped, errors = [], [], []
+    # Pobierz aktywa z Binance
+    balances = client.get_balances() or []
+    for bal in balances:
+        asset = str(bal.get("asset") or "").upper()
+        total = float(bal.get("total") or 0.0)
+        if total <= 0 or asset in {"USDT", "USDC", "EUR", "BUSD", "FDUSD", "TUSD"}:
+            continue
+        # Szukaj symboli EUR/USDC
+        for quote in ("EUR", "USDC"):
+            symbol = f"{asset}{quote}"
+            trades = client.get_my_trades(symbol=symbol, limit=limit) or []
+            if not trades:
+                continue
+            # Wylicz entry_price z BUY trade'ów
+            buy_trades = [t for t in trades if t.get("isBuyer")]
+            total_qty = sum(float(t["qty"]) for t in buy_trades)
+            total_quote = sum(float(t["qty"]) * float(t["price"]) for t in buy_trades)
+            avg_price = (total_quote / total_qty) if total_qty > 0 else 0.0
+            # Uzupełnij Position
+            pos = db.query(Position).filter(Position.symbol == symbol, Position.mode == mode, Position.exit_reason_code.is_(None)).first()
+            if pos:
+                if not pos.entry_price or pos.entry_price == 0:
+                    if avg_price > 0:
+                        pos.entry_price = avg_price
+                        pos.updated_at = utc_now_naive()
+                        updated.append({"symbol": symbol, "entry_price": avg_price})
+                    else:
+                        # Fallback: value/qty
+                        if pos.quantity > 0 and pos.current_price:
+                            pos.entry_price = (pos.current_price * pos.quantity) / pos.quantity
+                            pos.updated_at = utc_now_naive()
+                            updated.append({"symbol": symbol, "entry_price": pos.entry_price, "fallback": True})
+                        else:
+                            skipped.append({"symbol": symbol, "reason": "no entry_price, no trades"})
+                else:
+                    skipped.append({"symbol": symbol, "reason": "entry_price already set"})
+            # Zapisz ordery
+            for t in trades:
+                try:
+                    exists = db.query(Order).filter(Order.symbol == symbol, Order.mode == mode, Order.timestamp == datetime.fromtimestamp(t["time"] / 1000, tz=timezone.utc).replace(tzinfo=None)).first()
+                    if not exists:
+                        order = Order(
+                            symbol=symbol,
+                            side="BUY" if t.get("isBuyer") else "SELL",
+                            order_type="MARKET",
+                            price=float(t["price"]),
+                            quantity=float(t["qty"]),
+                            status="FILLED",
+                            mode=mode,
+                            executed_price=float(t["price"]),
+                            executed_quantity=float(t["qty"]),
+                            fee_cost=float(t.get("commission", 0)),
+                            timestamp=datetime.fromtimestamp(t["time"] / 1000, tz=timezone.utc).replace(tzinfo=None),
+                            entry_reason_code="backfill_binance_trade",
+                        )
+                        db.add(order)
+                except Exception as exc:
+                    errors.append({"symbol": symbol, "trade": t, "error": str(exc), "trace": traceback.format_exc()})
+    try:
+        db.commit()
+    except Exception as exc:
+        db.rollback()
+        errors.append({"error": str(exc)})
+    return {"ok": True, "updated": updated, "skipped": skipped, "errors": errors}
 """
 Portfolio Reconcile — DB self-heal z Binance.
 
@@ -28,6 +104,80 @@ from backend.database import (
     SystemLog,
     utc_now_naive,
 )
+
+
+# --- BACKFILL: Synchronizacja historii trade'ów Binance do DB ---
+def backfill_binance_trades(db: Session, mode: str = "live", symbols: Optional[List[str]] = None, limit: int = 1000) -> Dict[str, Any]:
+    """
+    Pobierz historię trade'ów z Binance i uzupełnij Order/Position o brakujące entry_price, qty, fee, timestamp.
+    Jeśli nie ma trade'ów — fallback: value/qty.
+    """
+    from backend.binance_client import get_binance_client
+    client = get_binance_client()
+    if client is None:
+        return {"error": "Brak klienta Binance"}
+
+    # Jeśli nie podano symboli — bierz wszystkie z aktywną pozycją lub saldem
+    if not symbols:
+        open_positions = db.query(Position).filter(Position.mode == mode, Position.exit_reason_code.is_(None), Position.quantity > 0).all()
+        symbols = list({p.symbol for p in open_positions})
+
+    results = {}
+    for symbol in symbols:
+        trades = client.get_my_trades(symbol=symbol, limit=limit) or []
+        if not trades:
+            results[symbol] = "no_trades"
+            continue
+
+        # Uzupełnij Order
+        for t in trades:
+            order = db.query(Order).filter(Order.symbol == symbol, Order.mode == mode, Order.timestamp == datetime.fromtimestamp(t["time"] / 1000, tz=timezone.utc).replace(tzinfo=None)).first()
+            if not order:
+                order = Order(
+                    symbol=symbol,
+                    side="BUY" if t.get("isBuyer") else "SELL",
+                    order_type="MARKET",
+                    price=float(t["price"]),
+                    quantity=float(t["qty"]),
+                    status="FILLED",
+                    mode=mode,
+                    executed_price=float(t["price"]),
+                    executed_quantity=float(t["qty"]),
+                    fee_cost=float(t.get("commission", 0)),
+                    timestamp=datetime.fromtimestamp(t["time"] / 1000, tz=timezone.utc).replace(tzinfo=None),
+                    entry_reason_code="backfill_binance_trade",
+                )
+                db.add(order)
+
+        # Uzupełnij Position (jeśli nie ma entry_price)
+        pos = db.query(Position).filter(Position.symbol == symbol, Position.mode == mode, Position.exit_reason_code.is_(None)).first()
+        if pos and (not pos.entry_price or pos.entry_price == 0):
+            # Wylicz avg_price z trade'ów BUY
+            buy_trades = [t for t in trades if t.get("isBuyer")]
+            total_qty = sum(float(t["qty"]) for t in buy_trades)
+            total_quote = sum(float(t["qty"]) * float(t["price"]) for t in buy_trades)
+            avg_price = (total_quote / total_qty) if total_qty > 0 else 0.0
+            if avg_price > 0:
+                pos.entry_price = avg_price
+                pos.updated_at = utc_now_naive()
+                results[symbol] = f"entry_price_backfilled:{avg_price:.8f}"
+            else:
+                # Fallback: value/qty
+                if pos.quantity > 0 and pos.current_price:
+                    pos.entry_price = (pos.current_price * pos.quantity) / pos.quantity
+                    pos.updated_at = utc_now_naive()
+                    results[symbol] = f"entry_price_fallback:{pos.entry_price:.8f}"
+                else:
+                    results[symbol] = "no_entry_price"
+        else:
+            results[symbol] = "ok"
+
+    try:
+        db.commit()
+    except Exception as exc:
+        db.rollback()
+        return {"error": str(exc)}
+    return results
 
 logger = logging.getLogger(__name__)
 

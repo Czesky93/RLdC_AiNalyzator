@@ -818,7 +818,9 @@ function SymbolDetailPanel({
                 <div>
                   <div className="text-[10px] text-slate-500 mb-0.5">Kupiono po</div>
                   <div className="text-xl font-mono font-bold text-slate-300">
-                    {formatPrice(card.entry_price, 'brak danych')} <span className="text-sm font-normal text-slate-500">EUR</span>
+                    {card.entry_price == null || card.entry_price === 0 || Number.isNaN(card.entry_price)
+                      ? <span className="text-rldc-red-primary">Wymaga backfill historii</span>
+                      : <>{formatPrice(card.entry_price, 'brak danych')} <span className="text-sm font-normal text-slate-500">EUR</span></>}
                   </div>
                 </div>
               ) : latestSignal ? (

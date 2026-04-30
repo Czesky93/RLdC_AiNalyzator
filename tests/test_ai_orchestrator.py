@@ -380,9 +380,7 @@ def test_local_only_task_never_uses_external(monkeypatch):
 
     assert response == "local-status"
     assert provider == "local"
-        assert len(result) == 2
-        assert isinstance(result[0], str)
-        assert isinstance(result[1], str)
+    # Usunięto błędne wcięcie — jeśli test wymaga result, należy go zdefiniować wyżej
 
 
 # ─── get_ai_orchestrator_status — pola local_ai_* ────────────────────────────

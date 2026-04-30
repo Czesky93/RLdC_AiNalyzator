@@ -420,17 +420,19 @@ def validate_symbol(
     registry: Optional[Dict[str, Any]] = None,
     require_quote_filtered: bool = True,
 ) -> Dict[str, Any]:
+    # TRADE_ALL_SYMBOLS lub symbol_universe=ALL: nie blokuj symboli spoza tierów
+    trade_all = os.getenv("TRADE_ALL_SYMBOLS", "").lower() in ("1", "true", "yes") or os.getenv("SYMBOL_UNIVERSE", "").upper() == "ALL"
     registry = registry or get_symbol_registry()
     sym = _normalize_symbol(symbol)
     metadata = (registry.get("metadata") or {}).get(sym)
     allowed_set_name = "quote_filtered_universe" if require_quote_filtered else "tradable_universe"
     allowed_set = set(registry.get(allowed_set_name) or [])
-    valid = bool(metadata) and sym in allowed_set
+    valid = bool(metadata) and (sym in allowed_set or trade_all)
     return {
         "symbol": sym,
         "valid": valid,
         "exists_on_exchange": bool(metadata),
-        "in_active_universe": sym in allowed_set,
+        "in_active_universe": sym in allowed_set or trade_all,
         "metadata": metadata,
         "reason": (
             "ok"
