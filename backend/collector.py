@@ -5279,7 +5279,37 @@ class DataCollector:
                         active_sell_pending=_active_sell_pending,
                     )
                     continue
-                # Brak aktywnego SELL → dopuszczamy add/rebalance.
+                # Blokuj BUY (add_to_position) gdy pozycja jest na stracie — zakaz averaging down.
+                # Averaging down jest jedną z najczęstszych przyczyn narastających strat.
+                _current_pos_price = float(position.current_price or 0.0)
+                _current_pos_entry = float(position.entry_price or 0.0)
+                _pos_pnl_pct = (
+                    (_current_pos_price - _current_pos_entry) / _current_pos_entry * 100.0
+                    if _current_pos_entry > 0
+                    else 0.0
+                )
+                if _pos_pnl_pct <= 0.0:
+                    # Pozycja na stracie lub breakeven — NIE dokupuj
+                    self._trace_decision(
+                        db,
+                        symbol=symbol,
+                        action="SKIP",
+                        reason_code="buy_blocked_averaging_down",
+                        runtime_ctx=runtime_ctx,
+                        mode=_current_mode,
+                        signal_summary=signal_summary,
+                        details={
+                            "reason": "add_to_position blokowane gdy pozycja na stracie (averaging down prevention)",
+                            "position_pnl_pct": round(_pos_pnl_pct, 3),
+                        },
+                    )
+                    _log_why_not_buy(
+                        symbol,
+                        "buy_blocked_averaging_down",
+                        position_pnl_pct=round(_pos_pnl_pct, 3),
+                    )
+                    continue
+                # Pozycja na zysku i brak SELL pending → dopuszczamy add/rebalance.
                 # Ostateczna decyzja portfelowa zapadnie na etapie selekcji.
                 position_action = "add_to_position"
             if side == "SELL" and position is None:
