@@ -427,12 +427,15 @@ def validate_symbol(
     metadata = (registry.get("metadata") or {}).get(sym)
     allowed_set_name = "quote_filtered_universe" if require_quote_filtered else "tradable_universe"
     allowed_set = set(registry.get(allowed_set_name) or [])
-    valid = bool(metadata) and (sym in allowed_set or trade_all)
+    # Jeśli trade_all i symbol istnieje w metadata, to valid=True nawet jeśli nie ma go w allowed_set
+    # Jeśli trade_all i symbol istnieje w metadata i jest aktywny, to valid=True nawet jeśli nie ma go w allowed_set
+    is_active = bool(metadata) and (metadata.get("active", True))
+    valid = bool(metadata) and (sym in allowed_set or (trade_all and is_active))
     return {
         "symbol": sym,
         "valid": valid,
         "exists_on_exchange": bool(metadata),
-        "in_active_universe": sym in allowed_set or trade_all,
+        "in_active_universe": sym in allowed_set or (trade_all and is_active),
         "metadata": metadata,
         "reason": (
             "ok"

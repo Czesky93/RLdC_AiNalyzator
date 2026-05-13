@@ -1,3 +1,5 @@
+from backend.database import engine, Base
+Base.metadata.create_all(bind=engine)
 import pytest
 from backend.portfolio_reconcile import backfill_trade_history_from_binance
 from backend.database import get_db, Position
@@ -21,8 +23,15 @@ def test_backfill_trade_history(monkeypatch):
     # Patch binance_client
     monkeypatch.setattr("backend.binance_client.get_binance_client", lambda: DummyClient())
     db = next(get_db())
-    # Dodaj pozycję bez entry_price
-    pos = Position(symbol="BTCUSDC", mode="live", quantity=0.5, current_price=40000, entry_price=None)
+    # Dodaj pozycję bez entry_price, ale z wymaganymi polami
+    pos = Position(
+        symbol="BTCUSDC",
+        side="LONG",
+        entry_price=0.0,
+        quantity=0.5,
+        current_price=40000,
+        mode="live"
+    )
     db.add(pos)
     db.commit()
     # Backfill
@@ -30,7 +39,14 @@ def test_backfill_trade_history(monkeypatch):
     assert result["ok"]
     assert any(u["symbol"] == "BTCUSDC" for u in result["updated"])
     # Fallback: ETHUSDC nie ma trade'ów, entry_price nie powinno być ustawione
-    pos2 = Position(symbol="ETHUSDC", mode="live", quantity=1.0, current_price=2000, entry_price=None)
+    pos2 = Position(
+        symbol="ETHUSDC",
+        side="LONG",
+        entry_price=0.0,
+        quantity=1.0,
+        current_price=2000,
+        mode="live"
+    )
     db.add(pos2)
     db.commit()
     result2 = backfill_trade_history_from_binance(db, mode="live", limit=10)

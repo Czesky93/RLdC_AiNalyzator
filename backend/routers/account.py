@@ -142,6 +142,60 @@ _openai_status_cache: dict = {"ts": None, "data": None}
 _demo_state_cache: dict = {"ts": None, "data": None}
 
 
+@router.get("/live-valuation-debug")
+def get_live_valuation_debug(db: Session = Depends(get_db)):
+    """
+    Diagnostyka: jawne rozbicie wartości konta LIVE (tylko Binance vs DB).
+    """
+    live_data = _build_live_spot_portfolio(db)
+    assets = live_data.get("spot_positions") or []
+    binance_total_eur = float(live_data.get("total_equity_eur") or 0.0)
+    cash_eur = float(live_data.get("free_eur") or 0.0)
+    usdc_native = float(live_data.get("free_usdc") or 0.0)
+    usdc_eur_val = sum(
+        float(a.get("value_eur") or 0.0) for a in assets if a.get("asset") == "USDC"
+    )
+    asset_positions_eur = sum(
+        float(a.get("value_eur") or 0.0)
+        for a in assets
+        if a.get("asset") not in {"EUR", "USDC", "USDT", "BUSD"}
+    )
+
+    db_positions = (
+        db.query(Position)
+        .filter(Position.mode == "live", Position.quantity > 0)
+        .all()
+    )
+    db_position_symbols = {p.symbol for p in db_positions}
+    db_positions_total_eur = sum(
+        float(a.get("value_eur") or 0.0)
+        for a in assets
+        if f"{a.get('asset')}EUR" in db_position_symbols
+        or f"{a.get('asset')}USDC" in db_position_symbols
+        or f"{a.get('asset')}USDT" in db_position_symbols
+    )
+
+    difference_eur = binance_total_eur - db_positions_total_eur
+    warnings = []
+    expected_cash_eur = cash_eur + usdc_eur_val
+    if abs(difference_eur - expected_cash_eur) > 2.0:
+        warnings.append(f"Rozbieżność między Binance a DB: {difference_eur:.2f} EUR")
+
+    return {
+        "source": "binance_live_balances",
+        "binance_total_eur": round(binance_total_eur, 2),
+        "cash_eur": round(cash_eur, 2),
+        "usdc_native": round(usdc_native, 8),
+        "usdc_eur": round(usdc_eur_val, 2),
+        "asset_positions_eur": round(asset_positions_eur, 2),
+        "db_positions_eur": round(db_positions_total_eur, 2),
+        "difference_eur": round(difference_eur, 2),
+        "expected_cash_difference_eur": round(expected_cash_eur, 2),
+        "assets": assets,
+        "warnings": warnings,
+    }
+
+
 def _resolve_local_ip() -> Dict[str, Any]:
     hostname = socket.gethostname()
     local_candidates = []
@@ -2739,7 +2793,19 @@ def get_system_status(request: Request, db: Session = Depends(get_db)):
             .order_by(desc(SystemLog.timestamp))
             .first()
         )
-        last_error_msg = last_error.message[:120] if last_error else None
+        last_error_msg = None
+        if last_error:
+            _raw = last_error.message or ""
+            try:
+                import json as _json_le
+                _parsed = _json_le.loads(_raw)
+                # Wyciągnij czytelne pola zamiast serwować surowy JSON
+                _sym = _parsed.get("symbol", "")
+                _rc = _parsed.get("reason_code", _parsed.get("final_action", ""))
+                _mod = last_error.module or ""
+                last_error_msg = f"[{_mod}] {_sym} {_rc}".strip() or _raw[:120]
+            except Exception:
+                last_error_msg = _raw[:120]
         last_error_ts = last_error.timestamp.isoformat() if last_error else None
 
         return {
@@ -3249,203 +3315,61 @@ def get_capital_snapshot(
     try:
         from backend.routers.portfolio import get_portfolio_wealth as _build_wealth
 
-        # Wewnętrznie korzystamy z portfolio endpoint (już ma logikę live/demo)
-        # Tworzymy mockowy request jeśli brak
-        if request is None:
-
-            class _MockRequest:
-                class app:
-                    class state:
-                        pass
-
-            request = _MockRequest()  # type: ignore
-
-        wealth = (
-            _build_wealth.__wrapped__(mode=mode, request=request, db=db)
-            if hasattr(_build_wealth, "__wrapped__")
-            else None
-        )
-
-        # Fallback: bezpośrednie wywołanie przez handler
-        if wealth is None:
-            from fastapi.testclient import (
-                TestClient as _TC,
-            )  # noqa: E501 – import only for fallback
-
-            from backend.accounting import compute_demo_account_state
-
-            # Prosta implementacja bezpośrednia zamiast nested call
-            from backend.routers.portfolio import _build_live_spot_portfolio
-
-            _DUST = 0.50
-            _CASH = {"EUR", "USDT", "USDC", "BUSD", "DAI", "USDP", "TUSD"}
-
-            if mode == "live":
-                live_data = _build_live_spot_portfolio(db)
-                if live_data and not live_data.get("error"):
-                    items = live_data.get("items", live_data.get("spot_positions", []))
-                    total_equity = float(
-                        live_data.get("total_equity")
-                        or live_data.get("total_equity_eur")
-                        or 0
-                    )
-                    free_cash = float(
-                        live_data.get("free_cash")
-                        or live_data.get("free_cash_eur")
-                        or 0
-                    )
-                    source_of_truth = "binance_live"
-                    sync_status = "ok"
-                    sync_warning = None
-                else:
-                    items = []
-                    total_equity = 0.0
-                    free_cash = 0.0
-                    source_of_truth = "local_db"
-                    sync_status = "binance_unavailable"
-                    sync_warning = (live_data or {}).get(
-                        "error"
-                    ) or "Brak połączenia z Binance"
-            else:
-                demo_state = compute_demo_account_state(
-                    db, quote_ccy=get_demo_quote_ccy()
-                )
-                items = []
-                total_equity = float(demo_state.get("equity", 0))
-                free_cash = float(
-                    demo_state.get("free_cash", demo_state.get("free_margin", 0))
-                )
-                source_of_truth = "demo_local"
-                sync_status = "demo"
-                sync_warning = None
-
-            def _is_dust(it: dict) -> bool:
-                return float(it.get("value_eur") or 0) < _DUST
-
-            def _is_cash(it: dict) -> bool:
-                return str(it.get("asset") or it.get("symbol") or "").upper() in _CASH
-
-            active_items = [i for i in items if not _is_dust(i) and not _is_cash(i)]
-            dust_items = [i for i in items if _is_dust(i) and not _is_cash(i)]
-            cash_items = [i for i in items if _is_cash(i)]
-
-            active_value = sum(float(i.get("value_eur") or 0) for i in active_items)
-            dust_value = sum(float(i.get("value_eur") or 0) for i in dust_items)
-
-            now = utc_now_naive()
-            updated_at = now.isoformat()
-            age_seconds = 0
-
-            holdings = []
-            for it in items:
-                asset = str(it.get("asset") or it.get("symbol") or "")
-                val = float(it.get("value_eur") or 0)
-                if _is_cash(it):
-                    cls = "cash"
-                elif _is_dust(it):
-                    cls = "dust"
-                elif val > 0:
-                    cls = "active_position"
-                else:
-                    cls = "other"
-                holdings.append(
-                    {
-                        "asset": asset,
-                        "free": float(it.get("free") or it.get("quantity") or 0),
-                        "locked": float(it.get("locked") or 0),
-                        "total": float(it.get("total") or it.get("quantity") or 0),
-                        "value_in_base": round(val, 4),
-                        "classification": cls,
-                    }
-                )
-
-            wealth = {
-                "mode": mode,
-                "base_currency": "EUR",
-                "free_cash": round(free_cash, 4),
-                "locked_cash": 0.0,
-                "total_account_value": round(total_equity, 4),
-                "active_positions_value": round(active_value, 4),
-                "dust_value": round(dust_value, 4),
-                "available_to_trade": round(free_cash, 4),
-                "open_orders_reserved": 0.0,
-                "active_positions_count": len(active_items),
-                "dust_positions_count": len(dust_items),
-                "cash_assets_count": len(cash_items),
-                "all_assets_count": len(items),
-                "sync_status": sync_status,
-                "sync_warning": sync_warning,
-                "updated_at": updated_at,
-                "source_of_truth": source_of_truth,
-                "age_seconds": age_seconds,
-                "stale": False,
-                "holdings_breakdown": holdings,
+        portfolio = _build_wealth(mode=mode, db=db)
+        items = portfolio.get("items", [])
+        now = utc_now_naive()
+        holdings = [
+            {
+                "asset": str(i.get("asset") or i.get("symbol") or ""),
+                "symbol": i.get("symbol"),
+                "display_symbol": i.get("display_symbol") or i.get("symbol"),
+                "free": float(i.get("free") or i.get("quantity") or 0),
+                "locked": float(i.get("locked") or 0),
+                "total": float(i.get("total") or i.get("quantity") or 0),
+                "value_in_base": round(float(i.get("value_eur") or 0), 4),
+                "classification": i.get("classification") or "ORPHAN_HOLDING",
+                "has_entry_price": bool(i.get("has_entry_price")),
+                "requires_backfill": bool(i.get("requires_backfill")),
+                "diagnostic_message": i.get("diagnostic_message"),
             }
-        else:
-            # Wzbogacamy odpowiedź portfolio o pola capital_snapshot
-            _DUST = 0.50
-            _CASH = {"EUR", "USDT", "USDC", "BUSD", "DAI", "USDP", "TUSD"}
-            items = wealth.get("items", [])
-
-            def _is_dust(it: dict) -> bool:
-                return float(it.get("value_eur") or 0) < _DUST
-
-            def _is_cash(it: dict) -> bool:
-                return str(it.get("asset") or it.get("symbol") or "").upper() in _CASH
-
-            active_items = [i for i in items if not _is_dust(i) and not _is_cash(i)]
-            dust_items = [i for i in items if _is_dust(i) and not _is_cash(i)]
-            cash_items = [i for i in items if _is_cash(i)]
-            active_value = sum(float(i.get("value_eur") or 0) for i in active_items)
-            dust_value = sum(float(i.get("value_eur") or 0) for i in dust_items)
-            free_cash = float(wealth.get("free_cash") or 0)
-            total_equity = float(wealth.get("total_equity") or 0)
-            now = utc_now_naive()
-            holdings = [
-                {
-                    "asset": str(i.get("asset") or i.get("symbol") or ""),
-                    "free": float(i.get("free") or i.get("quantity") or 0),
-                    "locked": float(i.get("locked") or 0),
-                    "total": float(i.get("total") or i.get("quantity") or 0),
-                    "value_in_base": round(float(i.get("value_eur") or 0), 4),
-                    "classification": (
-                        "cash"
-                        if _is_cash(i)
-                        else (
-                            "dust"
-                            if _is_dust(i)
-                            else (
-                                "active_position"
-                                if float(i.get("value_eur") or 0) > 0
-                                else "other"
-                            )
-                        )
-                    ),
-                }
-                for i in items
-            ]
-            wealth = {
-                "mode": mode,
-                "base_currency": "EUR",
-                "free_cash": round(free_cash, 4),
-                "locked_cash": 0.0,
-                "total_account_value": round(total_equity, 4),
-                "active_positions_value": round(active_value, 4),
-                "dust_value": round(dust_value, 4),
-                "available_to_trade": round(free_cash, 4),
-                "open_orders_reserved": 0.0,
-                "active_positions_count": len(active_items),
-                "dust_positions_count": len(dust_items),
-                "cash_assets_count": len(cash_items),
-                "all_assets_count": len(items),
-                "sync_status": "ok",
-                "sync_warning": None,
-                "updated_at": now.isoformat(),
-                "source_of_truth": "portfolio_router",
-                "age_seconds": 0,
-                "stale": False,
-                "holdings_breakdown": holdings,
-            }
+            for i in items
+        ]
+        wealth = {
+            "mode": mode,
+            "base_currency": "EUR",
+            "free_cash": round(float(portfolio.get("free_cash") or 0), 4),
+            "locked_cash": 0.0,
+            "total_account_value": round(float(portfolio.get("total_equity") or 0), 4),
+            "active_positions_value": round(
+                float(portfolio.get("positions_value") or 0), 4
+            ),
+            "full_positions_value": round(
+                sum(float(i.get("value_eur") or 0) for i in portfolio.get("full_positions", [])),
+                4,
+            ),
+            "orphan_holdings_value": round(float(portfolio.get("orphan_value") or 0), 4),
+            "dust_value": round(float(portfolio.get("dust_value") or 0), 6),
+            "invested": round(float(portfolio.get("invested") or 0), 4),
+            "available_to_trade": round(float(portfolio.get("free_cash") or 0), 4),
+            "open_orders_reserved": 0.0,
+            "active_positions_count": int(portfolio.get("full_positions_count") or 0),
+            "full_positions_count": int(portfolio.get("full_positions_count") or 0),
+            "orphan_holdings_count": int(portfolio.get("orphan_holdings_count") or 0),
+            "dust_positions_count": int(portfolio.get("dust_positions_count") or 0),
+            "cash_assets_count": int(portfolio.get("cash_assets_count") or 0),
+            "all_assets_count": int(portfolio.get("all_assets_count") or 0),
+            "sync_status": "ok" if not portfolio.get("_info") else "warning",
+            "sync_warning": portfolio.get("_info"),
+            "updated_at": now.isoformat(),
+            "source_of_truth": "binance_live" if mode == "live" else "demo_local",
+            "age_seconds": 0,
+            "stale": False,
+            "holdings_breakdown": holdings,
+            "cash": portfolio.get("cash", []),
+            "full_positions": portfolio.get("full_positions", []),
+            "orphan_holdings": portfolio.get("orphan_holdings", []),
+            "dust_residuals": portfolio.get("dust_residuals", []),
+        }
 
         return {"success": True, "data": wealth}
     except Exception as e:

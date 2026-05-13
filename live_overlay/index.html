@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="pl">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>RLdC LIVE Overlay</title>
+  <style>
+    :root{--bg:#060807;--card:#101613;--green:#4cff85;--orange:#ff9d2e;--red:#ff4c4c;--muted:#a7b6aa;--line:#223126}
+    *{box-sizing:border-box}
+    body{margin:0;background:radial-gradient(circle at top,#18301f 0,#060807 42%,#020302 100%);color:#effff1;font-family:Arial,Helvetica,sans-serif;overflow:hidden}
+    .wrap{width:100vw;height:100vh;padding:18px;display:grid;grid-template-rows:auto auto 1fr auto;gap:14px}
+    .top{display:flex;justify-content:space-between;align-items:center;border:1px solid var(--line);background:rgba(12,18,14,.88);border-radius:22px;padding:14px 18px;box-shadow:0 0 30px rgba(76,255,133,.12)}
+    .brand{font-size:30px;font-weight:900;letter-spacing:.5px}.brand span{color:var(--green)}
+    .status{text-align:right;color:var(--muted);font-size:14px}.status b{color:var(--orange)}
+    .ticker{display:flex;gap:10px;overflow:hidden;white-space:nowrap}
+    .pill{border:1px solid var(--line);background:#0c120e;border-radius:999px;padding:9px 13px;font-size:14px}.pill b{color:var(--green)}
+    .main{display:grid;grid-template-columns:1.1fr .9fr;gap:14px;min-height:0}
+    .card{border:1px solid var(--line);background:rgba(12,18,14,.88);border-radius:28px;padding:18px;box-shadow:0 0 45px rgba(0,0,0,.25);min-height:0}
+    .headline{font-size:18px;color:var(--muted);margin-bottom:8px}.pair{font-size:58px;font-weight:900;line-height:.95;color:#fff}.decision{font-size:30px;color:var(--orange);font-weight:900;margin-top:8px}
+    .chart{height:300px;margin-top:18px;border-radius:22px;background:linear-gradient(145deg,#0b110d,#16251a);border:1px solid #243928;position:relative;overflow:hidden}
+    .chart:before{content:"";position:absolute;inset:0;background:repeating-linear-gradient(0deg,transparent 0,transparent 39px,rgba(255,255,255,.06) 40px),repeating-linear-gradient(90deg,transparent 0,transparent 59px,rgba(255,255,255,.05) 60px)}
+    .line{position:absolute;left:4%;right:4%;top:48%;height:4px;background:linear-gradient(90deg,var(--green),var(--orange));border-radius:99px;transform:skewY(-9deg);box-shadow:0 0 24px rgba(76,255,133,.45)}
+    .grid{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:14px}
+    .mini{border:1px solid var(--line);border-radius:18px;background:#0b100d;padding:12px}.mini small{display:block;color:var(--muted)}.mini b{font-size:22px}
+    .list{height:100%;overflow:hidden;display:flex;flex-direction:column;gap:10px}
+    .row{display:grid;grid-template-columns:1.1fr .8fr .8fr;gap:8px;align-items:center;border:1px solid var(--line);background:#0b100d;border-radius:18px;padding:12px}
+    .row .sym{font-weight:900;color:var(--green)}.row .val{text-align:right}.row .dec{text-align:right;color:var(--orange);font-size:12px}
+    .warn{border:1px solid #60451d;background:rgba(255,157,46,.12);color:#ffd8a3;border-radius:18px;padding:12px;font-size:14px;text-align:center}
+    .footer{font-size:13px;color:#b9c9bb;text-align:center}
+  </style>
+</head>
+<body>
+<div class="wrap">
+  <div class="top">
+    <div class="brand">RLdC <span>AiNalyzer</span> LIVE</div>
+    <div class="status">Backend: <b id="backend">...</b><br/>Aktualizacja: <span id="updated">...</span></div>
+  </div>
+  <div class="ticker" id="ticker"></div>
+  <div class="main">
+    <div class="card">
+      <div class="headline">Aktualnie obserwowana para</div>
+      <div class="pair" id="pair">ŁADOWANIE</div>
+      <div class="decision" id="decision">ANALIZA</div>
+      <div class="chart"><div class="line"></div></div>
+      <div class="grid">
+        <div class="mini"><small>Wartość</small><b id="value">--</b></div>
+        <div class="mini"><small>Ilość</small><b id="qty">--</b></div>
+        <div class="mini"><small>Auto trading</small><b id="auto">--</b></div>
+        <div class="mini"><small>Minimum BUY</small><b id="minbuy">--</b></div>
+      </div>
+    </div>
+    <div class="card list" id="positions"></div>
+  </div>
+  <div class="warn" id="warning">LIVE overlay startuje...</div>
+  <div class="footer">To nie jest gwarancja zysku. Rynek krypto jest ryzykowny. Dane mogą być niepełne lub opóźnione.</div>
+</div>
+
+<script>
+async function load(){
+  try{
+    const r = await fetch('/api/live-state?_=' + Date.now(), {cache:'no-store'});
+    const s = await r.json();
+    const positions = s.positions || [];
+    document.getElementById('backend').textContent = s.ok ? 'OK' : 'BŁĄD';
+    document.getElementById('updated').textContent = s.updated_at || new Date().toISOString();
+    document.getElementById('warning').textContent = s.warning || 'LIVE';
+
+    const cfg = s.strategy || {};
+    document.getElementById('auto').textContent = s.enable_auto_trading ? 'ON' : 'OFF';
+    document.getElementById('minbuy').textContent = (s.min_buy_usdc || cfg.min_buy_usdc || 60) + ' USDC';
+
+    const main = positions.find(p => p.source === 'binance') || positions[0] || {};
+    document.getElementById('pair').textContent = main.symbol || 'BRAK POZYCJI';
+    document.getElementById('decision').textContent = main.decision || 'CZEKAM';
+    document.getElementById('value').textContent = main.value_usdc ? Number(main.value_usdc).toFixed(2)+' USDC' : '--';
+    document.getElementById('qty').textContent = main.quantity ? Number(main.quantity).toFixed(6) : '--';
+
+    document.getElementById('ticker').innerHTML = positions.slice(0,12).map(p =>
+      `<div class="pill"><b>${p.symbol||p.asset}</b> ${p.value_usdc ? Number(p.value_usdc).toFixed(1)+' USDC' : ''}</div>`
+    ).join('') || '<div class="pill"><b>RLdC</b> czeka na dane</div>';
+
+    document.getElementById('positions').innerHTML = positions.slice(0,14).map(p =>
+      `<div class="row"><div class="sym">${p.symbol||p.asset}</div><div class="val">${p.value_usdc ? Number(p.value_usdc).toFixed(2)+' USDC' : '-'}</div><div class="dec">${p.decision||'HOLD'}</div></div>`
+    ).join('') || '<div class="row"><div class="sym">Brak pozycji</div><div></div><div class="dec">WAIT</div></div>';
+  }catch(e){
+    document.getElementById('backend').textContent='ERROR';
+    document.getElementById('warning').textContent='Błąd overlay: '+e;
+  }
+}
+load();
+setInterval(load, 4000);
+</script>
+</body>
+</html>

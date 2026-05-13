@@ -82,6 +82,7 @@ from backend.runtime_settings import (
     build_runtime_state,
     build_symbol_tier_map,
     effective_bool,
+    get_symbol_tier_or_default,
     get_runtime_config,
     watchlist_override,
 )
@@ -203,6 +204,11 @@ class DataCollector:
         self._inflight_ttl_seconds = int(
             os.getenv("EXECUTION_INFLIGHT_TTL_SECONDS", "120")
         )
+        # Throttle zapisu market_data przez WS: max 1 rekord per symbol na N sekund
+        self._ws_tick_last_saved: dict[str, datetime] = {}
+        self._ws_tick_min_interval_s = int(
+            os.getenv("WS_TICK_SAVE_INTERVAL_SECONDS", "30")
+        )
 
         logger.info(f"📊 DataCollector initialized")
         logger.info(f"   Watchlist: {', '.join(self.watchlist)}")
@@ -293,10 +299,15 @@ class DataCollector:
             payload=payload,
         )
         db.flush()
+        # Prefiks czytelny przed JSON — widżety statusu pokazują pierwsze ~120 znaków
+        _log_prefix = (
+            f"decision symbol={symbol} mode={mode} action={action} reason={reason_code} | "
+        )
         log_to_db(
             level,
             "collector_decision",
-            json.dumps(
+            _log_prefix
+            + json.dumps(
                 {
                     "symbol": symbol,
                     "mode": mode,
@@ -1473,7 +1484,80 @@ class DataCollector:
                                 db=db,
                             )
                     else:
-                        # SELL: zachowaj dotychczasową normalizację qty do step_size
+                        # SELL: preflight — sprawdź realne saldo Binance przed wysłaniem
+                        if str(pending.side or "").upper() == "SELL":
+                            import math as _math_sell
+                            try:
+                                _sell_sym = (pending.symbol or "").upper()
+                                _base_asset = _sell_sym
+                                for _q in ("USDC", "USDT", "EUR", "BTC"):
+                                    if _sell_sym.endswith(_q):
+                                        _base_asset = _sell_sym[: -len(_q)]
+                                        break
+                                _balances_preflight = self.binance.get_balances() or []
+                                _binance_free = 0.0
+                                for _b in _balances_preflight:
+                                    if (_b.get("asset") or "").upper() == _base_asset:
+                                        _binance_free = float(_b.get("free") or 0)
+                                        break
+                                if _binance_free <= 0:
+                                    # Brak aktywów na Binance — zamknij pozycję DB (reconcile)
+                                    log_to_db(
+                                        "WARNING",
+                                        "live_trading",
+                                        f"sell_blocked_zero_binance_free: {pending.symbol} base={_base_asset} "
+                                        f"db_qty={qty:.8g} binance_free=0 — zamykam pozycję DB",
+                                        db=db,
+                                    )
+                                    pending.status = "REJECTED"
+                                    pending.confirmed_at = utc_now_naive()
+                                    _zero_pos = (
+                                        db.query(Position)
+                                        .filter(
+                                            Position.symbol == pending.symbol,
+                                            Position.mode == p_mode,
+                                            Position.quantity > 0,
+                                        )
+                                        .first()
+                                    )
+                                    if _zero_pos:
+                                        _zero_pos.quantity = 0.0
+                                        _zero_pos.exit_reason_code = "binance_asset_unavailable"
+                                    db.commit()
+                                    continue
+                                elif _binance_free < qty * 0.995:
+                                    # Saldo Binance mniejsze niż DB qty — ogranicz do faktycznego
+                                    try:
+                                        _sym_info_sell = (self.binance.get_allowed_symbols() or {}).get(pending.symbol, {})
+                                        _step_sell = float(_sym_info_sell.get("step_size") or 0)
+                                    except Exception:
+                                        _step_sell = 0.0
+                                    _capped = _binance_free
+                                    if _step_sell > 0:
+                                        _capped = _math_sell.floor(_binance_free / _step_sell) * _step_sell
+                                        _prec_sell = max(0, int(round(-_math_sell.log10(_step_sell))))
+                                        _capped = round(_capped, _prec_sell)
+                                    log_to_db(
+                                        "WARNING",
+                                        "live_trading",
+                                        f"sell_qty_capped_to_binance_free: {pending.symbol} "
+                                        f"db_qty={qty:.8g} binance_free={_binance_free:.8g} capped_qty={_capped:.8g}",
+                                        db=db,
+                                    )
+                                    qty = _capped
+                                    if qty <= 0:
+                                        pending.status = "REJECTED"
+                                        pending.confirmed_at = utc_now_naive()
+                                        db.commit()
+                                        continue
+                            except Exception as _sell_preflight_exc:
+                                log_exception(
+                                    "live_trading",
+                                    f"Błąd preflight SELL balance dla {pending.symbol}",
+                                    _sell_preflight_exc,
+                                    db=db,
+                                )
+
                         # BUY: diagnostyczne logi + last-resort floor przed wysłaniem
                         if str(pending.side or "").upper() == "BUY":
                             _avail_usdc_before = float(
@@ -1540,6 +1624,26 @@ class DataCollector:
                             pass
 
                     # ——— LIVE: wykonaj przez Binance API ———
+                    # Przed wysłaniem na Binance oznacz pozycję SELL jako "exit w toku"
+                    # żeby blokować nowe BUY wejścia na tę samą pozycję w oknie oczekiwania.
+                    if pending.side == "SELL":
+                        _pos_to_mark = (
+                            db.query(Position)
+                            .filter(
+                                Position.symbol == pending.symbol,
+                                Position.mode == p_mode,
+                                Position.exit_reason_code.is_(None),
+                                Position.quantity > 0,
+                            )
+                            .first()
+                        )
+                        if _pos_to_mark is not None:
+                            _pos_to_mark.exit_reason_code = "pending_confirmed_execution"
+                            db.flush()
+                            logger.info(
+                                "🔒 LIFECYCLE: position marked exit_in_progress %s mode=%s pos_id=%s",
+                                pending.symbol, p_mode, _pos_to_mark.id,
+                            )
                     pending.status = "EXCHANGE_SUBMITTED"
                     log_to_db(
                         "INFO",
@@ -1564,6 +1668,19 @@ class DataCollector:
                         order_type="MARKET",
                         quantity=qty,
                     )
+                    if result is None:
+                        # place_order zwróciło None — nieoczekiwany stan po refaktorze; loguj wyraźnie
+                        log_to_db(
+                            "ERROR",
+                            "live_trading",
+                            f"place_order_returned_none pending_id={pending.id} symbol={pending.symbol} side={pending.side} qty={qty} — zlecenie NIE dotarło na Binance",
+                            db=db,
+                        )
+                        logger.error(
+                            "❌ place_order zwróciło None dla %s %s qty=%s — zlecenie NIE dotarło na Binance",
+                            pending.symbol, pending.side, qty,
+                        )
+                        result = {"_error": True, "error_code": None, "error_message": "place_order returned None"}
                     if not result or result.get("_error"):
                         err_msg = (
                             result.get("error_message", "") if result else ""
@@ -1919,8 +2036,14 @@ class DataCollector:
                     .filter(
                         Position.symbol == pending.symbol,
                         Position.mode == p_mode,
-                        Position.exit_reason_code.is_(None),
+                        # SELL może trafić na pozycję oznaczoną exit_in_progress
+                        # (exit_reason_code='pending_confirmed_execution') — musimy ją znaleźć.
+                        # BUY powinien trafić tylko na pozycję z NULL lub open state.
+                        Position.exit_reason_code.in_([None, "pending_confirmed_execution"])
+                        if str(pending.side or "").upper() == "SELL"
+                        else Position.exit_reason_code.is_(None),
                     )
+                    .filter(Position.quantity > 0)
                     .first()
                 )
                 _closed_pos_id: Optional[int] = None  # zachowamy przed db.delete
@@ -1989,6 +2112,14 @@ class DataCollector:
                             ),
                         )
                         db.add(position)
+                        db.flush()  # Uzyskaj id nowej pozycji przed logiem
+                        logger.info(
+                            "🟢 LIFECYCLE POSITION_OPENED: %s mode=%s pos_id=%s "
+                            "entry=%.6f qty=%.8g tp=%.6f sl=%.6f",
+                            pending.symbol, p_mode, position.id,
+                            exec_price, qty,
+                            float(_planned_tp or 0), float(_planned_sl or 0),
+                        )
                     else:
                         total_qty = float(position.quantity) + qty
                         if total_qty > 0:
@@ -2067,14 +2198,30 @@ class DataCollector:
                             position.exit_reason_code = (
                                 "full_close"  # mark as closed, not deleted
                             )
+                            # Wyczyść stan trailing/goals żeby nie zostawiać brudnych danych
+                            position.trailing_active = False
+                            position.trailing_stop_price = None
                             _closed_pos_id = (
                                 position.id
                             )  # pozycja wciąż istnieje w DB dla audia
+                            logger.info(
+                                "✅ LIFECYCLE STATE_RESET: %s pos_id=%s mode=%s "
+                                "net_pnl=%.4f trailing_cleared=True",
+                                pending.symbol, position.id, p_mode,
+                                float(position.net_pnl or 0),
+                            )
                             # updated_at jest auto-updated przez SQLAlchemy onupdate
                         else:
                             # Częściowe zamknięcie — inkrementuj licznik i aktywuj trailing
                             position.partial_take_count = (
                                 int(position.partial_take_count or 0) + 1
+                            )
+                            logger.info(
+                                "⚡ LIFECYCLE PARTIAL_CLOSE: %s pos_id=%s mode=%s "
+                                "remaining_qty=%.8g partial_take_count=%d",
+                                pending.symbol, position.id, p_mode,
+                                float(position.quantity),
+                                int(position.partial_take_count or 0),
                             )
                     else:
                         # Brak pozycji — zapisujemy zlecenie, ale bez zmian pozycji.
@@ -3575,6 +3722,11 @@ class DataCollector:
                     config_snapshot_id=runtime_ctx.get("snapshot_id"),
                     strategy_name=f"{_mode}_collector",
                 )
+                logger.info(
+                    "🔴 LIFECYCLE SL_HIT: %s mode=%s pending_id=%s "
+                    "price=%.6f sl=%.6f entry=%.6f qty=%.8g",
+                    sym, _mode, pending_id, price, stop_loss, entry, qty,
+                )
                 # Eskalacja cooldown po SL — zapobiega natychmiastowemu re-entry
                 sl_state = self.demo_state.get(
                     sym, {"loss_streak": 0, "cooldown": base_cooldown}
@@ -3643,6 +3795,11 @@ class DataCollector:
                     reason=f"[TRAIL] Trailing stop @ {price:.6f} (trail={trailing_stop:.6f})",
                     config_snapshot_id=runtime_ctx.get("snapshot_id"),
                     strategy_name=f"{_mode}_collector",
+                )
+                logger.info(
+                    "🔴 LIFECYCLE TRAILING_HIT: %s mode=%s pending_id=%s "
+                    "price=%.6f trail=%.6f entry=%.6f qty=%.8g",
+                    sym, _mode, pending_id, price, trailing_stop, entry, qty,
                 )
                 _trail_key = f"{_mode}:{sym}:{getattr(pos, 'id', 'na')}"
                 _last_trail_alert = self._trailing_alert_state.get(_trail_key)
@@ -3745,7 +3902,12 @@ class DataCollector:
                         config_snapshot_id=runtime_ctx.get("snapshot_id"),
                         strategy_name=f"{_mode}_collector",
                     )
-                    # Podnieś SL do break-even lub wyżej
+                    logger.info(
+                        "⚡ LIFECYCLE TP_PARTIAL_HIT: %s mode=%s pending_id=%s "
+                        "price=%.6f tp=%.6f partial_qty=%.8g remaining=%.8g",
+                        sym, _mode, pending_id, price, take_profit, partial_qty,
+                        qty - partial_qty,
+                    )
                     pos.planned_sl = max(stop_loss, entry)
                     # Aktywuj trailing
                     pos.trailing_active = True
@@ -3820,7 +3982,11 @@ class DataCollector:
                         config_snapshot_id=runtime_ctx.get("snapshot_id"),
                         strategy_name=f"{_mode}_collector",
                     )
-                    # Sukces — zeruj loss_streak, zwiększ win_streak
+                    logger.info(
+                        "🟢 LIFECYCLE TP_FULL_HIT: %s mode=%s pending_id=%s "
+                        "price=%.6f tp=%.6f reason=%s qty=%.8g",
+                        sym, _mode, pending_id, price, take_profit, reason_code, qty,
+                    )
                     tp_state = self.demo_state.get(
                         sym,
                         {"loss_streak": 0, "win_streak": 0, "cooldown": base_cooldown},
@@ -4557,17 +4723,8 @@ class DataCollector:
                 )
                 continue
 
-            # --- Tier gating: symbol musi należeć do zdefiniowanego tieru ---
-            sym_tier = tier_map.get(sym_norm)
-            if tier_map and not sym_tier:
-                self._trace_decision(
-                    db,
-                    symbol=symbol,
-                    action="SKIP",
-                    reason_code="symbol_not_in_any_tier",
-                    runtime_ctx=runtime_ctx,
-                )
-                continue
+            # --- Tier fallback: brak ręcznego tieru nie blokuje rynku ---
+            sym_tier = get_symbol_tier_or_default(sym_norm, tier_map)
 
             # --- HOLD MODE: nie generuj nowych wejść dla pozycji strategicznych ---
             if sym_tier and sym_tier.get("no_new_entries"):
@@ -5042,8 +5199,37 @@ class DataCollector:
 
             position_action = "new_entry"
             if side == "BUY" and position is not None:
-                # Nie blokuj ślepo BUY na istniejącej pozycji.
-                # Dopuszczamy add/rebalance, a ostateczna decyzja zapadnie na poziomie portfela.
+                # Blokuj BUY gdy jest aktywne SELL pending (exit w toku) — uniknięcie
+                # kolizji BUY+SELL na tej samej pozycji.
+                _active_sell_pending = (
+                    db.query(PendingOrder)
+                    .filter(
+                        PendingOrder.symbol == symbol,
+                        PendingOrder.mode == _current_mode,
+                        PendingOrder.side == "SELL",
+                        PendingOrder.status.in_(list(ACTIVE_PENDING_STATUSES)),
+                    )
+                    .count()
+                )
+                if _active_sell_pending > 0:
+                    self._trace_decision(
+                        db,
+                        symbol=symbol,
+                        action="SKIP",
+                        reason_code="buy_blocked_exit_in_progress",
+                        runtime_ctx=runtime_ctx,
+                        mode=_current_mode,
+                        signal_summary=signal_summary,
+                        details={"active_sell_pending": _active_sell_pending},
+                    )
+                    _log_why_not_buy(
+                        symbol,
+                        "buy_blocked_exit_in_progress",
+                        active_sell_pending=_active_sell_pending,
+                    )
+                    continue
+                # Brak aktywnego SELL → dopuszczamy add/rebalance.
+                # Ostateczna decyzja portfelowa zapadnie na etapie selekcji.
                 position_action = "add_to_position"
             if side == "SELL" and position is None:
                 self._trace_decision(
@@ -5620,6 +5806,29 @@ class DataCollector:
                 .first()
             )
             if active_pending is not None:
+                # NIGDY nie kasuj aktywnego SELL pending — to może być exit engine (TP/SL).
+                # Kasowanie SELL przez logikę BUY powoduje pominięcie stop-lossa.
+                if active_pending.side == "SELL":
+                    self._trace_decision(
+                        db,
+                        symbol=symbol,
+                        action="SKIP",
+                        reason_code="buy_blocked_sell_pending_active",
+                        runtime_ctx=runtime_ctx,
+                        mode=_current_mode,
+                        signal_summary=signal_summary,
+                        details={
+                            "pending_id": active_pending.id,
+                            "pending_side": active_pending.side,
+                            "pending_status": active_pending.status,
+                        },
+                    )
+                    _log_why_not_buy(
+                        symbol,
+                        "buy_blocked_sell_pending_active",
+                        pending_id=active_pending.id,
+                    )
+                    continue
                 min_pending_replace_delta = float(
                     config.get("min_pending_replace_delta", 0.03)
                 )
@@ -6255,7 +6464,7 @@ class DataCollector:
         self._last_purge_ts = now
 
         purge_specs = [
-            ("market_data", "timestamp", timedelta(days=7)),
+            ("market_data", "timestamp", timedelta(hours=2)),
             ("signals", "timestamp", timedelta(days=7)),
             ("system_logs", "timestamp", timedelta(days=14)),
             ("klines", "open_time", timedelta(days=30)),
@@ -6441,6 +6650,13 @@ class DataCollector:
             if not symbol:
                 return
 
+            # Throttle: zapisuj do DB co najwyżej raz na _ws_tick_min_interval_s
+            _now_ts = utc_now_naive()
+            _last_saved = self._ws_tick_last_saved.get(symbol)
+            if _last_saved and (_now_ts - _last_saved).total_seconds() < self._ws_tick_min_interval_s:
+                return
+            self._ws_tick_last_saved[symbol] = _now_ts
+
             db = SessionLocal()
             try:
                 market_data = MarketData(
@@ -6449,7 +6665,7 @@ class DataCollector:
                     volume=float(data.get("v", 0)),
                     bid=float(data.get("b", 0)),
                     ask=float(data.get("a", 0)),
-                    timestamp=utc_now_naive(),
+                    timestamp=_now_ts,
                 )
                 db.add(market_data)
                 db.commit()

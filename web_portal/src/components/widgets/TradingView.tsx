@@ -367,7 +367,7 @@ export default function TradingView({
                     borderRadius: '8px',
                     color: '#f1f5f9'
                   }}
-                  formatter={(val: any, name: string | undefined) => [
+                  formatter={(val: any, name: string | number | undefined) => [
                     val != null ? String(val) : '--',
                     name === 'price' ? 'Cena' : name === 'ema20' ? 'EMA 20' : name === 'ema50' ? 'EMA 50' : (name ?? '')
                   ]}

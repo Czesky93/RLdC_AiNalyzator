@@ -464,14 +464,26 @@ def analyze_now(
                 .order_by(desc(SystemLog.timestamp))
                 .first()
             )
+            _last_err_msg = None
+            if last_err and last_err.message:
+                _raw_err = last_err.message
+                try:
+                    import json as _json_mkt
+                    _parsed_err = _json_mkt.loads(_raw_err)
+                    _last_err_msg = (
+                        _parsed_err.get("error")
+                        or _parsed_err.get("message")
+                        or _parsed_err.get("reason_code")
+                        or _raw_err[:220]
+                    )
+                except Exception:
+                    _last_err_msg = _raw_err[:220]
             return {
                 "success": True,
                 "symbols": symbols,
                 "generated": False,
                 "message": "Nie wygenerowano nowych zakresów/insightów (sprawdź Logi -> module=analysis).",
-                "last_openai_error": (
-                    last_err.message[:220] if last_err and last_err.message else None
-                ),
+                "last_openai_error": _last_err_msg,
             }
         return {
             "success": True,

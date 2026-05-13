@@ -221,6 +221,10 @@ class TestMergeUniverses:
             eligible, priority, priority_only=False
         )
 
+        assert len(final) == 3  # eligible_only + priority (bez duplikacji)
+        assert "SOLUSDC" in eligible_only  # symbole spoza priority
+        assert "BTCUSDC" in priority_set
+
 
 def test_validate_symbol_rejects_fake_symbol():
     registry = {
@@ -260,9 +264,6 @@ def test_universe_stats_return_required_counts(monkeypatch):
     assert stats["tradable_count"] == 3
     assert stats["filtered_count"] == 2
 
-        assert len(final) == 3  # eligible_only + priority (bez duplikacji)
-        assert "SOLUSDC" in eligible_only  # symbole spoza priority
-        assert "BTCUSDC" in priority_set
 
     def test_merge_priority_only_true(self):
         """Test PRIORITY_ONLY=true: zwraca tylko przecięcie priority ∩ eligible."""

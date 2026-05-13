@@ -96,6 +96,7 @@ def test_ai_orchestrator_unpaid_openai_with_fallback(client, monkeypatch):
         "unpaid",
         "auth_failed",
         "error",
+        "disabled",
     }
     assert data.get("primary") in {"local", "heuristic"}
 
@@ -474,52 +475,6 @@ class TestCommandTraceEndpoint:
             json={"text": "kup btceur"},
         )
         assert resp.status_code == 200
-
-
-def test_parse_command_intent_distinguishes_system_commands(monkeypatch):
-    from backend.routers.control import _parse_command_intent
-
-    monkeypatch.setattr(
-        "backend.routers.control.get_symbol_registry",
-        lambda *args, **kwargs: {
-            "allowed_quotes": ["USDC"],
-            "metadata": {"BTCUSDC": {"symbol": "BTCUSDC", "base_asset": "BTC", "quote_asset": "USDC"}},
-            "quote_filtered_universe": ["BTCUSDC"],
-            "tradable_universe": ["BTCUSDC"],
-            "by_base_asset": {"BTC": ["BTCUSDC"]},
-        },
-    )
-
-    assert _parse_command_intent("/logs").get("action") == "logs_status"
-    assert _parse_command_intent("/execution").get("action") == "execution_status"
-    assert _parse_command_intent("/ai").get("action") == "ai_status"
-    assert _parse_command_intent("/reconcile").get("action") == "reconcile_status"
-
-
-def test_command_router_invalid_symbol_does_not_create_pending(client, monkeypatch):
-    monkeypatch.setattr(
-        "backend.routers.control.get_symbol_registry",
-        lambda *args, **kwargs: {
-            "allowed_quotes": ["USDC"],
-            "metadata": {"BTCUSDC": {"symbol": "BTCUSDC", "base_asset": "BTC", "quote_asset": "USDC"}},
-            "quote_filtered_universe": ["BTCUSDC"],
-            "tradable_universe": ["BTCUSDC"],
-            "by_base_asset": {"BTC": ["BTCUSDC"]},
-        },
-    )
-    resp = client.post(
-        "/api/control/command/execute",
-        json={
-            "text": "kup operator",
-            "source": "pytest",
-            "execute_mode": "execute",
-            "force": False,
-        },
-    )
-    assert resp.status_code == 200
-    data = (resp.json() or {}).get("data") or {}
-    assert data.get("execution") == "invalid_symbol"
-    assert data.get("pending_order_id") is None
         data = (resp.json() or {}).get("data") or {}
         assert data.get("parsed_symbol") == "BTCEUR"
 
@@ -583,6 +538,52 @@ def test_command_router_invalid_symbol_does_not_create_pending(client, monkeypat
         assert parser.get("type") == "trade"
         assert parser.get("config_key") is None
         assert parser.get("symbol") == "SOLUSDC"
+
+
+def test_parse_command_intent_distinguishes_system_commands(monkeypatch):
+    from backend.routers.control import _parse_command_intent
+
+    monkeypatch.setattr(
+        "backend.routers.control.get_symbol_registry",
+        lambda *args, **kwargs: {
+            "allowed_quotes": ["USDC"],
+            "metadata": {"BTCUSDC": {"symbol": "BTCUSDC", "base_asset": "BTC", "quote_asset": "USDC"}},
+            "quote_filtered_universe": ["BTCUSDC"],
+            "tradable_universe": ["BTCUSDC"],
+            "by_base_asset": {"BTC": ["BTCUSDC"]},
+        },
+    )
+
+    assert _parse_command_intent("/logs").get("action") == "logs_status"
+    assert _parse_command_intent("/execution").get("action") == "execution_status"
+    assert _parse_command_intent("/ai").get("action") == "ai_status"
+    assert _parse_command_intent("/reconcile").get("action") == "reconcile_status"
+
+
+def test_command_router_invalid_symbol_does_not_create_pending(client, monkeypatch):
+    monkeypatch.setattr(
+        "backend.routers.control.get_symbol_registry",
+        lambda *args, **kwargs: {
+            "allowed_quotes": ["USDC"],
+            "metadata": {"BTCUSDC": {"symbol": "BTCUSDC", "base_asset": "BTC", "quote_asset": "USDC"}},
+            "quote_filtered_universe": ["BTCUSDC"],
+            "tradable_universe": ["BTCUSDC"],
+            "by_base_asset": {"BTC": ["BTCUSDC"]},
+        },
+    )
+    resp = client.post(
+        "/api/control/command/execute",
+        json={
+            "text": "kup operator",
+            "source": "pytest",
+            "execute_mode": "execute",
+            "force": False,
+        },
+    )
+    assert resp.status_code == 200
+    data = (resp.json() or {}).get("data") or {}
+    assert data.get("execution") == "invalid_symbol"
+    assert data.get("pending_order_id") is None
 
 
 class TestCommandExecuteNLPipeline:

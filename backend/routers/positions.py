@@ -52,6 +52,22 @@ def _trade_ts_to_naive(ts_ms: Any) -> Optional[datetime]:
     return datetime.fromtimestamp(ts_int / 1000, tz=timezone.utc).replace(tzinfo=None)
 
 
+def _asset_from_symbol(symbol: str) -> str:
+    sym = str(symbol or "").upper().replace("/", "").replace("-", "")
+    for quote in ("USDC", "USDT", "BUSD", "FDUSD", "TUSD", "EUR"):
+        if sym.endswith(quote) and len(sym) > len(quote):
+            return sym[: -len(quote)]
+    return sym
+
+
+def _quote_from_symbol(symbol: str) -> str:
+    sym = str(symbol or "").upper().replace("/", "").replace("-", "")
+    for quote in ("USDC", "USDT", "BUSD", "FDUSD", "TUSD", "EUR"):
+        if sym.endswith(quote) and len(sym) > len(quote):
+            return quote
+    return ""
+
+
 def _estimate_live_entry_from_trades(
     trades: Optional[List[Dict[str, Any]]],
     current_qty: float,
@@ -115,21 +131,43 @@ def _resolve_live_position_baseline(
         .order_by(desc(Position.updated_at), desc(Position.opened_at))
         .first()
     )
+    if not existing:
+        asset = _asset_from_symbol(symbol)
+        for candidate in (
+            db.query(Position)
+            .filter(Position.mode == "live")
+            .order_by(desc(Position.updated_at), desc(Position.opened_at))
+            .all()
+        ):
+            if _asset_from_symbol(candidate.symbol) == asset:
+                existing = candidate
+                break
 
     if existing and _as_float(existing.entry_price) > 0:
         entry_price = _as_float(existing.entry_price)
+        quote = _quote_from_symbol(existing.symbol)
+        if quote in {"USDC", "USDT", "BUSD", "FDUSD", "TUSD"}:
+            try:
+                from backend.routers.portfolio import _build_live_spot_portfolio
+
+                eur_per_usdt = (_build_live_spot_portfolio(db) or {}).get("eur_per_usdt")
+                if eur_per_usdt:
+                    entry_price *= float(eur_per_usdt)
+            except Exception:
+                pass
         unrealized_pnl = (current_price - entry_price) * quantity
         dirty = False
+        can_update_existing = existing.symbol == symbol
 
-        if abs(_as_float(existing.quantity) - quantity) > max(1e-8, quantity * 1e-6):
+        if can_update_existing and abs(_as_float(existing.quantity) - quantity) > max(1e-8, quantity * 1e-6):
             existing.quantity = quantity
             dirty = True
-        if abs(_as_float(existing.current_price) - current_price) > max(
+        if can_update_existing and abs(_as_float(existing.current_price) - current_price) > max(
             1e-8, current_price * 1e-6
         ):
             existing.current_price = current_price
             dirty = True
-        if abs(_as_float(existing.unrealized_pnl) - unrealized_pnl) > 1e-8:
+        if can_update_existing and abs(_as_float(existing.unrealized_pnl) - unrealized_pnl) > 1e-8:
             existing.unrealized_pnl = unrealized_pnl
             existing.gross_pnl = unrealized_pnl
             existing.net_pnl = unrealized_pnl
@@ -155,7 +193,9 @@ def _resolve_live_position_baseline(
     opened_at: Optional[datetime] = None
     source = "missing_trade_history"
     try:
-        trades = binance_client.get_my_trades(symbol, limit=500) or []
+        from backend.portfolio_reconcile import fetch_my_trades_paginated
+
+        trades = fetch_my_trades_paginated(binance_client, symbol=symbol, limit=1000)
         entry_price, opened_at, source = _estimate_live_entry_from_trades(
             trades, quantity
         )
@@ -1013,9 +1053,9 @@ def _analyze_spot_position(
     Buduje kartę analizy dla pozycji LIVE spot (z Binance).
 
     Klasyfikacja pozycji (twarde reguły domenowe):
-    - dust_position       — wartość < DISPLAY_DUST_EUR lub source=binance_spot_dust
-    - missing_entry_price — brak ceny wejścia z historii Binance/fillów
-    - valid_position      — pełna pozycja z potwierdzoną ceną wejścia
+    - DUST_RESIDUAL          — wartość < DISPLAY_DUST_EUR lub source=binance_spot_dust
+    - ORPHAN_HOLDING         — realny holding bez ceny wejścia z historii Binance/fillów
+    - FULL_TRADING_POSITION  — pełna pozycja z potwierdzoną ceną wejścia
 
     Silnik rekomendacji (TRZYMAJ / SPRZEDAJ / REDUKUJ) działa WYŁĄCZNIE
     dla valid_position. Dla pozostałych: decision = "DUST" lub "BRAK DANYCH".
@@ -1048,11 +1088,14 @@ def _analyze_spot_position(
     can_compute_pnl: bool = has_entry_price and qty > 0 and not is_dust
 
     if is_dust:
-        classification = "dust_position"
+        classification = "DUST_RESIDUAL"
+        legacy_classification = "dust_position"
     elif not has_entry_price:
-        classification = "missing_entry_price"
+        classification = "ORPHAN_HOLDING"
+        legacy_classification = "missing_entry_price"
     else:
-        classification = "valid_position"
+        classification = "FULL_TRADING_POSITION"
+        legacy_classification = "valid_position"
 
     # Wskaźniki techniczne — pobieramy zawsze (do info), ale decyzja NA ICH PODSTAWIE
     # tylko dla valid_position.
@@ -1089,8 +1132,8 @@ def _analyze_spot_position(
         reasons = [
             "Brak potwierdzonej ceny wejścia w historii transakcji Binance.",
             "System nie może wiarygodnie policzyć wyniku tej pozycji.",
-            "Zasób kupiony poza historią dostępną przez API (np. Convert, transfer) "
-            "lub historia przekracza limit 1000 transakcji.",
+            "Wartość pozycji jest pokazywana według aktualnej ceny, ale PnL wymaga backfill/importu.",
+            "Jeżeli zakup był przez Convert, transfer albo deposit, pozostanie ORPHAN_HOLDING.",
         ]
     elif is_hold:
         # ── Tryb HOLD — rekomendacja na podstawie celu wyceny ────────────────
@@ -1249,8 +1292,10 @@ def _analyze_spot_position(
         "reasons": reasons,
         # ── Pola kontraktu API (jawna informacja o jakości danych) ──────────
         "classification": classification,
+        "legacy_classification": legacy_classification,
         "is_dust": is_dust,
         "has_entry_price": has_entry_price,
+        "requires_backfill": classification == "ORPHAN_HOLDING",
         "can_analyze": can_analyze,
         "can_compute_pnl": can_compute_pnl,
         "warning_message": warning_message,
@@ -1297,12 +1342,18 @@ def position_analysis(
             )
             cards = [_analyze_position(pos, db, tier_map) for pos in positions]
 
-        # Podsumowanie — tylko valid_position wchodzi do statystyk finansowych
-        # (dust i missing_entry_price nie mają wiarygodnego PnL)
-        valid_cards = [c for c in cards if c.get("classification") == "valid_position"]
+        # Podsumowanie — tylko FULL_TRADING_POSITION wchodzi do statystyk PnL
+        # (dust i orphan holdings nie mają wiarygodnego baseline).
+        valid_cards = [
+            c
+            for c in cards
+            if c.get("classification") in {"FULL_TRADING_POSITION", "valid_position"}
+        ]
         dust_cards = [c for c in cards if c.get("is_dust")]
         missing_cards = [
-            c for c in cards if c.get("classification") == "missing_entry_price"
+            c
+            for c in cards
+            if c.get("classification") in {"ORPHAN_HOLDING", "missing_entry_price"}
         ]
 
         total_value = sum(c["position_value_eur"] for c in valid_cards)
@@ -1326,8 +1377,10 @@ def position_analysis(
             "summary": {
                 "positions_count": len(cards),
                 "valid_positions_count": len(valid_cards),
+                "full_positions_count": len(valid_cards),
                 "dust_positions_count": len(dust_cards),
                 "missing_entry_count": len(missing_cards),
+                "orphan_holdings_count": len(missing_cards),
                 # Statystyki tylko z valid_position
                 "total_value_eur": round(total_value, sdec),
                 "total_cost_eur": round(total_cost, sdec) if total_cost > 0 else None,

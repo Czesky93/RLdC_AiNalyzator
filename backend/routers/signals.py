@@ -2401,7 +2401,7 @@ _REASON_PL = {
     "buy_deferred_insufficient_rotation_edge": "⏳ Rotacja odroczona — przewaga netto za mała",
     "portfolio_rotation_triggered": "🔄 Uruchomiono rotację portfela",
     "sell_blocked_no_position": "❌ SELL bez otwartej pozycji — pomijamy",
-    "symbol_not_in_any_tier": "❌ Symbol nie jest w żadnym tierze (watchliście AI)",
+    "default_market_tier_fallback": "❌ Symbol używa fallback tier DEFAULT_MARKET (watchliście AI)",
     "hold_mode_no_new_entries": "🔒 Symbol w trybie HOLD — nie otwieramy nowych",
     "symbol_cooldown_active": "⏳ Cooldown po ostatniej transakcji",
     "pending_cooldown_active": "⏳ Cooldown po ostatnim zleceniu",
@@ -3566,8 +3566,6 @@ def get_entry_readiness(
                 entry_reason = "ENTRY_BLOCKED_DATA_TOO_OLD"
             elif signal_type == "HOLD":
                 entry_reason = "NO_SIGNAL"
-            elif tier_map and sym_norm not in tier_map:
-                entry_reason = "ENTRY_BLOCKED_NOT_IN_TIER"
             elif open_count >= max_open_positions:
                 entry_reason = "ENTRY_BLOCKED_MAX_POSITIONS"
             elif sym in open_symbols:

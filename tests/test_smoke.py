@@ -7315,7 +7315,7 @@ def _make_spot(
 
 
 def test_classify_valid_position_has_recommendation():
-    """Pozycja z entry_price != None i value > 0.50 → classification=valid_position, decyzja ≠ DUST/BRAK DANYCH."""
+    """Pozycja z entry_price != None i value > 0.50 → classification=FULL_TRADING_POSITION."""
     from unittest.mock import patch
 
     from backend.database import SessionLocal
@@ -7335,8 +7335,8 @@ def test_classify_valid_position_has_recommendation():
             card = _analyze_spot_position(spot, db, tier_map={})
 
         assert (
-            card["classification"] == "valid_position"
-        ), f"Oczekiwano valid_position, got {card['classification']}"
+            card["classification"] == "FULL_TRADING_POSITION"
+        ), f"Oczekiwano FULL_TRADING_POSITION, got {card['classification']}"
         assert card["can_analyze"] is True
         assert card["can_compute_pnl"] is True
         assert card["has_entry_price"] is True
@@ -7354,7 +7354,7 @@ def test_classify_valid_position_has_recommendation():
 
 
 def test_classify_missing_entry_blocks_recommendation():
-    """Pozycja z entry_price=None i value > 0.50 → classification=missing_entry_price, decyzja=BRAK DANYCH, can_analyze=False."""
+    """Pozycja z entry_price=None i value > 0.50 → classification=ORPHAN_HOLDING."""
     from backend.database import SessionLocal
     from backend.routers.positions import _analyze_spot_position
 
@@ -7367,8 +7367,8 @@ def test_classify_missing_entry_blocks_recommendation():
         card = _analyze_spot_position(spot, db, tier_map={})
 
         assert (
-            card["classification"] == "missing_entry_price"
-        ), f"Oczekiwano missing_entry_price, got {card['classification']}"
+            card["classification"] == "ORPHAN_HOLDING"
+        ), f"Oczekiwano ORPHAN_HOLDING, got {card['classification']}"
         assert card["can_analyze"] is False
         assert card["can_compute_pnl"] is False
         assert card["has_entry_price"] is False
@@ -7384,7 +7384,7 @@ def test_classify_missing_entry_blocks_recommendation():
 
 
 def test_classify_dust_source_blocks_recommendation():
-    """Pozycja z source=binance_spot_dust → classification=dust_position niezależnie od wartości."""
+    """Pozycja z source=binance_spot_dust → classification=DUST_RESIDUAL."""
     from backend.database import SessionLocal
     from backend.routers.positions import _analyze_spot_position
 
@@ -7402,8 +7402,8 @@ def test_classify_dust_source_blocks_recommendation():
         card = _analyze_spot_position(spot, db, tier_map={})
 
         assert (
-            card["classification"] == "dust_position"
-        ), f"Oczekiwano dust_position, got {card['classification']}"
+            card["classification"] == "DUST_RESIDUAL"
+        ), f"Oczekiwano DUST_RESIDUAL, got {card['classification']}"
         assert card["is_dust"] is True
         assert card["can_analyze"] is False
         assert card["decision"] == "DUST", f"Oczekiwano DUST, got {card['decision']}"
@@ -7414,7 +7414,7 @@ def test_classify_dust_source_blocks_recommendation():
 
 
 def test_classify_low_value_dust_blocks_recommendation():
-    """Pozycja o wartości < 0.50 EUR → dust_position niezależnie od source."""
+    """Pozycja o wartości < 0.50 EUR → DUST_RESIDUAL niezależnie od source."""
     from backend.database import SessionLocal
     from backend.routers.positions import _analyze_spot_position
 
@@ -7431,7 +7431,7 @@ def test_classify_low_value_dust_blocks_recommendation():
         card = _analyze_spot_position(spot, db, tier_map={})
 
         assert card["is_dust"] is True
-        assert card["classification"] == "dust_position"
+        assert card["classification"] == "DUST_RESIDUAL"
         assert card["decision"] == "DUST"
         assert card["can_analyze"] is False
     finally:
@@ -7472,10 +7472,10 @@ def test_mixed_portfolio_summary_counts_only_valid():
                 for s in [valid_spot, dust_spot, missing_spot]
             ]
 
-        valid_cards = [c for c in cards if c.get("classification") == "valid_position"]
+        valid_cards = [c for c in cards if c.get("classification") == "FULL_TRADING_POSITION"]
         dust_cards = [c for c in cards if c.get("is_dust")]
         missing_cards = [
-            c for c in cards if c.get("classification") == "missing_entry_price"
+            c for c in cards if c.get("classification") == "ORPHAN_HOLDING"
         ]
 
         assert len(valid_cards) == 1

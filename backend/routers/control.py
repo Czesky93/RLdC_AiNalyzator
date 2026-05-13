@@ -1663,7 +1663,7 @@ def _command_brain(db: Session, req: CommandRequest) -> Dict[str, Any]:
             "Polecenie konwersji EUR→USDC przyjęte. "
             "Konwersja wykona się gdy collector oceni funding_conversion_required."
         )
-    else:
+    elif execution == "dry_run":
         # Natural conversation — generate real AI response via provider chain
         try:
             from backend.ai_orchestrator import generate_ai_chat_response

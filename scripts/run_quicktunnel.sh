@@ -11,14 +11,17 @@ RUNTIME_FILE="/tmp/rldc_tunnel_runtime.json"
 LOG_FILE="/home/rldc/RLdC_AiNalyzator/RLdC_AiNalyzator/logs/runtime/quicktunnel.log"
 FRONTEND_PORT=3000
 API_PORT=8000
+CLOUDFLARED_PID=""
 
 mkdir -p "$(dirname "$LOG_FILE")"
 
 cleanup() {
     echo "{\"running\":false,\"frontend_url\":null,\"api_url\":null,\"started_at\":null,\"stopped_at\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}" > "$RUNTIME_FILE"
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] STOP: quicktunnel zakończony" >> "$LOG_FILE"
-    # kill child cloudflared
-    kill 0 2>/dev/null || true
+    if [[ -n "${CLOUDFLARED_PID:-}" ]] && kill -0 "$CLOUDFLARED_PID" 2>/dev/null; then
+        kill "$CLOUDFLARED_PID" 2>/dev/null || true
+        wait "$CLOUDFLARED_PID" 2>/dev/null || true
+    fi
 }
 
 trap cleanup EXIT SIGTERM SIGINT
@@ -28,9 +31,14 @@ echo "[$(date '+%Y-%m-%d %H:%M:%S')] START: uruchamiam cloudflared quick tunnel 
 # Inicjalny stan
 echo "{\"running\":false,\"frontend_url\":null,\"api_url\":null,\"started_at\":null}" > "$RUNTIME_FILE"
 
-# Uruchom cloudflared i parsuj URL z outputu
-# cloudflared wypisuje URL w formie: https://xxxxx.trycloudflare.com
-cloudflared tunnel --url "http://localhost:$FRONTEND_PORT" 2>&1 | while IFS= read -r line; do
+PIPE="$(mktemp -u /tmp/rldc-quicktunnel.XXXXXX)"
+mkfifo "$PIPE"
+cloudflared tunnel --url "http://localhost:$FRONTEND_PORT" > "$PIPE" 2>&1 &
+CLOUDFLARED_PID=$!
+
+# Parsuj URL z outputu. Cloudflared wypisuje URL w formie:
+# https://xxxxx.trycloudflare.com
+while IFS= read -r line; do
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] $line" >> "$LOG_FILE"
 
     # Szukaj URL w logach
@@ -41,4 +49,7 @@ cloudflared tunnel --url "http://localhost:$FRONTEND_PORT" 2>&1 | while IFS= rea
         echo "[$(date '+%Y-%m-%d %H:%M:%S')] TUNNEL URL: $URL" >> "$LOG_FILE"
         echo "OK: Quick tunnel URL: $URL" >&2
     fi
-done
+done < "$PIPE"
+
+rm -f "$PIPE"
+wait "$CLOUDFLARED_PID"

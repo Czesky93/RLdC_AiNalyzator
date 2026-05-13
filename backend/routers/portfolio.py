@@ -5,7 +5,7 @@ Portfolio API Router - endpoints dla portfolio
 import threading
 import time
 from datetime import datetime, timedelta, timezone
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import desc, func
@@ -24,11 +24,74 @@ from backend.database import (
 
 router = APIRouter()
 
-# ─── Cache TTL dla _build_live_spot_portfolio (30s) ──────────────────────────
+CASH_ASSETS = {"EUR", "USDT", "USDC", "BUSD", "DAI", "USDP", "TUSD", "FDUSD"}
+DUST_THRESHOLD_EUR = 0.50
+
+# ─── Cache TTL dla _build_live_spot_portfolio ────────────────────────────────
 _portfolio_cache: Dict = {}
 _portfolio_cache_ts: float = 0.0
-_portfolio_cache_ttl: float = 120.0
+_portfolio_cache_ttl: float = 10.0
 _portfolio_cache_lock = threading.Lock()
+
+
+def _portfolio_symbol_for_asset(asset: str) -> str:
+    asset = str(asset or "").upper()
+    return asset if asset in CASH_ASSETS else f"{asset}EUR"
+
+
+def _portfolio_display_symbol(asset: str) -> str:
+    asset = str(asset or "").upper()
+    return asset if asset in CASH_ASSETS else f"{asset}/EUR"
+
+
+def _asset_from_symbol(symbol: str) -> str:
+    sym = str(symbol or "").upper().replace("/", "").replace("-", "")
+    for quote in ("USDC", "USDT", "BUSD", "FDUSD", "TUSD", "EUR"):
+        if sym.endswith(quote) and len(sym) > len(quote):
+            return sym[: -len(quote)]
+    return sym
+
+
+def _quote_from_symbol(symbol: str) -> str:
+    sym = str(symbol or "").upper().replace("/", "").replace("-", "")
+    for quote in ("USDC", "USDT", "BUSD", "FDUSD", "TUSD", "EUR"):
+        if sym.endswith(quote) and len(sym) > len(quote):
+            return quote
+    return ""
+
+
+def _entry_price_to_eur(entry_price: float, quote: str, eur_per_usdt: Optional[float]) -> Optional[float]:
+    if entry_price <= 0:
+        return None
+    quote = str(quote or "").upper()
+    if quote == "EUR":
+        return entry_price
+    if quote in {"USDC", "USDT", "BUSD", "FDUSD", "TUSD"} and eur_per_usdt:
+        return entry_price * float(eur_per_usdt)
+    return None
+
+
+def _classify_live_holding(
+    asset: str,
+    value_eur: float,
+    local_pos: Optional[Position],
+) -> str:
+    asset = str(asset or "").upper()
+    if asset in CASH_ASSETS:
+        return "CASH"
+    if value_eur < DUST_THRESHOLD_EUR:
+        return "DUST_RESIDUAL"
+    if local_pos and local_pos.entry_price and float(local_pos.entry_price) > 0:
+        return "FULL_TRADING_POSITION"
+    return "ORPHAN_HOLDING"
+
+
+def _live_holding_message(classification: str) -> Optional[str]:
+    if classification == "ORPHAN_HOLDING":
+        return "Brak ceny wejścia — wymaga backfill/importu historii Binance."
+    if classification == "DUST_RESIDUAL":
+        return "Mała resztka aktywa poniżej progu analizy tradingowej."
+    return None
 
 
 def _build_live_spot_portfolio(db: Session) -> Dict:
@@ -469,29 +532,47 @@ def get_portfolio_wealth(
             else:
                 # Pobierz lokalne pozycje live (entry_price z historii Binance)
                 local_positions: Dict[str, Position] = {}
+                local_positions_by_asset: Dict[str, Position] = {}
                 for lp in db.query(Position).filter(Position.mode == "live").all():
                     local_positions[lp.symbol] = lp
+                    asset_key = _asset_from_symbol(lp.symbol)
+                    if asset_key and (
+                        asset_key not in local_positions_by_asset
+                        or (lp.entry_price or 0) > 0
+                    ):
+                        local_positions_by_asset[asset_key] = lp
 
                 # Zastąp items[] pełnymi danymi Binance spot
                 items = []
                 total_pnl_live = 0.0
                 for p in live_data["spot_positions"]:
                     asset = p["asset"]
-                    is_stable = asset in ("EUR", "USDT", "USDC", "BUSD")
-                    symbol = f"{asset}EUR" if not is_stable else asset
+                    is_cash = asset in CASH_ASSETS
+                    symbol = _portfolio_symbol_for_asset(asset)
                     qty = float(p["total"])
                     current_price = float(p["price_eur"])
                     value_eur = float(p["value_eur"])
 
                     # Użyj prawdziwej ceny wejścia z lokalnej DB (jeśli dostępna)
-                    local_pos = local_positions.get(symbol)
+                    local_pos = local_positions.get(symbol) or local_positions_by_asset.get(asset)
+                    entry_price_eur = None
+                    if local_pos and local_pos.entry_price and not is_cash:
+                        entry_price_eur = _entry_price_to_eur(
+                            float(local_pos.entry_price),
+                            _quote_from_symbol(local_pos.symbol),
+                            live_data.get("eur_per_usdt"),
+                        )
+                    classification = _classify_live_holding(
+                        asset,
+                        value_eur,
+                        local_pos if entry_price_eur else None,
+                    )
                     if (
-                        local_pos
-                        and local_pos.entry_price
-                        and float(local_pos.entry_price) > 0
-                        and not is_stable
+                        classification == "FULL_TRADING_POSITION"
+                        and local_pos
+                        and entry_price_eur
                     ):
-                        entry_price = float(local_pos.entry_price)
+                        entry_price = float(entry_price_eur)
                         cost_eur = round(entry_price * qty, 4)
                         pnl_eur = round(value_eur - cost_eur, 4)
                         pnl_pct = round(
@@ -503,15 +584,16 @@ def get_portfolio_wealth(
                             else None
                         )
                     else:
-                        entry_price = current_price
-                        cost_eur = value_eur
-                        pnl_eur = 0.0
-                        pnl_pct = 0.0
+                        entry_price = None if not is_cash else current_price
+                        cost_eur = None if not is_cash else value_eur
+                        pnl_eur = None
+                        pnl_pct = None
                         opened_at = None
 
                     items.append(
                         {
                             "symbol": symbol,
+                            "display_symbol": _portfolio_display_symbol(asset),
                             "asset": asset,
                             "side": "HOLD",
                             "quantity": qty,
@@ -526,11 +608,14 @@ def get_portfolio_wealth(
                             "weight_pct": p["weight_pct"],
                             "price_source": p["price_source"],
                             "opened_at": opened_at,
+                            "classification": classification,
+                            "has_entry_price": classification == "FULL_TRADING_POSITION",
+                            "requires_backfill": classification == "ORPHAN_HOLDING",
+                            "diagnostic_message": _live_holding_message(classification),
                         }
                     )
                 total_equity = live_data["total_equity_eur"]
                 free_cash = live_data["free_cash_eur"]
-                total_positions_value = total_equity
 
         # Dodatkowe pola z ostatniego snapshota (equity_change, margin_level)
         latest_snap = (
@@ -566,24 +651,33 @@ def get_portfolio_wealth(
             # Nadpisz balance rzeczywistą wartością z Binance
             balance = round(total_equity, 2)
 
-        total_pnl = round(sum(i.get("pnl_eur", 0) for i in items), 2)
+        total_pnl = round(sum(float(i.get("pnl_eur") or 0) for i in items), 2)
 
-        _DUST_THRESHOLD_EUR = 0.50
-        _CASH_ASSETS = {"EUR", "USDT", "USDC", "BUSD", "DAI", "USDP", "TUSD"}
+        for i in items:
+            if not i.get("classification"):
+                asset = str(i.get("asset") or i.get("symbol") or "").upper()
+                value = float(i.get("value_eur") or 0)
+                if asset in CASH_ASSETS:
+                    i["classification"] = "CASH"
+                elif value < DUST_THRESHOLD_EUR:
+                    i["classification"] = "DUST_RESIDUAL"
+                elif i.get("entry_price") not in (None, 0):
+                    i["classification"] = "FULL_TRADING_POSITION"
+                else:
+                    i["classification"] = "ORPHAN_HOLDING"
+                i.setdefault("display_symbol", _portfolio_display_symbol(asset))
 
-        def _is_dust_item(it: dict) -> bool:
-            return float(it.get("value_eur") or 0) < _DUST_THRESHOLD_EUR
-
-        def _is_cash_item(it: dict) -> bool:
-            return (
-                str(it.get("asset") or it.get("symbol") or "").upper() in _CASH_ASSETS
-            )
-
-        active_items = [
-            i for i in items if not _is_dust_item(i) and not _is_cash_item(i)
+        cash_items = [i for i in items if i.get("classification") == "CASH"]
+        full_items = [
+            i for i in items if i.get("classification") == "FULL_TRADING_POSITION"
         ]
-        dust_items = [i for i in items if _is_dust_item(i) and not _is_cash_item(i)]
-        cash_items = [i for i in items if _is_cash_item(i)]
+        orphan_items = [i for i in items if i.get("classification") == "ORPHAN_HOLDING"]
+        dust_items = [i for i in items if i.get("classification") == "DUST_RESIDUAL"]
+        crypto_items = [i for i in items if i.get("classification") != "CASH"]
+        total_positions_value = sum(float(i.get("value_eur") or 0) for i in crypto_items)
+        invested_value = sum(float(i.get("cost_eur") or 0) for i in full_items)
+        orphan_value = sum(float(i.get("value_eur") or 0) for i in orphan_items)
+        dust_value = sum(float(i.get("value_eur") or 0) for i in dust_items)
 
         response: Dict = {
             "success": True,
@@ -591,7 +685,13 @@ def get_portfolio_wealth(
             "total_equity": round(total_equity, 2),
             "free_cash": round(free_cash, 2),
             "positions_value": round(total_positions_value, 2),
-            "positions_count": len(active_items),
+            "holdings_value": round(total_positions_value, 2),
+            "invested": round(invested_value, 2),
+            "orphan_value": round(orphan_value, 2),
+            "dust_value": round(dust_value, 6),
+            "positions_count": len(full_items),
+            "full_positions_count": len(full_items),
+            "orphan_holdings_count": len(orphan_items),
             "dust_positions_count": len(dust_items),
             "cash_assets_count": len(cash_items),
             "all_assets_count": len(items),
@@ -603,6 +703,10 @@ def get_portfolio_wealth(
             "used_margin": used_margin,
             "balance": balance,
             "items": items,
+            "cash": cash_items,
+            "full_positions": full_items,
+            "orphan_holdings": orphan_items,
+            "dust_residuals": dust_items,
             "equity_history": equity_history,
         }
         if _info:

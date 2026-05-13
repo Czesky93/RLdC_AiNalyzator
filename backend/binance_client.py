@@ -13,7 +13,11 @@ from typing import Any, Dict, List, Optional
 from urllib.parse import quote, urlencode
 
 import requests
-from binance.client import Client
+# Import Client tylko runtime, nie przy imporcie modułu
+try:
+    from binance.client import Client
+except ImportError:
+    Client = None
 from binance.exceptions import BinanceAPIException, BinanceRequestException
 from dotenv import load_dotenv
 
@@ -73,7 +77,7 @@ def _binance_retry(func):
                     delay *= 2
                 else:
                     raise
-        return None  # nie powinno się tu trafić
+        raise RuntimeError("_binance_retry: exhausted without result — unreachable state")
 
     return wrapper
 
@@ -368,10 +372,23 @@ class BinanceClient:
     def get_futures_account(self) -> Optional[Dict]:
         return self._signed_request("https://fapi.binance.com", "/fapi/v2/account")
 
-    def get_my_trades(self, symbol: str, limit: int = 500) -> Optional[List[Dict]]:
+    def get_my_trades(
+        self,
+        symbol: str,
+        limit: int = 500,
+        from_id: Optional[int] = None,
+        start_time: Optional[int] = None,
+        end_time: Optional[int] = None,
+    ) -> Optional[List[Dict]]:
         if not symbol:
             return None
-        params = {"symbol": symbol, "limit": limit}
+        params = {"symbol": symbol, "limit": min(int(limit or 500), 1000)}
+        if from_id is not None:
+            params["fromId"] = int(from_id)
+        if start_time is not None:
+            params["startTime"] = int(start_time)
+        if end_time is not None:
+            params["endTime"] = int(end_time)
         return self._signed_request(
             "https://api.binance.com", "/api/v3/myTrades", params=params
         )
@@ -484,8 +501,11 @@ class BinanceClient:
                         # Normalizacja: usuń błędy zmiennoprzecinkowe
                         decimals = max(0, -int(math.floor(math.log10(step))))
                         quantity = round(quantity, decimals)
-                except Exception:
-                    pass
+                except Exception as step_exc:
+                    logger.warning(
+                        "⚠️ place_order: nie udało się znormalizować qty do step_size dla %s: %s — wysyłam oryginalną wartość qty=%s",
+                        symbol, step_exc, quantity,
+                    )
                 kwargs["quantity"] = quantity
             if order_type == "LIMIT":
                 if price is None:
@@ -496,27 +516,39 @@ class BinanceClient:
 
             # Uwzględnij przesunięcie czasu
             kwargs["recvWindow"] = 5000
-            try:
-                result = self.client.create_order(**kwargs)
-            except BinanceAPIException as e:
-                if getattr(e, "code", None) == -1021:
-                    # Timestamp out of range — synchronizuj czas i powtórz
-                    self._sync_time()
-                    result = self.client.create_order(**kwargs)
-                else:
-                    raise
             _log_qty = (
                 quantity
                 if quantity > 0
                 else f"quoteQty={kwargs.get('quoteOrderQty', 0)}"
             )
             logger.info(
-                f"✅ Zlecenie Binance: {side} {_log_qty} {symbol} → orderId={result.get('orderId')}"
+                "📤 place_order SEND: %s %s %s qty=%s price=%s",
+                side, _log_qty, symbol, kwargs.get("quantity"), kwargs.get("price", "MARKET"),
+            )
+            try:
+                result = self.client.create_order(**kwargs)
+            except BinanceAPIException as e:
+                if getattr(e, "code", None) == -1021:
+                    # Timestamp out of range — synchronizuj czas i powtórz
+                    logger.warning("⏳ place_order: timestamp out of range dla %s — sync czasu i retry", symbol)
+                    self._sync_time()
+                    result = self.client.create_order(**kwargs)
+                else:
+                    raise
+            order_id = result.get("orderId")
+            binance_status = result.get("status", "UNKNOWN")
+            exec_qty = result.get("executedQty", "?")
+            cum_quote = result.get("cummulativeQuoteQty", "?")
+            fills_count = len(result.get("fills") or [])
+            logger.info(
+                "✅ place_order RESPONSE: %s %s %s → orderId=%s status=%s executedQty=%s cumQuote=%s fills=%d",
+                side, _log_qty, symbol, order_id, binance_status, exec_qty, cum_quote, fills_count,
             )
             return result
         except BinanceAPIException as e:
             logger.error(
-                f"❌ Binance API error place_order {symbol}: code={e.status_code} msg={e.message}"
+                "❌ place_order Binance API error %s: code=%s msg=%s",
+                symbol, e.status_code, e.message,
             )
             return {
                 "_error": True,
@@ -524,8 +556,15 @@ class BinanceClient:
                 "error_message": e.message,
             }
         except Exception as e:
-            logger.error(f"❌ place_order nieoczekiwany błąd {symbol}: {str(e)}")
-            return None
+            logger.error(
+                "❌ place_order nieoczekiwany błąd %s: %s — %s",
+                symbol, type(e).__name__, str(e),
+            )
+            return {
+                "_error": True,
+                "error_code": None,
+                "error_message": f"{type(e).__name__}: {str(e)}",
+            }
 
     def get_order_fills(self, symbol: str, order_id: int) -> Optional[Dict]:
         """

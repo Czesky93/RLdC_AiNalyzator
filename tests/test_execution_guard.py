@@ -89,6 +89,8 @@ def test_execution_enabled_false_blocks_all_modes_with_reason_code():
 def test_pending_timeout_cleanup_marks_expired():
     db = TestingSessionLocal()
     try:
+        db.query(PendingOrder).delete()
+        db.commit()
         db.add(
             PendingOrder(
                 symbol="ETHUSDC",

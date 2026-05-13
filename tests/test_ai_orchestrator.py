@@ -188,17 +188,20 @@ class TestGenerateAiChatResponse:
         }
         mock_resp.raise_for_status.return_value = None
 
-        with patch(
-            "backend.ai_orchestrator.get_ai_orchestrator_status",
-            return_value=self._make_local_unusable_status(),
-        ):
-            with patch("backend.ai_orchestrator._circuit_open", return_value=False):
-                with patch("requests.post", return_value=mock_resp):
-                    from backend.ai_orchestrator import generate_ai_chat_response
+        with patch("backend.ai_orchestrator._cache_lookup", return_value=None):
+            with patch("backend.ai_orchestrator._allow_external_provider", return_value=(True, None)):
+                with patch(
+                    "backend.ai_orchestrator.get_ai_orchestrator_status",
+                    return_value=self._make_local_unusable_status(),
+                ):
+                    with patch("backend.ai_orchestrator._circuit_open", return_value=False):
+                        with patch.dict(os.environ, {"GROQ_API_KEY": "fake-key-for-test"}):
+                            with patch("requests.post", return_value=mock_resp):
+                                from backend.ai_orchestrator import generate_ai_chat_response
 
-                    response, provider = generate_ai_chat_response(
-                        "Cześć", max_tokens=50
-                    )
+                                response, provider = generate_ai_chat_response(
+                                    "Cześć", max_tokens=50, priority="high", task="analysis"
+                                )
 
         assert provider == "groq"
         assert len(response) > 0
@@ -532,6 +535,7 @@ class TestAiProviderHardening:
             {
                 "OPENAI_API_KEY": "sk-invalid",
                 "AI_PROVIDER": "openai",
+                "USE_OPENAI": "true",
             },
             clear=False,
         ):

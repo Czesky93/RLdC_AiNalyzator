@@ -17,33 +17,41 @@ def backfill_trade_history_from_binance(db: Session, mode: str = "live", limit: 
         total = float(bal.get("total") or 0.0)
         if total <= 0 or asset in {"USDT", "USDC", "EUR", "BUSD", "FDUSD", "TUSD"}:
             continue
-        # Szukaj symboli EUR/USDC
-        for quote in ("EUR", "USDC"):
+        # Szukaj symboli EUR/USDC/USDT, z paginacją myTrades po fromId.
+        found_any_trade = False
+        for quote in ("EUR", "USDC", "USDT"):
             symbol = f"{asset}{quote}"
-            trades = client.get_my_trades(symbol=symbol, limit=limit) or []
+            trades = fetch_my_trades_paginated(client, symbol=symbol, limit=limit)
             if not trades:
                 continue
-            # Wylicz entry_price z BUY trade'ów
-            buy_trades = [t for t in trades if t.get("isBuyer")]
-            total_qty = sum(float(t["qty"]) for t in buy_trades)
-            total_quote = sum(float(t["qty"]) * float(t["price"]) for t in buy_trades)
-            avg_price = (total_quote / total_qty) if total_qty > 0 else 0.0
+            found_any_trade = True
+            entry = reconstruct_entry_from_trades(trades, current_qty=total)
+            avg_price = float(entry.get("entry_price") or 0.0)
             # Uzupełnij Position
             pos = db.query(Position).filter(Position.symbol == symbol, Position.mode == mode, Position.exit_reason_code.is_(None)).first()
+            if not pos and avg_price > 0:
+                pos = Position(
+                    symbol=symbol,
+                    side="LONG",
+                    entry_price=avg_price,
+                    current_price=avg_price,
+                    quantity=total,
+                    mode=mode,
+                    opened_at=utc_now_naive(),
+                    entry_reason_code="backfill_binance_trade",
+                )
+                db.add(pos)
+                updated.append({"symbol": symbol, "entry_price": avg_price, "created": True})
             if pos:
                 if not pos.entry_price or pos.entry_price == 0:
                     if avg_price > 0:
                         pos.entry_price = avg_price
+                        pos.quantity = total
                         pos.updated_at = utc_now_naive()
-                        updated.append({"symbol": symbol, "entry_price": avg_price})
+                        pos.entry_reason_code = "backfill_binance_trade"
+                        updated.append({"symbol": symbol, "entry_price": avg_price, "matched_qty": entry.get("matched_qty")})
                     else:
-                        # Fallback: value/qty
-                        if pos.quantity > 0 and pos.current_price:
-                            pos.entry_price = (pos.current_price * pos.quantity) / pos.quantity
-                            pos.updated_at = utc_now_naive()
-                            updated.append({"symbol": symbol, "entry_price": pos.entry_price, "fallback": True})
-                        else:
-                            skipped.append({"symbol": symbol, "reason": "no entry_price, no trades"})
+                        skipped.append({"symbol": symbol, "reason": "orphan_holding_no_buy_trade"})
                 else:
                     skipped.append({"symbol": symbol, "reason": "entry_price already set"})
             # Zapisz ordery
@@ -68,6 +76,14 @@ def backfill_trade_history_from_binance(db: Session, mode: str = "live", limit: 
                         db.add(order)
                 except Exception as exc:
                     errors.append({"symbol": symbol, "trade": t, "error": str(exc), "trace": traceback.format_exc()})
+        if not found_any_trade:
+            skipped.append(
+                {
+                    "symbol": f"{asset}USDC",
+                    "asset": asset,
+                    "reason": "orphan_holding_no_trades_convert_transfer_or_deposit",
+                }
+            )
     try:
         db.commit()
     except Exception as exc:
@@ -124,7 +140,7 @@ def backfill_binance_trades(db: Session, mode: str = "live", symbols: Optional[L
 
     results = {}
     for symbol in symbols:
-        trades = client.get_my_trades(symbol=symbol, limit=limit) or []
+        trades = fetch_my_trades_paginated(client, symbol=symbol, limit=limit)
         if not trades:
             results[symbol] = "no_trades"
             continue
@@ -152,23 +168,16 @@ def backfill_binance_trades(db: Session, mode: str = "live", symbols: Optional[L
         # Uzupełnij Position (jeśli nie ma entry_price)
         pos = db.query(Position).filter(Position.symbol == symbol, Position.mode == mode, Position.exit_reason_code.is_(None)).first()
         if pos and (not pos.entry_price or pos.entry_price == 0):
-            # Wylicz avg_price z trade'ów BUY
-            buy_trades = [t for t in trades if t.get("isBuyer")]
-            total_qty = sum(float(t["qty"]) for t in buy_trades)
-            total_quote = sum(float(t["qty"]) * float(t["price"]) for t in buy_trades)
-            avg_price = (total_quote / total_qty) if total_qty > 0 else 0.0
+            entry = reconstruct_entry_from_trades(
+                trades, current_qty=float(pos.quantity or 0.0)
+            )
+            avg_price = float(entry.get("entry_price") or 0.0)
             if avg_price > 0:
                 pos.entry_price = avg_price
                 pos.updated_at = utc_now_naive()
                 results[symbol] = f"entry_price_backfilled:{avg_price:.8f}"
             else:
-                # Fallback: value/qty
-                if pos.quantity > 0 and pos.current_price:
-                    pos.entry_price = (pos.current_price * pos.quantity) / pos.quantity
-                    pos.updated_at = utc_now_naive()
-                    results[symbol] = f"entry_price_fallback:{pos.entry_price:.8f}"
-                else:
-                    results[symbol] = "no_entry_price"
+                results[symbol] = "orphan_holding_no_buy_trade"
         else:
             results[symbol] = "ok"
 
@@ -187,6 +196,93 @@ _RECONCILE_MIN_INTERVAL_SECONDS = int(os.getenv("RECONCILE_MIN_INTERVAL_SECONDS"
 
 # Minimalna wartość pozycji w USDC żeby uznać ją za realną (dust guard)
 _DUST_THRESHOLD_USDC = float(os.getenv("RECONCILE_DUST_THRESHOLD_USDC", "5.0"))
+
+
+def fetch_my_trades_paginated(
+    client: Any,
+    symbol: str,
+    limit: int = 1000,
+    max_pages: int = 25,
+) -> List[Dict[str, Any]]:
+    """Fetch Binance /api/v3/myTrades using fromId pagination."""
+    page_limit = max(1, min(int(limit or 1000), 1000))
+    from_id: Optional[int] = None
+    seen: set[int] = set()
+    out: List[Dict[str, Any]] = []
+    for _ in range(max_pages):
+        kwargs = {"symbol": symbol, "limit": page_limit}
+        if from_id is not None:
+            kwargs["from_id"] = from_id
+        try:
+            page = client.get_my_trades(**kwargs) or []
+        except TypeError:
+            page = client.get_my_trades(symbol=symbol, limit=page_limit) or []
+        if not page:
+            break
+        new_rows = []
+        for trade in page:
+            tid = int(trade.get("id") or trade.get("tradeId") or 0)
+            if tid and tid in seen:
+                continue
+            if tid:
+                seen.add(tid)
+            new_rows.append(trade)
+        out.extend(new_rows)
+        if len(page) < page_limit or not new_rows:
+            break
+        last_id = max(int(t.get("id") or t.get("tradeId") or 0) for t in page)
+        if last_id <= 0:
+            break
+        from_id = last_id + 1
+    out.sort(key=lambda t: (int(t.get("time") or 0), int(t.get("id") or t.get("tradeId") or 0)))
+    return out
+
+
+def reconstruct_entry_from_trades(
+    trades: List[Dict[str, Any]], current_qty: float
+) -> Dict[str, Any]:
+    """Reconstruct current cost basis from spot trades using FIFO lots."""
+    lots: List[List[float]] = []
+    for trade in sorted(trades, key=lambda t: (int(t.get("time") or 0), int(t.get("id") or t.get("tradeId") or 0))):
+        qty = float(trade.get("qty") or 0)
+        price = float(trade.get("price") or 0)
+        if qty <= 0 or price <= 0:
+            continue
+        if trade.get("isBuyer"):
+            lots.append([qty, price])
+            continue
+        remaining_sell = qty
+        while remaining_sell > 0 and lots:
+            lot_qty, lot_price = lots[0]
+            used = min(lot_qty, remaining_sell)
+            lot_qty -= used
+            remaining_sell -= used
+            if lot_qty <= 1e-12:
+                lots.pop(0)
+            else:
+                lots[0][0] = lot_qty
+
+    remaining_qty = max(0.0, float(current_qty or 0.0))
+    if remaining_qty <= 0:
+        return {"entry_price": None, "qty": 0.0, "quote_qty": 0.0, "matched_qty": 0.0}
+
+    matched_qty = 0.0
+    quote_qty = 0.0
+    for lot_qty, lot_price in reversed(lots):
+        if matched_qty >= remaining_qty:
+            break
+        used = min(lot_qty, remaining_qty - matched_qty)
+        matched_qty += used
+        quote_qty += used * lot_price
+
+    if matched_qty <= 0:
+        return {"entry_price": None, "qty": current_qty, "quote_qty": 0.0, "matched_qty": 0.0}
+    return {
+        "entry_price": quote_qty / matched_qty,
+        "qty": current_qty,
+        "quote_qty": quote_qty,
+        "matched_qty": matched_qty,
+    }
 
 # Symbole które ignorujemy podczas reconcylacji (np. stablecoiny, EUR bal)
 _SKIP_RECONCILE_SYMBOLS = {"USDC", "USDT", "EUR", "BUSD", "FDUSD", "TUSD"}

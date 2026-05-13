@@ -480,8 +480,6 @@ def run_market_scan(
             )
             if pos_val >= dust_threshold:
                 significant_open_symbols.add(p.symbol)
-            else:
-                significant_open_symbols.add(p.symbol)
 
         if mode == "live":
             try:

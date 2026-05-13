@@ -273,6 +273,85 @@ async def api_health_check():
     return await health_check()
 
 
+@app.get("/api/rldc/safe/live-state", tags=["Overlay"])
+async def live_state_for_overlay():
+    """
+    Zagregowany stan live systemu dla RLdC LIVE Overlay (OBS/monitor).
+    Zwraca pozycje, sygnały top5, equity, tryb i state machine.
+    """
+    from backend.database import SessionLocal
+    from backend.runtime_settings import build_runtime_state
+    from backend.database import Position, PendingOrder
+    import json as _json
+
+    db = SessionLocal()
+    try:
+        cfg = build_runtime_state(db)
+        trading_mode = str(cfg.get("trading_mode") or "demo").lower()
+
+        # Pozycje otwarte
+        positions_q = (
+            db.query(Position)
+            .filter(Position.mode == trading_mode, Position.quantity > 0)
+            .all()
+        )
+        positions_list = []
+        for p in positions_q:
+            entry = float(p.entry_price or 0)
+            current = float(p.current_price or p.entry_price or 0)
+            pnl_pct = ((current - entry) / entry * 100) if entry > 0 else 0
+            positions_list.append({
+                "symbol": p.symbol,
+                "qty": float(p.quantity or 0),
+                "entry_price": entry,
+                "current_price": current,
+                "pnl_pct": round(pnl_pct, 3),
+                "planned_tp": float(p.planned_tp or 0),
+                "planned_sl": float(p.planned_sl or 0),
+                "state": p.exit_reason_code or "IN_POSITION",
+            })
+
+        # Pending orders (oczekujące)
+        pending_q = (
+            db.query(PendingOrder)
+            .filter(
+                PendingOrder.mode == trading_mode,
+                PendingOrder.status.in_(["PENDING_CREATED", "PENDING_CONFIRMED", "EXCHANGE_SUBMITTED"]),
+            )
+            .order_by(PendingOrder.created_at.desc())
+            .limit(10)
+            .all()
+        )
+        pending_list = [
+            {"symbol": o.symbol, "side": o.side, "qty": float(o.quantity or 0), "status": o.status}
+            for o in pending_q
+        ]
+
+        # Equity (z portfela)
+        equity = 0.0
+        try:
+            from backend.portfolio_engine import get_portfolio_summary
+            summary = get_portfolio_summary(db, mode=trading_mode)
+            equity = float(summary.get("equity") or summary.get("total_value") or 0)
+        except Exception:
+            pass
+
+    finally:
+        db.close()
+
+    return {
+        "ok": True,
+        "trading_mode": trading_mode,
+        "allow_live": cfg.get("allow_live_trading", False),
+        "execution_enabled": cfg.get("execution_enabled", True),
+        "equity": round(equity, 4),
+        "open_positions": len(positions_list),
+        "positions": positions_list,
+        "pending_orders": pending_list,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+
+
 # Register routers
 app.include_router(market.router, prefix="/api/market", tags=["Market"])
 app.include_router(portfolio.router, prefix="/api/portfolio", tags=["Portfolio"])

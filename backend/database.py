@@ -1,3 +1,7 @@
+# Inicjalizacja bazy dla testów
+def init_test_db(engine):
+    from backend.database import Base
+    Base.metadata.create_all(bind=engine)
 """
 Database models and configuration for RLdC Trading Bot.
 """

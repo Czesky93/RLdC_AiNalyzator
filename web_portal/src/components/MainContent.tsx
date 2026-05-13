@@ -34,12 +34,14 @@ function useFetch<T>(path: string, refreshMs: number = 0) {
     }
     const buildUrl = () => {
       const base = getApiBase()
-      return path.startsWith('http') ? path : `${base}${path}`
+      const rawUrl = path.startsWith('http') ? path : `${base}${path}`
+      const separator = rawUrl.includes('?') ? '&' : '?'
+      return `${rawUrl}${separator}_ts=${Date.now()}`
     }
     const fetchData = async () => {
       try {
         const url = buildUrl()
-        const res = await fetch(url)
+        const res = await fetch(url, { cache: 'no-store' })
         if (!res.ok) {
           let detail = ''
           try { detail = (await res.json()).detail || '' } catch { /* ignore */ }
@@ -4991,7 +4993,7 @@ function PortfolioView({ mode, onSymbolClick }: { mode: 'demo' | 'live'; onSymbo
                         className="text-rldc-teal-primary hover:underline font-bold"
                         onClick={() => onSymbolClick?.(item.symbol)}
                       >
-                        {item.symbol.replace(/EUR$/, '/EUR').replace(/USDT$/, '/USDT').replace(/USDC$/, '/USDC')}
+	                        {item.display_symbol || item.symbol}
                       </button>
                     </td>
                     <td className="py-2 text-slate-300 text-right">
@@ -5002,8 +5004,10 @@ function PortfolioView({ mode, onSymbolClick }: { mode: 'demo' | 'live'; onSymbo
                     <td className="py-2 text-slate-200 text-right font-semibold">{item.value_eur.toFixed(2)} EUR</td>
                     <td className="py-2 text-slate-400 text-right">{item.weight_pct}%</td>
                     <td className={`py-2 text-right font-semibold ${pnlCls(item.pnl_eur)}`}>
-                      {item.pnl_eur != null ? `${item.pnl_eur >= 0 ? '+' : ''}${item.pnl_eur.toFixed(2)} EUR` : '--'}
-                      <span className="text-[10px] ml-1 opacity-70">({item.pnl_pct >= 0 ? '+' : ''}{item.pnl_pct}%)</span>
+	                      {item.pnl_eur != null ? `${item.pnl_eur >= 0 ? '+' : ''}${item.pnl_eur.toFixed(2)} EUR` : '--'}
+	                      {item.pnl_pct != null && (
+	                        <span className="text-[10px] ml-1 opacity-70">({item.pnl_pct >= 0 ? '+' : ''}{item.pnl_pct}%)</span>
+	                      )}
                     </td>
                   </tr>
                 ))}
@@ -5987,9 +5991,10 @@ function DiagTradingTab({ mode }: { mode: 'demo' | 'live' }) {
             {[
               { label: 'Łączna wartość', value: cs.total_account_value != null ? `${Number(cs.total_account_value).toFixed(2)} ${cs.base_currency}` : '--', c: 'text-rldc-green-primary font-bold' },
               { label: 'Wolne środki', value: cs.free_cash != null ? `${Number(cs.free_cash).toFixed(2)} ${cs.base_currency}` : '--', c: 'text-slate-100' },
-              { label: 'W pozycjach', value: cs.active_positions_value != null ? `${Number(cs.active_positions_value).toFixed(2)} ${cs.base_currency}` : '--', c: 'text-slate-100' },
+	              { label: 'Krypto holdings', value: cs.active_positions_value != null ? `${Number(cs.active_positions_value).toFixed(2)} ${cs.base_currency}` : '--', c: 'text-slate-100' },
+	              { label: 'Bez ceny wejścia', value: cs.orphan_holdings_count ?? '--', c: 'text-yellow-300' },
               { label: 'Wartość pyłu', value: cs.dust_value != null ? `${Number(cs.dust_value).toFixed(4)} ${cs.base_currency}` : '--', c: 'text-slate-500' },
-              { label: 'Aktywne pozycje', value: cs.active_positions_count ?? '--', c: 'text-slate-300' },
+	              { label: 'Pełne pozycje', value: cs.full_positions_count ?? cs.active_positions_count ?? '--', c: 'text-slate-300' },
               { label: 'Pył', value: cs.dust_positions_count ?? '--', c: 'text-slate-500' },
               { label: 'Gotówka', value: cs.cash_assets_count ?? '--', c: 'text-slate-300' },
               { label: 'Wszystkie aktywa', value: cs.all_assets_count ?? '--', c: 'text-slate-300' },
@@ -6376,9 +6381,9 @@ function PositionAnalysisView({ mode, onSymbolClick }: { mode: 'demo' | 'live'; 
           const realism = pctNeeded !== null ? assessGoalRealism(pctNeeded, c.trend, c.rsi) : null
 
           // Klasyfikacja wizualna na podstawie pól z backendu
-          const isDust = c.is_dust === true || c.classification === 'dust_position'
-          const isMissingEntry = !isDust && c.classification === 'missing_entry_price'
-          const isValid = c.classification === 'valid_position'
+	          const isDust = c.is_dust === true || c.classification === 'DUST_RESIDUAL' || c.classification === 'dust_position'
+	          const isMissingEntry = !isDust && (c.classification === 'ORPHAN_HOLDING' || c.classification === 'missing_entry_price')
+	          const isValid = c.classification === 'FULL_TRADING_POSITION' || c.classification === 'valid_position'
 
           // Style karty wg klasyfikacji
           const cardBorderClass = isDust

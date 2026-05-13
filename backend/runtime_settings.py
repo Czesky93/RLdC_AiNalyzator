@@ -1014,6 +1014,8 @@ _TIER_DEFAULTS = {
     "max_trades_per_day_per_symbol": 2,
 }
 
+DEFAULT_MARKET_TIER = {**_TIER_DEFAULTS, "tier": "DEFAULT_MARKET"}
+
 
 def build_symbol_tier_map(tiers_config: dict) -> Dict[str, dict]:
     """Zbuduj lookup: symbol → tier overrides z konfiguracji tierów."""
@@ -1033,6 +1035,11 @@ def build_symbol_tier_map(tiers_config: dict) -> Dict[str, dict]:
             if sym_norm:
                 result[sym_norm] = overrides
     return result
+
+
+def get_symbol_tier_or_default(symbol: str, tier_map: Dict[str, dict]) -> dict:
+    sym_norm = str(symbol or "").strip().upper().replace("/", "").replace("-", "")
+    return dict((tier_map or {}).get(sym_norm) or DEFAULT_MARKET_TIER)
 
 
 def get_overrides(db: Session, keys: Iterable[str]) -> Dict[str, str]:
@@ -1476,3 +1483,6 @@ def apply_runtime_updates(
         "state": build_runtime_state(db, active_position_count=active_position_count),
         "snapshot": snapshot,
     }
+
+
+# RLdC_STRATEGY_FIX_APPLIED

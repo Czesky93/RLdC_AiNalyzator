@@ -59,6 +59,11 @@ logs/
 web_portal/.next/
 web_portal/out/
 
+# Node modules (root-level — należą wyłącznie do web_portal/)
+node_modules/
+/node_modules/
+package-lock.json
+
 # PID files
 *.pid
 
