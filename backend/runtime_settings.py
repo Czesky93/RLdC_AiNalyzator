@@ -336,7 +336,7 @@ _SETTINGS: Dict[str, SettingSpec] = {
         section="trading",
         parser=_parse_positive_int,
         serializer=_serialize_int,
-        default=20,
+        default=200,
         env_var="MAX_TRADES_PER_DAY",
         validators=(_validate_positive("max_trades_per_day"),),
     ),
@@ -827,21 +827,21 @@ _SETTINGS: Dict[str, SettingSpec] = {
                 "min_confidence_add": 0.0,
                 "min_edge_multiplier_add": 0.0,
                 "risk_scale": 1.0,
-                "max_trades_per_day_per_symbol": 10,
+                "max_trades_per_day_per_symbol": 99,
             },
             "ALTCOIN": {
                 "symbols": ["ETCUSDC", "SHIBEUR", "SHIBUSDC", "SXTUSDC"],
                 "min_confidence_add": 0.05,
                 "min_edge_multiplier_add": 0.5,
                 "risk_scale": 0.7,
-                "max_trades_per_day_per_symbol": 3,
+                "max_trades_per_day_per_symbol": 99,
             },
             "SPECULATIVE": {
                 "symbols": ["WLFIEUR", "WLFIUSDC"],
                 "min_confidence_add": 0.10,
                 "min_edge_multiplier_add": 1.0,
                 "risk_scale": 0.3,
-                "max_trades_per_day_per_symbol": 2,
+                "max_trades_per_day_per_symbol": 99,
             },
         },
         env_var="SYMBOL_TIERS",
@@ -1011,7 +1011,7 @@ _TIER_DEFAULTS = {
     "min_confidence_add": 0.0,
     "min_edge_multiplier_add": 0.0,
     "risk_scale": 1.0,
-    "max_trades_per_day_per_symbol": 2,
+    "max_trades_per_day_per_symbol": 99,
 }
 
 DEFAULT_MARKET_TIER = {**_TIER_DEFAULTS, "tier": "DEFAULT_MARKET"}
