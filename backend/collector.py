@@ -4644,6 +4644,36 @@ class DataCollector:
                 details,
             )
 
+        # ━━━ MAKRO-FILTR: BTC/ETH TREND GATE ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        # Jeśli BTC lub ETH mają silny sygnał SELL → wstrzymaj WSZYSTKIE nowe BUY
+        # dla altcoinów (nie-BTC/ETH). Altcoiny mają wysoką korelację z BTC/ETH.
+        # Kupowanie altcoinów w bessie BTC to jedna z najczęstszych przyczyn strat.
+        _btc_macro_conf_threshold = float(config.get("btc_macro_gate_threshold", 0.75))
+        _macro_gate_block_new_buys = False
+        _macro_gate_reason = ""
+        _quote_sfx = "USDC" if (os.getenv("QUOTE_CURRENCY_MODE", "USDC") == "USDC") else "EUR"
+        for _macro_sym in (f"BTC{_quote_sfx}", f"ETH{_quote_sfx}"):
+            _macro_sig = (
+                db.query(Signal)
+                .filter(Signal.symbol == _macro_sym)
+                .order_by(Signal.timestamp.desc())
+                .first()
+            )
+            if (
+                _macro_sig
+                and str(_macro_sig.signal_type).upper() == "SELL"
+                and float(_macro_sig.confidence or 0) >= _btc_macro_conf_threshold
+            ):
+                _macro_gate_block_new_buys = True
+                _macro_gate_reason = (
+                    f"{_macro_sym} SELL conf={float(_macro_sig.confidence):.2f} "
+                    f">= próg {_btc_macro_conf_threshold} — blokada nowych BUY"
+                )
+                break
+        if _macro_gate_block_new_buys:
+            logger.info("MACRO_GATE_ACTIVE reason=%s", _macro_gate_reason)
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
         candidate_symbols: List[str] = list(self.watchlist)
         scanner_symbols: List[str] = []
         if scanner_enabled:
@@ -5152,6 +5182,32 @@ class DataCollector:
                         "RSI (wysoki) potwierdza",
                         "Cena w zakresie SELL (AI)",
                     ]
+
+            # ━━━ MAKRO-GATE: jeśli BTC/ETH SELL → zeruj BUY dla altcoinów ━━━━━━
+            # BTC i ETH nie podlegają blokadzie makro (są makro-sygnałem).
+            _is_macro_symbol = sym_norm in (f"BTC{_quote_sfx}", f"ETH{_quote_sfx}")
+            if side == "BUY" and _macro_gate_block_new_buys and not _is_macro_symbol:
+                # Wyjątek: zezwól na BUY jeśli symbol ma bardzo wysoką konfidencję
+                # i sam w sobie jest w TREND_UP (silny własny trend mimo bessy BTC)
+                _macro_override_conf = float(config.get("macro_gate_override_confidence", 0.92))
+                _allow_macro_override = (
+                    float(sig.confidence or 0) >= _macro_override_conf
+                    and regime_state.regime == "TREND_UP"
+                )
+                if not _allow_macro_override:
+                    self._trace_decision(
+                        db,
+                        symbol=symbol,
+                        action="SKIP",
+                        reason_code="macro_trend_gate_blocked",
+                        runtime_ctx=runtime_ctx,
+                        mode=_current_mode,
+                        signal_summary=signal_summary,
+                        risk_check={"macro_reason": _macro_gate_reason},
+                    )
+                    _log_why_not_buy(symbol, "macro_trend_gate_blocked", reason=_macro_gate_reason)
+                    side = None
+            # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
             if side is None:
                 # Diagnostyka: które konkretnie filtry zawiodły

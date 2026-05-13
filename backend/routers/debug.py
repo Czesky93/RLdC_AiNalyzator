@@ -86,11 +86,22 @@ async def get_state_consistency(
             from backend.routers.positions import _get_live_spot_positions
             try:
                 spots = _get_live_spot_positions(db)
-                spot_symbols = {s["symbol"] for s in spots}
-                local_symbols = {p.symbol for p in positions}
+                # Porównuj po base asset (np. BANK), nie po pełnym symbolu (BANKEUR vs BANKUSDC)
+                _quote_sfxs = ("EUR", "USDC", "USDT", "BUSD", "BTC", "ETH", "BNB")
+                def _base_asset(sym: str) -> str:
+                    sym_up = sym.upper()
+                    for sfx in _quote_sfxs:
+                        if sym_up.endswith(sfx) and len(sym_up) > len(sfx):
+                            return sym_up[: -len(sfx)]
+                    return sym_up
 
-                in_binance_not_local = spot_symbols - local_symbols
-                in_local_not_binance = local_symbols - spot_symbols
+                # Binance spot assets (base only, np. BANK, BANANAS31)
+                spot_assets = {s.get("asset", _base_asset(s["symbol"])).upper() for s in spots}
+                # Lokalne pozycje base assets
+                local_assets = {_base_asset(p.symbol) for p in positions}
+
+                in_binance_not_local = spot_assets - local_assets
+                in_local_not_binance = local_assets - spot_assets
 
                 if in_binance_not_local:
                     inconsistencies.append(
