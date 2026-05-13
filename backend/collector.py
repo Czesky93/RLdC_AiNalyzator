@@ -209,6 +209,17 @@ class DataCollector:
         self._ws_tick_min_interval_s = int(
             os.getenv("WS_TICK_SAVE_INTERVAL_SECONDS", "30")
         )
+        # Throttle alertów exit (SL/TP/trailing): klucz "{mode}:{sym}:{reason_code}"
+        # Nie spamuj Telegram tym samym alertem co 3-4 min gdy pending już istnieje.
+        self._exit_alert_sent_at: dict[str, datetime] = {}
+        self._exit_alert_min_interval_s = int(
+            os.getenv("EXIT_ALERT_MIN_INTERVAL_SECONDS", "900")  # 15 minut
+        )
+        # Cooldown po Binance rejection: "{mode}:{sym}:{side}" → datetime ostatniego rejection
+        self._binance_rejection_cooldown: dict[str, datetime] = {}
+        self._binance_rejection_cooldown_s = int(
+            os.getenv("BINANCE_REJECTION_COOLDOWN_SECONDS", "600")  # 10 minut
+        )
 
         logger.info(f"📊 DataCollector initialized")
         logger.info(f"   Watchlist: {', '.join(self.watchlist)}")
@@ -1654,14 +1665,8 @@ class DataCollector:
                         ),
                         db=db,
                     )
-                    self._send_telegram_alert(
-                        f"{pending.side} SUBMITTED: {pending.symbol}",
-                        (
-                            f"Zlecenie {pending.side} {pending.symbol} wysłane na giełdę. "
-                            "Oczekiwanie na fill."
-                        ),
-                        force_send=True,
-                    )
+                    # UWAGA: NIE wysyłamy "SUBMITTED" przed place_order — to było źródłem
+                    # fałszywych alertów "kupuję/sprzedaję" gdy Binance odrzucał zlecenie.
                     result = self.binance.place_order(
                         symbol=pending.symbol,
                         side=pending.side,
@@ -1693,6 +1698,19 @@ class DataCollector:
                         )
                         pending.status = "REJECTED"
                         pending.confirmed_at = utc_now_naive()
+                        # Zarejestruj rejection cooldown — zapobiega natychmiastowemu retry
+                        _rej_key = f"{p_mode}:{pending.symbol}:{pending.side}"
+                        self._binance_rejection_cooldown[_rej_key] = utc_now_naive()
+                        # Telegram: powiadom o odrzuceniu zlecenia (jasna informacja dla użytkownika)
+                        self._send_telegram_alert(
+                            f"❌ {pending.side} ODRZUCONE: {pending.symbol}",
+                            (
+                                f"Zlecenie {pending.side} {pending.symbol} qty={qty:.6g} "
+                                f"ODRZUCONE przez Binance.\nPowód: {err_msg[:120]}\n"
+                                f"Następna próba możliwa po {self._binance_rejection_cooldown_s // 60} min."
+                            ),
+                            force_send=True,
+                        )
                         # Gdy SELL jest rejected, odblokuj pozycję.
                         # Inaczej exit_reason_code zostaje w stanie pending.
                         _sell_pos = (
@@ -3679,6 +3697,17 @@ class DataCollector:
             # ━━━ WARSTWA 1: HARD EXIT — Stop Loss ━━━━━━━━━━━━━━━━━━━━━━━━━
             if price <= stop_loss:
                 reason_code = "stop_loss_hit"
+                # Sprawdź Binance rejection cooldown — jeśli ostatnie zlecenie SELL
+                # było odrzucone przez Binance, nie twórz nowego przez N sekund.
+                _rej_cd_key = f"{_mode}:{sym}:SELL"
+                _rej_last = self._binance_rejection_cooldown.get(_rej_cd_key)
+                if _rej_last and (now - _rej_last).total_seconds() < self._binance_rejection_cooldown_s:
+                    _rej_remaining = int(self._binance_rejection_cooldown_s - (now - _rej_last).total_seconds())
+                    logger.debug(
+                        "exit_engine: SELL %s blocked by rejection_cooldown (%ds remaining)",
+                        sym, _rej_remaining,
+                    )
+                    continue
                 msg = _exit_message(
                     reason_code,
                     sym,
@@ -3739,9 +3768,21 @@ class DataCollector:
                 )
                 sl_state["win_streak"] = 0
                 self.demo_state[sym] = sl_state
-                self._send_telegram_alert(
-                    f"{_mode_label}: Stop Loss", msg, force_send=True
+                # Throttle SL alertu: nie spamuj co 3-4 min gdy pending już istnieje.
+                # Wyślij alert tylko jeśli: (a) nie wysyłaliśmy w ostatnich N min LUB
+                # (b) Binance właśnie odrzucił (brak cooldown key w _binance_rejection_cooldown)
+                _sl_alert_key = f"{_mode}:{sym}:stop_loss_hit"
+                _sl_last_sent = self._exit_alert_sent_at.get(_sl_alert_key)
+                _sl_alert_interval = self._exit_alert_min_interval_s
+                _sl_should_send = (
+                    _sl_last_sent is None
+                    or (now - _sl_last_sent).total_seconds() >= _sl_alert_interval
                 )
+                if _sl_should_send:
+                    self._send_telegram_alert(
+                        f"{_mode_label}: Stop Loss", msg, force_send=True
+                    )
+                    self._exit_alert_sent_at[_sl_alert_key] = now
                 db.add(
                     Alert(
                         alert_type="RISK",
@@ -3749,7 +3790,7 @@ class DataCollector:
                         title=f"SL {sym}",
                         message=msg,
                         symbol=sym,
-                        is_sent=True,
+                        is_sent=_sl_should_send,
                         timestamp=now,
                     )
                 )
@@ -3758,6 +3799,11 @@ class DataCollector:
             # ━━━ WARSTWA 2: TRAILING STOP ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
             if trailing_active and trailing_stop and price <= trailing_stop:
                 reason_code = "trailing_lock_profit"
+                # Rejection cooldown check
+                _rej_cd_key = f"{_mode}:{sym}:SELL"
+                _rej_last = self._binance_rejection_cooldown.get(_rej_cd_key)
+                if _rej_last and (now - _rej_last).total_seconds() < self._binance_rejection_cooldown_s:
+                    continue
                 msg = _exit_message(
                     reason_code,
                     sym,
@@ -3835,6 +3881,11 @@ class DataCollector:
 
             # ━━━ WARSTWA 3: TAKE PROFIT (częściowy lub pełny) ━━━━━━━━━━━━━
             if price >= take_profit:
+                # Rejection cooldown check (dla TP też — ten sam SELL)
+                _rej_cd_key = f"{_mode}:{sym}:SELL"
+                _rej_last = self._binance_rejection_cooldown.get(_rej_cd_key)
+                if _rej_last and (now - _rej_last).total_seconds() < self._binance_rejection_cooldown_s:
+                    continue
                 # Oceń siłę trendu — czy kontynuować czy zamknąć
                 # forecast_bullish działa jako dodatkowy sygnał utrzymania pozycji
                 trend_strong = (
