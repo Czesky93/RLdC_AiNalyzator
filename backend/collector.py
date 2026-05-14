@@ -4928,11 +4928,6 @@ class DataCollector:
             # Dynamiczny próg confidence zależny od stanu AI.
             min_confidence_effective = self._dynamic_min_confidence(ai_failed)
 
-            # DEBUG wymagany operacyjnie
-            print("CONFIDENCE:", round(effective_confidence, 4))
-            print("AI_USED:", provider_used)
-            print("AI_FAILED:", ai_failed)
-
             signal_summary = {
                 "signal_type": sig.signal_type,
                 "confidence": float(effective_confidence),
@@ -4952,6 +4947,14 @@ class DataCollector:
             min_confidence = min_confidence_effective
             if relaxed_entry_mode:
                 min_confidence = min(min_confidence, max(0.0, relaxed_min_conf_floor))
+            # Obniżenie progu SELL dla istniejącej tracącej pozycji —
+            # umożliwia wcześniejsze wyjście gdy AI dostarcza umiarkowany sygnał SELL.
+            if (
+                sig.signal_type == "SELL"
+                and position is not None
+                and float(getattr(position, "unrealized_pnl", 0) or 0) < 0
+            ):
+                min_confidence = min(min_confidence, 0.45)
             # Mikrotolerancja dla BUY: redukuje fałszywe odrzuty na granicy 0.50 vs 0.51.
             buy_confidence_tolerance = float(
                 config.get("buy_confidence_tolerance", 0.01)
@@ -5332,13 +5335,19 @@ class DataCollector:
                     max_cash_after_fees = max_cash_for_trade / (1 + _taker)
                     max_affordable = max_cash_after_fees / float(price)
                     qty = min(qty, max_affordable)
-                    # Podnieś do min_order_notional gdy ATR-sizing daje za małą kwotę
-                    # (np. BTC: ryzyko 10 EUR / ATR 1000 EUR = 0.01 BTC = poniżej min)
-                    if (
-                        qty * price < min_order_notional
-                        and max_affordable * price >= min_order_notional
-                    ):
-                        qty = min_order_notional / float(price)
+                    # Podnieś do min_order_notional gdy ATR-sizing lub per-trade cap
+                    # daje za małą kwotę — warunek sprawdza ŁĄCZNY available_cash,
+                    # nie per-trade-capped max_affordable (który może być 1/3 gotówki).
+                    if qty * price < min_order_notional:
+                        if available_cash >= min_order_notional:
+                            # Pełna max_affordable bez per-trade-capa (safety cap)
+                            _full_max_aff = (
+                                available_cash / (1.0 + _taker) / float(price)
+                            )
+                            _min_notional_qty = (min_order_notional * 1.005) / float(
+                                price
+                            )
+                            qty = min(_min_notional_qty, _full_max_aff)
                 if qty < min_qty:
                     self._trace_decision(
                         db,
