@@ -33,6 +33,7 @@ _RUNTIME_FILE = Path("/tmp/rldc_tunnel_runtime.json")
 _LOG_FILE = Path(
     "/home/rldc/RLdC_AiNalyzator/RLdC_AiNalyzator/logs/runtime/quicktunnel.log"
 )
+_OVERLAY_URL_FILE = Path("/home/rldc/.rldc_runtime/public_urls.txt")
 _ENV_FILE = Path(
     os.getenv("ENV_FILE", "/home/rldc/RLdC_AiNalyzator/RLdC_AiNalyzator/.env")
 )
@@ -185,6 +186,41 @@ def _read_runtime_url() -> Optional[str]:
     return None
 
 
+def _read_runtime_last_error() -> Optional[str]:
+    try:
+        if _RUNTIME_FILE.exists():
+            data = json.loads(_RUNTIME_FILE.read_text())
+            err = data.get("last_error")
+            return str(err) if err else None
+    except Exception:
+        pass
+    return None
+
+
+def _read_overlay_url() -> Optional[str]:
+    try:
+        if _RUNTIME_FILE.exists():
+            data = json.loads(_RUNTIME_FILE.read_text())
+            overlay_url = data.get("overlay_url")
+            if overlay_url:
+                return overlay_url
+    except Exception:
+        pass
+    try:
+        if not _OVERLAY_URL_FILE.exists():
+            return None
+        for line in _OVERLAY_URL_FILE.read_text().splitlines():
+            line = line.strip()
+            if line.startswith("overlay_url="):
+                value = line.split("=", 1)[1].strip()
+                if value == "https://api.trycloudflare.com":
+                    continue
+                return value or None
+    except Exception:
+        pass
+    return None
+
+
 def _read_cf_log_url() -> Optional[str]:
     """Odczytaj najnowszy URL z logu quicktunnel lub cloudflared (fallback gdy runtime file nie działa)."""
     # Preferuj quicktunnel.log (pisany przez run_quicktunnel.sh)
@@ -198,12 +234,22 @@ def _read_cf_log_url() -> Optional[str]:
         try:
             if not log_path.exists():
                 continue
-            # Czytaj od końca — szukaj ostatniego trycloudflare URL
+            # Czytaj od końca — bierz tylko realne wpisy tworzenia tunelu,
+            # a nie wpisy diagnostyczne/testowe z adresami przykładowymi.
             lines = log_path.read_text(errors="replace").splitlines()
             for line in reversed(lines):
+                if (
+                    "TUNNEL URL:" not in line
+                    and '"Quick Tunnel has been created"' not in line
+                    and '"url":"' not in line
+                ):
+                    continue
                 m = re.search(r"https://[a-z0-9\-]+\.trycloudflare\.com", line)
                 if m:
-                    return m.group(0)
+                    url = m.group(0)
+                    if url == "https://api.trycloudflare.com":
+                        continue
+                    return url
         except Exception:
             pass
     return None
@@ -633,6 +679,7 @@ def get_tunnel_status() -> dict:
             "local_frontend_port": _FRONTEND_PORT,
             "local_backend_port": _BACKEND_PORT,
             "runtime_url": rt_url,
+            "overlay_url": _read_overlay_url(),
             "env_url": env_url,
             "active_url": _state.get("active_url"),
             "source": _state.get("source"),
@@ -648,7 +695,7 @@ def get_tunnel_status() -> dict:
                 else None
             ),
             "last_recovery_result": _state.get("last_recovery_result"),
-            "last_error": _state.get("last_error"),
+            "last_error": _read_runtime_last_error() or _state.get("last_error"),
             "startup_done": _state.get("startup_done", False),
         }
 

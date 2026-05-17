@@ -1,5 +1,201 @@
 # CHANGELOG_LIVE
 
+## 2026-05-17 — T-131: runtime UI truthfulness + overlay charts + separate overlay tunnel
+
+### Root cause
+- Po fixie `state_manager.reconcile` runtime dzialal poprawnie, ale `system-status` i `runtime-activity` nadal serwowaly historyczny `SystemLog`, bo filtr bledow patrzyl zbyt wasko na stare snapshoty/sync.
+- Overlay blokowal auto-rotacje focusu po pierwszym wyborze symbolu i czesto dostawal puste `history` / `forecast_path`, mimo ze backendowe endpointy wykresow dzialaly.
+- `run_quicktunnel.sh` uruchamial dwa tunele, ale oba parsery dzialaly w osobnych subshellach, wiec `overlay_url` bywal nadpisywany na `null`.
+
+### Modyfikacje
+- `backend/routers/account.py`: `system-status` i `runtime-activity` ukrywaja stary `last_error`, jesli runtime ma nowszy heartbeat (`last_binance_sync_ts`, `last_learning_ts`, `MarketData.timestamp`, snapshot).
+- `live_overlay/serve_live_overlay.py`: top symbole sa uzupelniane o swieczki z `/api/market/kline` i forecast z `/api/market/forecast/:symbol`.
+- `live_overlay/index.html`: domyslny timeframe to `15m`, focus znow auto-rotuje, prefetchuje top symbole i pokazuje dedykowany `overlay_url`.
+- `backend/tunnel_manager.py`: `_read_overlay_url()` czyta jawny wpis `overlay_url`.
+- `scripts/run_quicktunnel.sh`: runtime/public URL-e sa scalane z pliku, wiec frontend i overlay nie nadpisuja sobie nawzajem adresow.
+
+### Wynik
+- WWW nie pokazuje juz falszywego `⚠ Błąd state_manager.reconcile`, gdy collector ma swiezy heartbeat.
+- Overlay ma aktualne wykresy dla czołowych symboli i odzyskana auto-zmiane focusu.
+- Runtime zapisuje oddzielny publiczny adres overlay trycloudflare.
+
+## 2026-05-15 — T-127: watchdog stability + truthful AI status
+
+### Root cause
+- `scripts/watchdog.sh` restartowal backend po pojedynczym, agresywnym probe `/health` i pozwalal na nakladajace sie przebiegi timera, przez co runtime byl ubijany podczas normalnego rozruchu.
+- `GET /api/account/ai-status` wybieral aktywnego providera glownie po `configured=true`, przez co pokazywal `ollama` jako aktywnego nawet wtedy, gdy lokalny model byl nieosiagalny, a realny primary providerem byl `groq`.
+
+### Modyfikacje
+- `scripts/watchdog.sh`: dodano `flock`, okna rozruchowe dla backendu/frontendu, progi kolejnych HTTP faili oraz jawne ustawienie `XDG_RUNTIME_DIR` i `DBUS_SESSION_BUS_ADDRESS`.
+- `backend/routers/account.py`: `ai-status` korzysta teraz z `get_ai_orchestrator_status()` jako z kanonicznego statusu providerow, mapuje lokalny provider `local -> ollama` dla UI i zwraca bardziej prawdziwe pola `status_raw`, `usable`, `selected`.
+- `tests/test_smoke.py`: dodano regresje pod realnego primary providera i niedostepny local AI.
+
+### Wynik
+- Watchdog nie restartuje juz backendu w petli podczas startu runtime.
+- `ai-status` pokazuje teraz `groq` jako `active_provider`, a niedostepny `ollama` jako blad zamiast aktywnego providera.
+
+## 2026-05-14 — T-126: overlay UI activation + faster live-state adapter
+
+### Root cause
+- `live_overlay/index.html` mial wiele widocznych opcji (`Ulub.`, `Historia`, `Analizy`, `Ustaw.`, `Stream`, timeframes), ale byly tylko statycznym markupem bez realnej interakcji i bez pobierania danych.
+- `/overlay/api/live-state` byl budowany sekwencyjnie z wielu endpointow backendu, przez co overlay potrafil zawisac lub sprawiac wrazenie martwego przy wolniejszej odpowiedzi jednej z uslug.
+
+### Modyfikacje
+- `live_overlay/index.html`: przebudowano overlay na aktywna wersje z:
+  - klikalnym tickerem i fokusowaniem symbolu,
+  - gwiazdkami i lokalna lista ulubionych,
+  - dzialajacymi timeframe (`1m..1d`) z fetchowaniem `/api/market/kline`,
+  - panelami `Historia`, `Analizy`, `Ustaw.`, `Stream` opartymi o istniejace endpointy backendu,
+  - lepsza diagnostyka zrodel i czytelniejszym statusem focusu.
+- `live_overlay/serve_live_overlay.py`: pobieranie endpointow do `live_state()` jest teraz równolegle przez `ThreadPoolExecutor`, a handler HTTP oddaje jawny JSON blad zamiast zrywać odpowiedz.
+
+### Wynik
+- Overlay ma teraz realnie dzialajace sekcje i nie ogranicza sie do statycznego ekranu LIVE.
+- `/overlay/api/live-state` odpowiada szybciej i przestal blokowac UI przez sekwencyjne timeouty.
+
+## 2026-05-14 — T-125: runtime controls sync (backend + Telegram + WWW)
+
+### Root cause
+- Telegram i WWW nie mialy jednej, spojnej warstwy operatorskiej do `start trading`, `stop trading` i `reboot bot`.
+- Topbar w `web_portal` zatrzymywal tylko `demo_trading_enabled`, co bylo falszywe wobec realnego runtime live.
+- Brakowalo jawnego, admin-protected endpointu backendu do restartu calego runtime z poziomu operatora.
+
+### Modyfikacje
+- `backend/routers/system.py`: dodano `POST /api/system/runtime-action` z akcja `restart_runtime`; restart planowany jest asynchronicznie i obejmuje user services runtime oraz probe restartu overlay.
+- `telegram_bot/bot.py`: dodano komendy `/start_trading`, `/stop_trading`, `/reboot_bot`; `/stop` blokuje teraz realne wykonanie live zamiast samego demo.
+- `web_portal/src/components/Topbar.tsx`: przycisk start/stop steruje teraz realnymi flagami `allow_live_trading`, `execution_enabled`, `enable_auto_execute`.
+- `web_portal/src/components/MainContent.tsx`: dodano operatorowi jawne akcje `START HANDEL`, `STOP HANDEL`, `REBOOT BOT`.
+- `tests/test_smoke.py`: regresja dla `POST /api/system/runtime-action`.
+
+### Wynik
+- Telegram i WWW steruja teraz tym samym runtime state zamiast rozjechanych flag demo/live.
+- Restart runtime jest dostepny z jednego endpointu operatorskiego bez recznego logowania na hosta.
+
+## 2026-05-14 — T-125: runtime controls sync (backend + Telegram + WWW)
+
+### Root cause
+- Telegram i WWW nie mialy jednej, spójnej warstwy operatorskiej do `start trading`, `stop trading` i `reboot bot`.
+- Topbar w `web_portal` zatrzymywal tylko `demo_trading_enabled`, co bylo falszywe wobec realnego runtime live.
+- Brakowalo jawnego, admin-protected endpointu backendu do restartu calego runtime z poziomu operatora.
+
+### Modyfikacje
+- `backend/routers/system.py`: dodano `POST /api/system/runtime-action` z akcja `restart_runtime`; restart planowany jest asynchronicznie i obejmuje user services runtime oraz probe restartu overlay.
+- `telegram_bot/bot.py`: dodano komendy `/start_trading`, `/stop_trading`, `/reboot_bot`; `/stop` blokuje teraz realne wykonanie live zamiast samego demo.
+- `web_portal/src/components/Topbar.tsx`: przycisk start/stop steruje teraz realnymi flagami `allow_live_trading`, `execution_enabled`, `enable_auto_execute`.
+- `web_portal/src/components/MainContent.tsx`: dodano operatorowi jawne akcje `START HANDEL`, `STOP HANDEL`, `REBOOT BOT`.
+- `tests/test_smoke.py`: regresja dla `POST /api/system/runtime-action`.
+
+### Wynik
+- Telegram i WWW steruja teraz tym samym runtime state zamiast rozjechanych flag demo/live.
+- Restart runtime jest dostepny z jednego endpointu operatorskiego bez recznego logowania na hosta.
+
+## 2026-05-14 — T-124: runtime portability + compatibility endpoint aliases
+
+### Root cause
+- Czesc klientow (overlay, starsze skrypty, narzedzia operatorskie) nadal oczekiwala legacy sciezek typu `/api/status`, `/api/runtime/state`, `/api/live/state`, podczas gdy backend wystawial juz nowsze endpointy pod innymi adresami.
+- `backend.app --all` startowal frontend przez `cd web_portal`, co uzaleznialo uruchomienie od aktualnego katalogu roboczego procesu.
+- Domyslny CORS zawieral twardy adres LAN, zamiast przenoszalnego zestawu localhost/127.0.0.1 lub wartosci z env.
+
+### Modyfikacje
+- `backend/app.py`: dodano aliasy kompatybilnosci dla `/api/status`, `/api/runtime/state`, `/api/runtime-settings`, `/api/runtime-config`, `/api/live/state`, `/api/broadcast/live`, `/api/overlay/live`, `/api/account/positions`.
+- `backend/app.py`: `--all` uruchamia `web_portal` po absolutnej sciezce wyliczonej z lokalizacji repo, bez zaleznosci od cwd.
+- `backend/app.py`: domyslny CORS uzywa przenoszalnych originow `localhost` i `127.0.0.1`.
+- `live_overlay/serve_live_overlay.py`: adapter odpyta teraz glownie kanoniczne endpointy zamiast znanych legacy-404.
+- `tests/test_smoke.py`: regresje dla aliasow runtime/live overlay.
+
+### Wynik
+- Starsi klienci i overlay nie wpadaja juz w 404 przy legacy sciezkach.
+- Backend jest latwiejszy do przeniesienia na inny dysk/serwer, bo start web_portalu nie zalezy od katalogu startowego procesu.
+
+## 2026-05-14 — T-123: live signal engine contract fix (analysis -> signal_engine)
+
+### Root cause
+- `backend/trading/signal_engine.py` odrzucal wszystkie symbole jako `insufficient_klines`, bo `backend.analysis.get_live_context()` nie zwracal pola `klines_count`, mimo ze dane 1h/4h realnie byly dostepne.
+- `_klines_to_df()` gubil `quote_volume` i `trades`, przez co liquidity gate liczyl `0.0` mimo zapisanych danych Binance.
+- `signal_engine` prosil o szybki kontekst `15m` z `limit=50`, ale `get_live_context()` wymaga minimum 60 swiec, wiec filtr fast trend byl stale pusty.
+
+### Modyfikacje
+- `backend/analysis.py`: `get_live_context()` zwraca teraz `klines_count`, `macd_signal`, Bollingery, `volume_spike_ratio`, `volume_24h_quote`, `trade_count`; `_klines_to_df()` zachowuje `quote_volume`, `trades`, `taker_buy_*`.
+- `backend/trading/signal_engine.py`: fallback dla brakujacego `klines_count` nie blokuje juz poprawnego kontekstu; szybki timeframe pobiera >=60 swiec.
+- `tests/test_trading_signal_engine.py`: dodane regresje dla brakujacego `klines_count`, zachowania `quote_volume/trades` i minimalnego limitu dla fast timeframe.
+
+### Wynik
+- LIVE entry pipeline nie blokuje juz wszystkich symboli z powodow technicznych/pozornych.
+- Po poprawce realne odrzucenia sa juz ekonomiczne (`volume_too_low`, `negative_edge_after_costs`), a nie artefaktem zepsutego kontraktu miedzy analiza a execution.
+
+## 2026-05-14 — T-121: runtime path unification + Telegram runtime sync + overlay 8099 fix
+
+### Root cause
+- Czesci runtime nadal startowaly ze starej kopii projektu pod `/media/...`, podczas gdy aktywny kod i poprawki byly w `/home/...`. To prowadzilo do rozjazdu Telegram/systemd/WWW wobec backendu.
+- Telegram filtrowal i raportowal po stalej wartosci `TRADING_MODE` z env zamiast po kanonicznym trybie runtime zwracanym przez backend.
+- `8099` byl obslugiwany przez legacy `serve_live.py`, a nie przez adapter overlay zgodny z repo.
+- Panelowy `trycloudflare` nie byl lokalnie zepsuty — Cloudflare odrzucal nowe quick tunnel requesty kodem `1015 / 429 Too Many Requests`.
+
+### Modyfikacje
+- `telegram_bot/bot.py`: dodano runtime mode resolution z `/api/system/full-status`; komendy Telegram nie opieraja sie juz na stalej wartosci startowej procesu.
+- `backend/tunnel_manager.py`: status tunelu raportuje tez `overlay_url`; parser fallback logu ignoruje testowe/falszywe wpisy URL.
+- `scripts/run_quicktunnel.sh`: quicktunnel zapisuje jawny `last_error=trycloudflare_rate_limited` przy 1015/429 i uzywa `--no-autoupdate`.
+- Runtime scripts i unit files (`~/.rldc_runtime/*`, `~/.config/systemd/user/rldc-*.service`): przepiete na aktualny workspace `/home/...`.
+- Overlay: `8099` serwuje teraz `serve_live_overlay.py`, a nie legacy `serve_live.py`.
+
+### Runtime
+- backend: `rldc-backend.service` aktywny z `/home/...`
+- frontend: `rldc-frontend.service` aktywny na `127.0.0.1:3000`
+- telegram: `rldc-telegram.service` aktywny z aktualnego repo
+- overlay: `http://127.0.0.1:8099/overlay/api/live-state`
+- publiczny overlay URL istnieje; panelowy quicktunnel nadal blokuje Cloudflare `1015/429`
+
+## 2026-05-14 — T-120: live entry plan -> filled position sync + overlay adapter fallback
+
+### Root cause
+- LIVE pipeline `signal_engine + risk_engine` liczył SL/TP/trailing przy wejściu, ale po BUY fill collector odbudowywał nowy plan wyjścia z fallbacku ATR. To rozjeżdżało plan wejścia z planem pozycji i psuło spójność ekonomii trade'u.
+- Port `8099` jest zajmowany przez legacy `live_overlay/serve_live.py`, więc właściwy adapter `serve_live_overlay.py` nie mógł przejąć domyślnego adresu.
+
+### Modyfikacje
+- `backend/collector.py`: pending order z nowego LIVE pipeline przenosi teraz zakodowany plan trade'u (`SL/TP/TP2/trailing/break-even`) w reason payload.
+- `backend/collector.py`: przy BUY fill collector odzyskuje zapisany plan i przypisuje go do `Position.planned_tp`, `Position.planned_sl` i `exit_plan_json`; fallback ATR działa już tylko gdy planu brak.
+- `tests/test_live_execution_cash_management.py`: regresja potwierdza, że po fillu pozycja zachowuje plan wyjścia policzony na wejściu.
+
+### Runtime
+- właściwy adapter overlay działa na `http://127.0.0.1:8100/index.html`
+- `http://127.0.0.1:8100/overlay/api/live-state` odpowiada poprawnym JSON
+- `8099` pozostaje zajęty przez legacy `python3 serve_live.py`
+
+## 2026-05-14 — T-119: WWW pending sync fix (kanoniczne statusy)
+
+### Root cause
+- `web_portal/src/components/widgets/DecisionsRiskPanel.tsx` nadal pytał backend o `status=PENDING`, mimo że kanoniczny lifecycle kolejki używa `PENDING_CREATED` / `PENDING_CONFIRMED`.
+- Efekt: panel WWW gubił świeżo utworzone pending orders i zaniżał licznik zleceń wymagających akcji.
+
+### Modyfikacje
+- `backend/routers/orders.py`: `GET /api/orders/pending` obsługuje teraz CSV w `status=` oraz aliasy `ACTIONABLE` i `ACTIVE`.
+- `web_portal/src/components/widgets/DecisionsRiskPanel.tsx`: panel używa filtra `PENDING_CREATED,PENDING`, więc widzi kanoniczne pending orders oraz legacy rekordy.
+- `tests/test_smoke.py`: dodano regresję dla aliasu `ACTIONABLE` i CSV statusów.
+
+### Wynik
+- Backend i WWW znów liczą tę samą kolejkę pending wymagającą decyzji operatora.
+- Build frontend przechodzi, a smoke/test suite pozostają zielone.
+
+## 2026-05-14 — T-115: UNIT TESTY backend/trading/*.py — 6 plików, 156 nowych testów
+
+### Pliki dodane
+- `tests/test_trading_symbol_filter.py` — walidacja LOT_SIZE/PRICE_FILTER/PERCENT_PRICE_BY_SIDE, round_qty, round_price, meets_min_notional
+- `tests/test_trading_signal_engine.py` — scoring RSI/MACD/Bollinger/HTF, evaluate_entry_signal pełny (23 scenariusze)
+- `tests/test_trading_risk_engine.py` — sizing, SL/TP, max_positions, cooldown, min_notional_guard
+- `tests/test_trading_execution_engine.py` — state machine: IDLE→PENDING_BUY, LONG_OPEN→PENDING_SELL, blokady
+- `tests/test_trading_state_manager.py` — recover_on_startup, check_pending_fills, reconcile_live_positions, detect_orphan_orders, _symbol_to_base
+- `tests/test_trading_collector_live_path.py` — _live_entry_new_pipeline (guards, signal reject, risk reject, success, min_notional); LIVE vs DEMO bypass w _screen_entry_candidates
+
+### Bugfixy w kodzie produkcyjnym (wykryte przez testy)
+- `backend/trading/state_manager.py`: `PendingOrder.submitted_at` → `PendingOrder.created_at` (kolumna nie istniała w DB)
+- `backend/collector.py`: `entries_created = 0` przeniesione przed pętlę `for symbol in candidate_symbols` (błąd: `UnboundLocalError` przy LIVE bypass)
+
+### Wynik
+- Przed: 484 tests passed
+- Po: **640 tests passed** (640/640, 0 failed)
+
+---
+
 ## 2026-04-21 — T-110: RECONCILE DB↔BINANCE + SYSTEM DIAGNOSTICS + TELEGRAM UX + GLOBAL EXECUTION GUARD
 
 ### Root causes fixed

@@ -110,6 +110,10 @@ def _klines_to_df(klines: List[Kline]) -> Optional[pd.DataFrame]:
         "low": [k.low for k in klines],
         "close": [k.close for k in klines],
         "volume": [k.volume for k in klines],
+        "quote_volume": [getattr(k, "quote_volume", None) for k in klines],
+        "trades": [getattr(k, "trades", None) for k in klines],
+        "taker_buy_base": [getattr(k, "taker_buy_base", None) for k in klines],
+        "taker_buy_quote": [getattr(k, "taker_buy_quote", None) for k in klines],
     }
     df = pd.DataFrame(data).sort_values("open_time")
     return df
@@ -721,22 +725,72 @@ def get_live_context(
     # MACD histogram
     try:
         macd_df = ta.macd(df["close"], fast=12, slow=26, signal=9)
-        if macd_df is not None and "MACDh_12_26_9" in macd_df.columns:
-            df["macd_hist"] = macd_df["MACDh_12_26_9"]
+        if macd_df is not None and not macd_df.empty:
+            df["macd_hist"] = (
+                macd_df["MACDh_12_26_9"] if "MACDh_12_26_9" in macd_df.columns else None
+            )
+            df["macd_signal"] = (
+                macd_df["MACDs_12_26_9"] if "MACDs_12_26_9" in macd_df.columns else None
+            )
         else:
             df["macd_hist"] = None
+            df["macd_signal"] = None
     except Exception:
         df["macd_hist"] = None
+        df["macd_signal"] = None
+
+    try:
+        bb = ta.bbands(df["close"], length=20, std=2)
+        if bb is not None and not bb.empty:
+            upper_col = next((c for c in bb.columns if "BBU" in c), None)
+            middle_col = next((c for c in bb.columns if "BBM" in c), None)
+            lower_col = next((c for c in bb.columns if "BBL" in c), None)
+            if upper_col:
+                df["bb_upper"] = bb[upper_col]
+            if middle_col:
+                df["bb_middle"] = bb[middle_col]
+            if lower_col:
+                df["bb_lower"] = bb[lower_col]
+    except Exception:
+        pass
 
     # Volume ratio: bieżący wolumen / SMA20 wolumenu
     vol_ratio: Optional[float] = None
+    volume_spike_ratio: Optional[float] = None
     if "volume" in df.columns:
         try:
             vol_sma = df["volume"].rolling(20).mean()
+            vol_max = df["volume"].rolling(20).max()
             last_vol = df["volume"].iloc[-1]
             last_sma = vol_sma.iloc[-1]
             if pd.notna(last_vol) and pd.notna(last_sma) and last_sma > 0:
                 vol_ratio = float(last_vol / last_sma)
+            last_max = vol_max.iloc[-1]
+            if pd.notna(last_max) and pd.notna(last_sma) and last_sma > 0:
+                volume_spike_ratio = float(last_max / last_sma)
+        except Exception:
+            pass
+
+    volume_24h_quote: Optional[float] = None
+    trade_count: Optional[float] = None
+    if "quote_volume" in df.columns:
+        try:
+            quote_volume_series = pd.to_numeric(df["quote_volume"], errors="coerce")
+            if timeframe == "1h" and len(quote_volume_series) >= 24:
+                last_24h_quote = quote_volume_series.tail(24).sum()
+                if pd.notna(last_24h_quote):
+                    volume_24h_quote = float(last_24h_quote)
+            else:
+                last_quote_volume = quote_volume_series.iloc[-1]
+                if pd.notna(last_quote_volume):
+                    volume_24h_quote = float(last_quote_volume)
+        except Exception:
+            pass
+    if "trades" in df.columns:
+        try:
+            last_trades = pd.to_numeric(df["trades"], errors="coerce").iloc[-1]
+            if pd.notna(last_trades):
+                trade_count = float(last_trades)
         except Exception:
             pass
 
@@ -764,6 +818,7 @@ def get_live_context(
             return None
 
     return {
+        "klines_count": int(len(df)),
         "ema_20": _f("ema_20"),
         "ema_21": _f("ema_21"),
         "ema_50": _f("ema_50"),
@@ -771,7 +826,16 @@ def get_live_context(
         "rsi": _f("rsi_14"),
         "atr": _f("atr_14"),
         "macd_hist": _f("macd_hist"),
+        "macd_signal": _f("macd_signal"),
+        "bb_upper": _f("bb_upper"),
+        "bb_middle": _f("bb_middle"),
+        "bb_lower": _f("bb_lower"),
         "volume_ratio": vol_ratio,
+        "volume_spike_ratio": volume_spike_ratio,
+        "volume_24h_quote": volume_24h_quote,
+        "quote_volume": volume_24h_quote,
+        "trade_count": trade_count,
+        "num_trades": trade_count,
         "rsi_buy": rsi_buy,
         "rsi_sell": rsi_sell,
         "close": float(last["close"]),

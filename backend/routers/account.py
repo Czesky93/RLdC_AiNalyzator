@@ -68,6 +68,7 @@ from backend.governance import (
 )
 from backend.notification_hooks import _get_config as _get_notification_config
 from backend.notification_hooks import dispatch_notification, send_telegram_message
+from backend.status_cache import get_cached, set_cached
 from backend.operator_console import get_console_section, get_operator_console
 from backend.policy_layer import (
     create_policy_action,
@@ -763,15 +764,51 @@ def get_ai_status():
     Status wszystkich skonfigurowanych providerów AI.
     Szybka diagnostyka w UI — który provider jest aktywny, czy jest w backoff.
     """
-    from backend.analysis import get_ai_providers_status
-
     provider = os.getenv("AI_PROVIDER", "auto").strip().lower()
 
     def _check_key(env_name: str) -> dict:
         key = (os.getenv(env_name, "") or "").strip()
         return {"configured": bool(key), "key_len": len(key) if key else 0}
 
+    def _ui_name(name: str) -> str:
+        return "ollama" if name == "local" else name
+
+    def _normalize_runtime_status(runtime: dict | None) -> dict:
+        raw = dict(runtime or {})
+        raw_status = str(raw.get("status") or "").strip().lower()
+        configured = bool(raw.get("configured"))
+        usable = bool(raw.get("usable"))
+        reason = raw.get("reason")
+
+        if usable:
+            status = "ok"
+            label = "aktywny"
+        elif not configured or raw_status in {"missing", "unconfigured"}:
+            status = "unconfigured"
+            label = "brak konfiguracji"
+        elif raw_status in {"backoff", "rate_limited"}:
+            status = "backoff"
+            label = str(reason or raw_status)
+        else:
+            status = "error"
+            label = str(reason or raw_status or "niedostepny")
+
+        raw["status"] = status
+        raw["status_raw"] = raw_status or None
+        raw["label"] = label
+        raw["usable"] = usable
+        raw["configured"] = configured
+        return raw
+
     openai_diag = _resolve_openai_status(force=False)
+    orchestrator = get_ai_orchestrator_status(force=False)
+    providers_runtime = orchestrator.get("providers") or {}
+    primary_provider = _ui_name(str(orchestrator.get("primary") or "heuristic").strip().lower())
+    fallback_chain = [
+        _ui_name(str(name or "").strip().lower())
+        for name in (orchestrator.get("fallback_chain") or [])
+        if str(name or "").strip()
+    ]
 
     providers_static = {
         "ollama": {
@@ -806,55 +843,63 @@ def get_ai_status():
         },
     }
 
-    # Backoff / runtime status z modułu analysis
-    runtime_statuses = {s["name"]: s for s in get_ai_providers_status()}
+    runtime_statuses = {
+        "ollama": _normalize_runtime_status(providers_runtime.get("local")),
+        "gemini": _normalize_runtime_status(providers_runtime.get("gemini")),
+        "groq": _normalize_runtime_status(providers_runtime.get("groq")),
+        "openai": _normalize_runtime_status(providers_runtime.get("openai")),
+    }
 
-    # OpenAI: jeśli status diagnostyczny zwraca błąd (np. invalid_api_key),
-    # nie pokazuj go jako aktywnego providera.
     if openai_diag.get("status") == "error":
-        runtime_statuses["openai"] = {
-            "name": "openai",
-            "status": "backoff",
-            "label": "błąd klucza/API",
-            "code": openai_diag.get("code"),
-        }
+        runtime_statuses["openai"].update(
+            {
+                "status": "error",
+                "label": "blad klucza/API",
+                "code": openai_diag.get("code"),
+                "reason": openai_diag.get("message"),
+            }
+        )
     elif openai_diag.get("status") == "missing":
-        runtime_statuses["openai"] = {
-            "name": "openai",
-            "status": "unconfigured",
-            "label": "brak klucza",
-            "code": openai_diag.get("code"),
-        }
+        runtime_statuses["openai"].update(
+            {
+                "status": "unconfigured",
+                "label": "brak klucza",
+                "code": openai_diag.get("code"),
+            }
+        )
 
     for name, pdata in providers_static.items():
-        pdata["runtime"] = runtime_statuses.get(name, {})
+        runtime = runtime_statuses.get(name, {})
+        pdata["runtime"] = runtime
+        pdata["selected"] = primary_provider == name
+        pdata["usable"] = bool(runtime.get("usable"))
 
     # configured dla OpenAI oznacza poprawny status testu, a nie samą obecność stringa klucza
     providers_static["openai"]["configured"] = openai_diag.get("status") == "ok"
     providers_static["openai"]["key_len"] = int(openai_diag.get("key_len") or 0)
 
-    # W trybie auto, kolejność prób
-    if provider == "auto":
-        chain = ["ollama", "gemini", "groq", "openai", "heuristic"]
-    elif provider in ("heuristic", "offline"):
-        chain = ["heuristic"]
-    else:
-        chain = [provider, "heuristic"]
+    if not fallback_chain:
+        if provider == "auto":
+            fallback_chain = ["ollama", "gemini", "groq", "openai", "heuristic"]
+        elif provider in ("heuristic", "offline"):
+            fallback_chain = ["heuristic"]
+        else:
+            fallback_chain = [provider, "heuristic"]
 
-    active = "heuristic"
-    for p in chain:
-        if p != "heuristic" and providers_static.get(p, {}).get("configured"):
-            rt = runtime_statuses.get(p, {})
-            if rt.get("status") not in ("backoff", "unconfigured"):
-                active = p
-                break
+    active = primary_provider if primary_provider else "heuristic"
+    if active != "heuristic":
+        active_runtime = providers_static.get(active, {}).get("runtime", {})
+        if active_runtime.get("status") not in {"ok"}:
+            active = "heuristic"
 
     return {
         "success": True,
         "data": {
             "ai_provider_setting": provider,
             "active_provider": active,
-            "fallback_chain": chain,
+            "fallback_chain": fallback_chain,
+            "fallback_active": bool(orchestrator.get("fallback_active")),
+            "active_providers": [_ui_name(name) for name in (orchestrator.get("active_providers") or [])],
             "providers": providers_static,
             "heuristic": "ATR + Bollinger (zawsze dostępna)",
         },
@@ -1404,8 +1449,8 @@ def get_account_kpi(
                 # Tryb LIVE bez danych — zwracamy HTTP 200 z bezpiecznym fallbackiem
                 return {
                     "success": True,
-                    "mode": mode,
                     "data": {
+                        "mode": mode,
                         "equity": 0.0,
                         "equity_change": 0.0,
                         "equity_change_percent": 0.0,
@@ -2793,6 +2838,22 @@ def get_system_status(request: Request, db: Session = Depends(get_db)):
             .order_by(desc(SystemLog.timestamp))
             .first()
         )
+        latest_runtime_ts = None
+        for candidate in (
+            last_snap.timestamp if last_snap else None,
+            last_md.timestamp if last_md else None,
+        ):
+            if isinstance(candidate, datetime) and (
+                latest_runtime_ts is None or candidate > latest_runtime_ts
+            ):
+                latest_runtime_ts = candidate
+        if (
+            last_error is not None
+            and isinstance(latest_runtime_ts, datetime)
+            and isinstance(last_error.timestamp, datetime)
+            and last_error.timestamp <= latest_runtime_ts
+        ):
+            last_error = None
         last_error_msg = None
         if last_error:
             _raw = last_error.message or ""
@@ -2811,10 +2872,7 @@ def get_system_status(request: Request, db: Session = Depends(get_db)):
         return {
             "success": True,
             "data": {
-                "collector_running": collector_running,
-                "ws_running": ws_running,
                 "watchlist": watchlist,
-                "watchlist_count": len(watchlist),
                 "symbols_with_data": symbols_with_data,
                 "last_tick_ts": last_tick_ts,
                 "last_tick_age_s": last_tick_age_s,
@@ -2979,6 +3037,21 @@ _EXIT_REASON_CODES = {
 _BUY_REASON_CODES = {"all_gates_passed", "pending_confirmed_execution"}
 
 
+def _filter_traces_for_active_symbols(
+    traces: list[DecisionTrace],
+    active_symbols: set[str],
+    fallback_to_all: bool = True,
+) -> list[DecisionTrace]:
+    if not traces or not active_symbols:
+        return traces
+    filtered = [
+        trace for trace in traces if str(trace.symbol or "").upper() in active_symbols
+    ]
+    if filtered:
+        return filtered
+    return traces if fallback_to_all else []
+
+
 @router.get("/bot-activity")
 def get_bot_activity(
     mode: str = Query("live"),
@@ -3101,6 +3174,10 @@ def get_runtime_activity(
     Runtime heartbeat bota: co robi teraz, kiedy była ostatnia decyzja,
     ostatni order, świeżość danych i status workerów.
     """
+    cache_key = f"runtime_activity:{mode}"
+    cached = get_cached(cache_key, ttl_seconds=2.5)
+    if cached is not None:
+        return cached
     try:
         now = utc_now_naive()
         since_15m = now - timedelta(minutes=15)
@@ -3108,6 +3185,7 @@ def get_runtime_activity(
         collector_running = False
         ws_running = False
         watchlist_count = 0
+        active_symbols: set[str] = set()
         collector_last_snapshot_ts = None
         collector_last_learning_ts = None
         collector_last_binance_sync_ts = None
@@ -3120,6 +3198,10 @@ def get_runtime_activity(
                 ws_running = bool(getattr(coll_obj, "ws_running", False))
                 watchlist = getattr(coll_obj, "watchlist", []) or []
                 watchlist_count = len(watchlist) if isinstance(watchlist, list) else 0
+                if isinstance(watchlist, list):
+                    active_symbols = {
+                        str(symbol).upper() for symbol in watchlist if symbol
+                    }
 
                 last_snapshot_ts = getattr(coll_obj, "last_snapshot_ts", None)
                 if isinstance(last_snapshot_ts, datetime):
@@ -3152,17 +3234,25 @@ def get_runtime_activity(
             .limit(300)
             .all()
         )
+        traces_15m = _filter_traces_for_active_symbols(
+            traces_15m, active_symbols, fallback_to_all=False
+        )
         considered_15m = len({t.symbol for t in traces_15m})
         bought_15m = sum(1 for t in traces_15m if t.reason_code in _BUY_REASON_CODES)
         closed_15m = sum(1 for t in traces_15m if t.reason_code in _EXIT_REASON_CODES)
         skipped_15m = len(traces_15m) - bought_15m - closed_15m
 
-        last_trace = (
+        last_trace_rows = (
             db.query(DecisionTrace)
             .filter(DecisionTrace.mode == mode)
             .order_by(desc(DecisionTrace.timestamp))
-            .first()
+            .limit(50)
+            .all()
         )
+        filtered_trace_rows = _filter_traces_for_active_symbols(
+            last_trace_rows, active_symbols, fallback_to_all=False
+        )
+        last_trace = filtered_trace_rows[0] if filtered_trace_rows else None
         last_trace_data = None
         if last_trace is not None:
             last_trace_data = {
@@ -3178,13 +3268,7 @@ def get_runtime_activity(
                 ),
             }
 
-        recent_traces_rows = (
-            db.query(DecisionTrace)
-            .filter(DecisionTrace.mode == mode)
-            .order_by(desc(DecisionTrace.timestamp))
-            .limit(5)
-            .all()
-        )
+        recent_traces_rows = filtered_trace_rows[:5]
         recent_traces = [
             {
                 "symbol": t.symbol,
@@ -3244,6 +3328,23 @@ def get_runtime_activity(
             .order_by(desc(SystemLog.timestamp))
             .first()
         )
+        latest_runtime_ts = None
+        for candidate in (
+            last_sync_ts,
+            last_learning_ts,
+            last_md.timestamp if last_md else None,
+        ):
+            if isinstance(candidate, datetime) and (
+                latest_runtime_ts is None or candidate > latest_runtime_ts
+            ):
+                latest_runtime_ts = candidate
+        if (
+            last_error is not None
+            and isinstance(latest_runtime_ts, datetime)
+            and isinstance(last_error.timestamp, datetime)
+            and last_error.timestamp <= latest_runtime_ts
+        ):
+            last_error = None
         last_error_data = None
         if last_error is not None:
             last_error_data = {
@@ -3255,7 +3356,7 @@ def get_runtime_activity(
 
         alive = bool(collector_running and ws_running and not data_stale)
 
-        return {
+        result = {
             "success": True,
             "data": {
                 "mode": mode,
@@ -3289,6 +3390,8 @@ def get_runtime_activity(
                 "updated_at": now.isoformat(),
             },
         }
+        set_cached(cache_key, result)
+        return result
     except Exception as e:
         raise HTTPException(
             status_code=500, detail=f"Error getting runtime activity: {str(e)}"
@@ -3393,6 +3496,10 @@ def get_trading_status(
 
     Używany do panelu diagnostycznego 'Dlaczego bot nie handluje?'.
     """
+    cache_key = f"trading_status:{mode}"
+    cached = get_cached(cache_key, ttl_seconds=2.5)
+    if cached is not None:
+        return cached
     try:
         from backend.runtime_settings import build_runtime_state, get_runtime_config
 
@@ -3411,6 +3518,7 @@ def get_trading_status(
         # --- Collector / WS status ---
         collector_running = False
         ws_running = False
+        active_symbols: set[str] = set()
         if request is not None:
             coll = getattr(getattr(request, "app", None), "state", None)
             if coll:
@@ -3418,6 +3526,11 @@ def get_trading_status(
                 if coll_obj:
                     collector_running = bool(getattr(coll_obj, "running", False))
                     ws_running = bool(getattr(coll_obj, "ws_running", False))
+                    watchlist = getattr(coll_obj, "watchlist", []) or []
+                    if isinstance(watchlist, list):
+                        active_symbols = {
+                            str(symbol).upper() for symbol in watchlist if symbol
+                        }
 
         # --- Binance połączenie ---
         bc = get_binance_client()
@@ -3440,6 +3553,9 @@ def get_trading_status(
             .order_by(desc(DecisionTrace.timestamp))
             .limit(200)
             .all()
+        )
+        recent_traces = _filter_traces_for_active_symbols(
+            recent_traces, active_symbols, fallback_to_all=False
         )
 
         considered = len({t.symbol for t in recent_traces})
@@ -3638,7 +3754,7 @@ def get_trading_status(
             )
         )
 
-        return {
+        result = {
             "success": True,
             "data": {
                 "mode": mode,
@@ -3671,6 +3787,8 @@ def get_trading_status(
                 "stale": False,
             },
         }
+        set_cached(cache_key, result)
+        return result
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Błąd trading-status: {str(e)}")
 

@@ -39,6 +39,8 @@ type PendingRow = {
   created_at?: string
 }
 
+const ACTIONABLE_PENDING_FILTER = 'PENDING_CREATED,PENDING'
+
 function normalizeSymbol(s: string): string {
   return (s || '').trim().replaceAll('/', '').replaceAll('-', '').toUpperCase()
 }
@@ -90,7 +92,9 @@ export default function DecisionsRiskPanel({
     if (mode !== 'demo') return
     setPendingRefreshing(true)
     try {
-      const res = await fetch(`${getApiBase()}/api/orders/pending?mode=${mode}&status=PENDING&limit=5&include_total=true`)
+      const res = await fetch(
+        `${getApiBase()}/api/orders/pending?mode=${mode}&status=${encodeURIComponent(ACTIONABLE_PENDING_FILTER)}&limit=5&include_total=true`
+      )
       if (!res.ok) throw new Error('Błąd pobierania pending')
       const json = await res.json()
       setPending((json?.data || []) as PendingRow[])
@@ -115,8 +119,16 @@ export default function DecisionsRiskPanel({
         ]
         if (mode === 'demo') {
           tasks.push(fetch(`${getApiBase()}/api/control/state`))
-          tasks.push(fetch(`${getApiBase()}/api/orders/pending?mode=${mode}&status=PENDING&limit=5`))
-          tasks.push(fetch(`${getApiBase()}/api/orders/pending?mode=${mode}&status=PENDING&limit=1&include_total=true`))
+          tasks.push(
+            fetch(
+              `${getApiBase()}/api/orders/pending?mode=${mode}&status=${encodeURIComponent(ACTIONABLE_PENDING_FILTER)}&limit=5`
+            )
+          )
+          tasks.push(
+            fetch(
+              `${getApiBase()}/api/orders/pending?mode=${mode}&status=${encodeURIComponent(ACTIONABLE_PENDING_FILTER)}&limit=1&include_total=true`
+            )
+          )
         }
         tasks.push(fetch(`${getApiBase()}/api/market/ticker/${sym}`))
         const res = await Promise.all(tasks)

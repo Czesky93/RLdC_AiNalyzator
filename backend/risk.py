@@ -610,12 +610,14 @@ def evaluate_risk(context: RiskContext) -> RiskDecision:
             abs(float(rs.get("daily_net_drawdown") or 0.0)) / _initial_balance
         )
     else:
-        # LIVE: używamy całkowitego zaangażowania (exposure) lub fallback na live_balance_eur
+        # LIVE: używamy account_equity z risk snapshot (AccountSnapshot.equity),
+        # fallback: całkowite zaangażowanie lub live_balance_eur z konfiguracji
+        _account_equity = float(rs.get("account_equity") or 0.0)
         _exposure = float(rs.get("total_exposure") or 0.0)
         _live_balance = float(
             cfg.get("live_balance_eur") or os.getenv("LIVE_INITIAL_BALANCE", "0") or 0.0
         )
-        _base = max(1.0, _exposure if _exposure > 0 else _live_balance)
+        _base = max(1.0, _account_equity if _account_equity > 0 else (_exposure if _exposure > 0 else _live_balance))
         daily_drawdown_ratio = abs(float(rs.get("daily_net_drawdown") or 0.0)) / _base
     if allowed and daily_drawdown_ratio >= max_daily_drawdown:
         allowed = False

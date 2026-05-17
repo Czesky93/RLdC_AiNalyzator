@@ -21,6 +21,7 @@ from backend.database import (
     save_config_snapshot,
     utc_now_naive,
 )
+from backend.status_cache import invalidate as invalidate_status_cache
 from backend.system_logger import log_to_db
 
 _TRUE = {"1", "true", "yes", "y", "on"}
@@ -1275,6 +1276,7 @@ def build_runtime_state(
     db: Session,
     collector_watchlist: Optional[list[str]] = None,
     active_position_count: int = 0,
+    persist_snapshot: bool = False,
 ) -> Dict[str, Any]:
     overrides = _get_all_overrides(db)
     effective = _build_effective_flat_config(overrides)
@@ -1295,13 +1297,30 @@ def build_runtime_state(
     live_guard_issues = get_live_guard_issues(
         effective, active_position_count=active_position_count
     )
-    snapshot = ensure_runtime_snapshot(
-        db,
+    payload = _snapshot_payload(
         sections=sections,
         watchlist=effective_watchlist,
         watchlist_source=watchlist_source,
-        source="runtime_state",
     )
+    snapshot_id = _snapshot_id(payload)
+    config_hash = _config_hash(payload)
+    if persist_snapshot:
+        snapshot = ensure_runtime_snapshot(
+            db,
+            sections=sections,
+            watchlist=effective_watchlist,
+            watchlist_source=watchlist_source,
+            source="runtime_state",
+        )
+    else:
+        snapshot = {
+            "id": snapshot_id,
+            "config_hash": config_hash,
+            "payload": payload,
+            "source": "runtime_state_read",
+            "changed_fields": [],
+            "previous_snapshot_id": None,
+        }
     return {
         "trading_mode": effective["trading_mode"],
         "allow_live_trading": effective["allow_live_trading"],
@@ -1327,7 +1346,7 @@ def build_runtime_state(
         "active_position_count": active_position_count,
         "config_sections": sections,
         "config_snapshot_id": snapshot["id"],
-        "config_hash": snapshot.get("config_hash"),
+        "config_hash": snapshot.get("config_hash", config_hash),
         "config_snapshot": snapshot,
         "live_ready": len(live_guard_issues) == 0,
         "live_guard_issues": live_guard_issues,
@@ -1413,7 +1432,9 @@ def apply_runtime_updates(
         key for key in override_updates.keys() if before.get(key) != after.get(key)
     ]
     if not changed_keys:
-        state = build_runtime_state(db, active_position_count=active_position_count)
+        state = build_runtime_state(
+            db, active_position_count=active_position_count, persist_snapshot=True
+        )
         return {
             "changed": [],
             "state": state,
@@ -1478,11 +1499,15 @@ def apply_runtime_updates(
             db=db,
         )
 
-    return {
+    result = {
         "changed": audit_trail,
-        "state": build_runtime_state(db, active_position_count=active_position_count),
+        "state": build_runtime_state(
+            db, active_position_count=active_position_count, persist_snapshot=True
+        ),
         "snapshot": snapshot,
     }
+    invalidate_status_cache()
+    return result
 
 
 # RLdC_STRATEGY_FIX_APPLIED

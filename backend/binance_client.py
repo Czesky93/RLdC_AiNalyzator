@@ -721,6 +721,230 @@ class BinanceClient:
             logger.error(f"❌ Error getting balances: {str(e)}")
             return []
 
+    def get_book_ticker(self, symbol: str) -> Optional[Dict]:
+        """
+        Pobierz najlepszy bid/ask dla symbolu (bookTicker).
+
+        Returns:
+            {"bid_price": float, "ask_price": float, "bid_qty": float, "ask_qty": float}
+        """
+        try:
+            r = self.client.get_orderbook_ticker(symbol=symbol) or {}
+            return {
+                "bid_price": float(r.get("bidPrice", 0) or 0),
+                "ask_price": float(r.get("askPrice", 0) or 0),
+                "bid_qty": float(r.get("bidQty", 0) or 0),
+                "ask_qty": float(r.get("askQty", 0) or 0),
+            }
+        except Exception as exc:
+            logger.error("❌ get_book_ticker %s: %s", symbol, exc)
+            return None
+
+    def get_avg_price(self, symbol: str) -> Optional[float]:
+        """
+        Pobierz 5-minutową średnią cenę z Binance (GET /api/v3/avgPrice).
+        Używana do walidacji PERCENT_PRICE_BY_SIDE przed złożeniem zlecenia.
+        """
+        try:
+            r = self.client.get_avg_price(symbol=symbol) or {}
+            return float(r.get("price", 0) or 0)
+        except Exception as exc:
+            logger.error("❌ get_avg_price %s: %s", symbol, exc)
+            return None
+
+    def get_open_orders(self, symbol: Optional[str] = None) -> List[Dict]:
+        """
+        Pobierz otwarte zlecenia z Binance.
+
+        Args:
+            symbol: jeśli podany — tylko dla tego symbolu; jeśli None — wszystkie
+
+        Returns:
+            Lista słowników ze zleceniami Binance.
+        """
+        if not self.api_key or not self.api_secret:
+            return []
+        try:
+            kwargs: Dict[str, Any] = {"recvWindow": 5000}
+            if symbol:
+                kwargs["symbol"] = symbol
+            try:
+                orders = self.client.get_open_orders(**kwargs) or []
+            except BinanceAPIException as e:
+                if getattr(e, "code", None) == -1021:
+                    self._sync_time()
+                    orders = self.client.get_open_orders(**kwargs) or []
+                else:
+                    raise
+            return list(orders)
+        except Exception as exc:
+            logger.error("❌ get_open_orders %s: %s", symbol or "ALL", exc)
+            return []
+
+    def get_order(self, symbol: str, order_id: str) -> Optional[Dict]:
+        """
+        Pobierz status zlecenia po orderId.
+
+        Returns:
+            Słownik ze statusem zlecenia lub None przy błędzie.
+        """
+        if not self.api_key or not self.api_secret:
+            return None
+        try:
+            try:
+                r = self.client.get_order(
+                    symbol=symbol, orderId=int(order_id), recvWindow=5000
+                )
+            except BinanceAPIException as e:
+                if getattr(e, "code", None) == -1021:
+                    self._sync_time()
+                    r = self.client.get_order(
+                        symbol=symbol, orderId=int(order_id), recvWindow=5000
+                    )
+                elif getattr(e, "code", None) == -2013:
+                    # Order not found
+                    return None
+                else:
+                    raise
+            return r
+        except Exception as exc:
+            logger.error("❌ get_order %s #%s: %s", symbol, order_id, exc)
+            return None
+
+    def cancel_order(
+        self,
+        symbol: str,
+        order_id: Optional[str] = None,
+        list_client_order_id: Optional[str] = None,
+    ) -> Optional[Dict]:
+        """
+        Anuluj zlecenie lub OCO na Binance.
+
+        Args:
+            symbol:                 Para walutowa
+            order_id:               orderId (liczba jako string) — anuluj pojedyncze
+            list_client_order_id:   listClientOrderId — anuluj całe OCO
+
+        Returns:
+            Odpowiedź Binance lub None przy błędzie.
+        """
+        if not self.api_key or not self.api_secret:
+            logger.warning("⚠️ cancel_order: brak kluczy API")
+            return None
+        try:
+            if list_client_order_id:
+                # Anuluj OCO
+                try:
+                    r = self.client.cancel_order(
+                        symbol=symbol,
+                        listClientOrderId=list_client_order_id,
+                        recvWindow=5000,
+                    )
+                except BinanceAPIException as e:
+                    if getattr(e, "code", None) == -1021:
+                        self._sync_time()
+                        r = self.client.cancel_order(
+                            symbol=symbol,
+                            listClientOrderId=list_client_order_id,
+                            recvWindow=5000,
+                        )
+                    else:
+                        raise
+            elif order_id:
+                try:
+                    r = self.client.cancel_order(
+                        symbol=symbol,
+                        orderId=int(order_id),
+                        recvWindow=5000,
+                    )
+                except BinanceAPIException as e:
+                    if getattr(e, "code", None) == -1021:
+                        self._sync_time()
+                        r = self.client.cancel_order(
+                            symbol=symbol,
+                            orderId=int(order_id),
+                            recvWindow=5000,
+                        )
+                    else:
+                        raise
+            else:
+                logger.error("cancel_order: wymagany order_id lub list_client_order_id")
+                return None
+            logger.info("✅ cancel_order: %s %s", symbol, order_id or list_client_order_id)
+            return r
+        except BinanceAPIException as e:
+            if getattr(e, "code", None) == -2011:
+                # Unknown order sent — prawdopodobnie już anulowane
+                logger.info("ℹ️ cancel_order %s: order już nieaktywny (code -2011)", symbol)
+                return {"_already_cancelled": True}
+            logger.error("❌ cancel_order %s: code=%s msg=%s", symbol, e.status_code, e.message)
+            return {"_error": True, "error_code": e.status_code, "error_message": e.message}
+        except Exception as exc:
+            logger.error("❌ cancel_order %s: %s", symbol, exc)
+            return None
+
+    def place_oco_order(
+        self,
+        symbol: str,
+        side: str,
+        quantity: float,
+        price: float,
+        stop_price: float,
+        stop_limit_price: float,
+        time_in_force: str = "GTC",
+    ) -> Optional[Dict]:
+        """
+        Złóż zlecenie OCO (One-Cancels-the-Other) na Binance.
+
+        Dla SELL OCO:
+          - price         = limit TP (Take Profit)
+          - stop_price    = cena triggeru SL
+          - stop_limit_price = limit price SL (musi być niższy niż stop_price)
+
+        Returns:
+            Odpowiedź Binance lub {"_error": True, ...} przy błędzie.
+        """
+        if not self.api_key or not self.api_secret:
+            logger.error("❌ place_oco_order: brak kluczy API")
+            return None
+        try:
+            params: Dict[str, Any] = {
+                "symbol": symbol,
+                "side": side,
+                "quantity": f"{quantity:.8f}".rstrip("0").rstrip("."),
+                "price": f"{price:.8f}".rstrip("0").rstrip("."),
+                "stopPrice": f"{stop_price:.8f}".rstrip("0").rstrip("."),
+                "stopLimitPrice": f"{stop_limit_price:.8f}".rstrip("0").rstrip("."),
+                "stopLimitTimeInForce": time_in_force,
+                "recvWindow": 5000,
+            }
+            logger.info(
+                "📤 place_oco_order SEND: %s %s qty=%s tp=%.6f sl_stop=%.6f sl_limit=%.6f",
+                side, symbol, quantity, price, stop_price, stop_limit_price,
+            )
+            try:
+                result = self.client.create_oco_order(**params)
+            except BinanceAPIException as e:
+                if getattr(e, "code", None) == -1021:
+                    self._sync_time()
+                    result = self.client.create_oco_order(**params)
+                else:
+                    raise
+            logger.info(
+                "✅ place_oco_order RESPONSE: %s listClientOrderId=%s",
+                symbol, (result or {}).get("listClientOrderId"),
+            )
+            return result
+        except BinanceAPIException as e:
+            logger.error(
+                "❌ place_oco_order %s: code=%s msg=%s",
+                symbol, e.status_code, e.message,
+            )
+            return {"_error": True, "error_code": e.status_code, "error_message": e.message}
+        except Exception as exc:
+            logger.error("❌ place_oco_order %s: %s", symbol, exc)
+            return {"_error": True, "error_code": None, "error_message": str(exc)}
+
 
 # Singleton instance
 _binance_client = None

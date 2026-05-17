@@ -569,6 +569,7 @@ def compute_risk_snapshot(
         "total_exposure": _round_metric(total_exposure),
         "exposure_per_symbol": exposure_per_symbol,
         "kill_switch_triggered": kill_switch_triggered,
+        "account_equity": _round_metric(initial_balance),
     }
 
 

@@ -229,3 +229,51 @@ POZOSTAŁO OPCJONALNIE:
 - Migracje Alembic i seeding danych
 - Dockerfile/docker-compose
 - Dalsza rozbudowa UI (pozostałe sekcje)
+
+================================================================================
+AKTUALIZACJA AUDYTU — 2026-05-17
+================================================================================
+
+Cel sesji:
+- Zastosować lokalne instrukcje projektu i potwierdzić, że system działa jako trader Binance Spot.
+- Zweryfikować rzeczywisty stan kodu zamiast opierać się na historycznych opisach.
+
+Instrukcje odnalezione i zastosowane:
+- AGENTS.md: używać lokalnych instrukcji repo, pracować ostrożnie, nie nadpisywać cudzych zmian.
+- .github/instructions/rldc-project.instructions.md: polski UI/komunikaty, minimalne zmiany, runtime_settings jako źródło prawdy konfiguracji, testy po zmianach.
+- .github/instructions/rldc-execution.instructions.md: audyt → jeden konkretny bloker → poprawka → test → aktualizacja dokumentów.
+- instrukcje.txt: sprawdzić przepływ WWW ↔ backend ↔ Binance ↔ Telegram ↔ DB/blog oraz utrzymywać aktualny log audytu.
+- README.md, LIVE_TRADING_FLOW.md, STRATEGY_RULES.md, CONFIG_AUDIT.md: live Binance spot, risk/cost gates, decision trace, spójny stan pozycji/orderów/portfela.
+
+Stan runtime Binance:
+- Efektywny runtime z DB/.env: TRADING_MODE=live, ALLOW_LIVE_TRADING=true, EXECUTION_ENABLED=true.
+- WS_ENABLED=true, QUOTE_CURRENCY_MODE=USDC, watchlista z ENV, live_guard_issues=[].
+- Binance public ticker zwrócił dane dla BTCUSDC, ETHUSDC, SOLUSDC.
+- TestClient uruchomił backend, collector, Binance WS i reconcile; cykl pobrał dane USDC z Binance i zakończył się bez błędu.
+
+Endpointy live sprawdzone ręcznie:
+- /health -> 200
+- /api/system/full-status -> 200 success=True
+- /api/account/trading-status?mode=live -> 200 success=True
+- /api/account/runtime-activity?mode=live -> 200 success=True
+- /api/account/capital-snapshot?mode=live -> 200 success=True
+- /api/signals/entry-readiness?mode=live -> 200 success=True
+- /api/signals/execution-trace?mode=live&limit_minutes=30 -> 200 success=True
+- /api/market/summary -> 200 success=True
+- /api/positions?mode=live -> 200 success=True
+- /api/orders?mode=live&limit=5 -> 200 success=True
+
+Poprawki wdrożone w tej sesji:
+- backend/app.py: /health zwraca kompatybilne pole status=healthy/degraded.
+- backend/routers/system.py: /api/system/full-status nie używa już krótkiego cache, aby nie pokazywać starego trybu demo/live.
+- pytest.ini: pytest zbiera kanoniczne testy z tests i nie wchodzi w zagnieżdżone historyczne kopie repo.
+- web_portal/package.json: npm run lint używa TypeScript check zgodnego z Next 16.
+
+Walidacja:
+- .venv/bin/python -m pytest -q -> 650 passed, 21 warnings.
+- npm --prefix web_portal run lint -> PASS.
+- npm --prefix web_portal run build -> PASS.
+
+Wniosek operacyjny:
+- Kod i runtime są skonfigurowane jako Binance Spot trader: pobierają dane live, mają ścieżkę pending -> live execution, risk/cost gates, reconcile, Telegram i WWW.
+- Realne wykonanie zleceń nadal zależy od poprawnych kluczy Binance, salda, filtrów giełdy, aktualnych sygnałów i aktywnych bramek ryzyka.

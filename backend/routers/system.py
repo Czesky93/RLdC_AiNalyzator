@@ -4,10 +4,14 @@ Endpointy diagnostyczne dla execution, reconciliation, universe, AI, DB health.
 """
 
 import os
+import shlex
+import subprocess
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
+from backend.auth import require_admin
 from backend.database import (
     PendingOrder,
     Position,
@@ -16,10 +20,18 @@ from backend.database import (
     get_db,
     utc_now_naive,
 )
-
 from backend.portfolio_reconcile import backfill_binance_trades, backfill_trade_history_from_binance
 
 router = APIRouter()
+
+_RUNTIME_SERVICE_UNITS = (
+    "rldc-backend.service",
+    "rldc-frontend.service",
+    "rldc-overlay.service",
+    "rldc-telegram.service",
+    "rldc-quicktunnel.service",
+    "rldc-watchdog.service",
+)
 
 ACTIVE_PENDING_STATUSES = [
     "PENDING_CREATED",
@@ -27,6 +39,36 @@ ACTIVE_PENDING_STATUSES = [
     "CONFIRMED",
     "PENDING_CONFIRMED",
 ]
+
+
+class RuntimeActionRequest(BaseModel):
+    action: str
+
+
+def _schedule_runtime_restart() -> dict:
+    services = " ".join(shlex.quote(unit) for unit in _RUNTIME_SERVICE_UNITS)
+    command = (
+        "(sleep 2; "
+        f"systemctl --user restart {services} >/tmp/rldc-runtime-restart.log 2>&1"
+        ") >/dev/null 2>&1 &"
+    )
+    try:
+        subprocess.Popen(
+            ["bash", "-lc", command],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500, detail=f"Nie udało się zaplanować restartu runtime: {exc}"
+        ) from exc
+    return {
+        "scheduled": True,
+        "action": "restart_runtime",
+        "services": list(_RUNTIME_SERVICE_UNITS),
+        "overlay_restart_attempted": "rldc-overlay.service" in _RUNTIME_SERVICE_UNITS,
+    }
 
 
 def _canonical_open_positions_count(db: Session, mode: str) -> int:
@@ -389,3 +431,14 @@ def get_full_status(db: Session = Depends(get_db)):
         }
     except Exception as exc:
         return {"success": False, "error": str(exc)}
+
+
+@router.post("/runtime-action")
+def post_runtime_action(
+    payload: RuntimeActionRequest,
+    admin: None = Depends(require_admin),
+):
+    action = str(payload.action or "").strip().lower()
+    if action != "restart_runtime":
+        raise HTTPException(status_code=400, detail="Nieobsługiwana akcja runtime")
+    return {"success": True, "data": _schedule_runtime_restart()}

@@ -14,6 +14,69 @@ interface MainContentProps {
   tradingMode: 'live' | 'demo'
 }
 
+type FetchCacheEntry = {
+  data: unknown
+  fetchedAt: number
+}
+
+const FETCH_TIMEOUT_MS = 12000
+const SHARED_FETCH_CACHE_MS = 1500
+const sharedFetchCache = new Map<string, FetchCacheEntry>()
+const inflightFetches = new Map<string, Promise<unknown>>()
+
+function normalizeFetchUrl(path: string) {
+  const base = getApiBase()
+  return path.startsWith('http') ? path : `${base}${path}`
+}
+
+async function fetchJsonShared<T>(path: string, cacheTtlMs: number): Promise<T> {
+  const cacheKey = normalizeFetchUrl(path)
+  const now = Date.now()
+  const cached = sharedFetchCache.get(cacheKey)
+  if (cached && now - cached.fetchedAt < cacheTtlMs) {
+    return cached.data as T
+  }
+
+  const inflight = inflightFetches.get(cacheKey)
+  if (inflight) {
+    return inflight as Promise<T>
+  }
+
+  const controller = new AbortController()
+  const timeoutId = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS)
+  const separator = cacheKey.includes('?') ? '&' : '?'
+  const requestUrl = `${cacheKey}${separator}_ts=${now}`
+
+  const requestPromise = (async () => {
+    try {
+      const res = await fetch(requestUrl, {
+        cache: 'no-store',
+        signal: controller.signal,
+        headers: { Accept: 'application/json' },
+      })
+      if (!res.ok) {
+        let detail = ''
+        try { detail = (await res.json()).detail || '' } catch { /* ignore */ }
+        throw new Error(`HTTP ${res.status}${detail ? ': ' + detail : ''}`)
+      }
+      const json = await res.json()
+      sharedFetchCache.set(cacheKey, { data: json, fetchedAt: Date.now() })
+      return json as T
+    } catch (err: any) {
+      if (err?.name === 'AbortError') {
+        throw new Error(`timeout>${FETCH_TIMEOUT_MS}ms`)
+      }
+      throw err
+    } finally {
+      clearTimeout(timeoutId)
+      inflightFetches.delete(cacheKey)
+    }
+  })()
+
+  inflightFetches.set(cacheKey, requestPromise)
+  return requestPromise
+}
+
 /**
  * useFetch — pobiera dane z API lazily.
  * Zwraca lastUpdated (znacznik czasu) i staleSec (ile sekund temu odświeżono).
@@ -23,51 +86,50 @@ function useFetch<T>(path: string, refreshMs: number = 0) {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null)
+  const requestSeq = React.useRef(0)
 
   useEffect(() => {
     let cancelled = false
+    let timer: ReturnType<typeof setTimeout> | null = null
     if (!path) {
       setData(null)
       setLoading(false)
       setError(null)
       return () => { cancelled = true }
     }
-    const buildUrl = () => {
-      const base = getApiBase()
-      const rawUrl = path.startsWith('http') ? path : `${base}${path}`
-      const separator = rawUrl.includes('?') ? '&' : '?'
-      return `${rawUrl}${separator}_ts=${Date.now()}`
+    const cacheTtlMs =
+      refreshMs > 0
+        ? Math.min(Math.max(Math.floor(refreshMs / 4), SHARED_FETCH_CACHE_MS), 5000)
+        : SHARED_FETCH_CACHE_MS
+    const scheduleNext = () => {
+      if (!cancelled && refreshMs > 0) {
+        timer = setTimeout(fetchData, refreshMs)
+      }
     }
     const fetchData = async () => {
+      const currentSeq = ++requestSeq.current
       try {
-        const url = buildUrl()
-        const res = await fetch(url, { cache: 'no-store' })
-        if (!res.ok) {
-          let detail = ''
-          try { detail = (await res.json()).detail || '' } catch { /* ignore */ }
-          throw new Error(`HTTP ${res.status}${detail ? ': ' + detail : ''}`)
-        }
-        const json = await res.json()
-        if (!cancelled) {
+        const json = await fetchJsonShared<T>(path, cacheTtlMs)
+        if (!cancelled && currentSeq === requestSeq.current) {
           setData(json)
           setLastUpdated(new Date())
           setError(null)
         }
       } catch (err: any) {
-        if (!cancelled) {
+        if (!cancelled && currentSeq === requestSeq.current) {
           const msg = err?.message || 'Błąd połączenia'
           setError(msg.startsWith('HTTP') ? `Błąd serwera (${msg})` : `Brak połączenia: ${msg}`)
           console.error('[useFetch]', path, err)
         }
       } finally {
         if (!cancelled) setLoading(false)
+        scheduleNext()
       }
     }
     fetchData()
-    const interval = refreshMs > 0 ? setInterval(fetchData, refreshMs) : null
     return () => {
       cancelled = true
-      if (interval) clearInterval(interval)
+      if (timer) clearTimeout(timer)
     }
   }, [path, refreshMs])
 
@@ -6727,6 +6789,25 @@ function SettingsView({ activeView, mode }: { activeView: string, mode: 'demo' |
     }
   }
 
+  const postRuntimeAction = async (action: string) => {
+    setControlStatus(action === 'restart_runtime' ? 'Planuję restart runtime...' : 'Wysyłam akcję...')
+    try {
+      const headers: Record<string, string> = withAdminToken({ 'Content-Type': 'application/json' })
+      const res = await fetch(`${getApiBase()}/api/system/runtime-action`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ action }),
+      })
+      if (!res.ok) {
+        const msg = res.status === 401 ? '401 Unauthorized (ADMIN_TOKEN?)' : 'Błąd akcji runtime'
+        throw new Error(msg)
+      }
+      setControlStatus('Akcja runtime zaplanowana')
+    } catch (e: any) {
+      setControlStatus(String(e?.message || 'Błąd akcji runtime'))
+    }
+  }
+
   return (
     <div className="flex-1 p-6 overflow-auto">
       <ViewHeader title={title} description={description} />
@@ -6786,6 +6867,41 @@ function SettingsView({ activeView, mode }: { activeView: string, mode: 'demo' |
         <div className="bg-rldc-dark-card rounded-lg p-6 border border-rldc-dark-border neon-card mt-4">
           <h2 className="text-lg font-semibold mb-4 text-slate-200">Sterowanie botem</h2>
           {controlStatus && <div className="text-xs text-slate-500 mb-3">{controlStatus}</div>}
+
+          <div className="mb-4 grid grid-cols-1 md:grid-cols-3 gap-3">
+            <button
+              onClick={() =>
+                postControl({
+                  trading_mode: 'live',
+                  allow_live_trading: true,
+                  execution_enabled: true,
+                  enable_auto_execute: true,
+                  demo_trading_enabled: false,
+                })
+              }
+              className="px-4 py-3 text-xs rounded bg-rldc-green-primary/15 text-rldc-green-primary border border-rldc-green-primary/20 hover:bg-rldc-green-primary/25 transition"
+            >
+              START HANDEL
+            </button>
+            <button
+              onClick={() =>
+                postControl({
+                  allow_live_trading: false,
+                  execution_enabled: false,
+                  enable_auto_execute: false,
+                })
+              }
+              className="px-4 py-3 text-xs rounded bg-rldc-red-primary/15 text-rldc-red-primary border border-rldc-red-primary/20 hover:bg-rldc-red-primary/25 transition"
+            >
+              STOP HANDEL
+            </button>
+            <button
+              onClick={() => postRuntimeAction('restart_runtime')}
+              className="px-4 py-3 text-xs rounded bg-slate-500/10 text-slate-200 border border-rldc-dark-border hover:bg-slate-500/20 transition"
+            >
+              REBOOT BOT
+            </button>
+          </div>
 
           <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
             <div className="terminal-card border border-rldc-dark-border rounded-lg px-4 py-3">

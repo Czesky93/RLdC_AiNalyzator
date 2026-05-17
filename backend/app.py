@@ -4,6 +4,7 @@ Main FastAPI application for RLdC Trading Bot
 
 import logging
 import os
+import shlex
 import signal
 import subprocess
 import sys
@@ -12,18 +13,21 @@ import time
 import time as _time_module
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
+from pathlib import Path
 
 _startup_time = _time_module.time()
 
 from dotenv import load_dotenv
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy.orm import Session
 
 from backend import tunnel_manager as _tunnel_mgr
 from backend.collector import DataCollector
+from backend.status_cache import get_cached, set_cached
 
 # Import database
-from backend.database import init_db
+from backend.database import get_db, init_db
 from backend.reevaluation_worker import start_worker, stop_worker
 
 # Import routers
@@ -33,7 +37,10 @@ from backend.routers import market, orders, portfolio, positions, signals
 from backend.routers import system as system_router
 from backend.routers import telegram_intel
 
-_ENV_PATH = os.path.join(os.path.dirname(__file__), "..", ".env")
+_BACKEND_DIR = Path(__file__).resolve().parent
+_PROJECT_ROOT = _BACKEND_DIR.parent
+_WEB_PORTAL_DIR = _PROJECT_ROOT / "web_portal"
+_ENV_PATH = str(_PROJECT_ROOT / ".env")
 # Nie nadpisuj zmiennych już ustawionych przez środowisko (np. pytest).
 load_dotenv(dotenv_path=_ENV_PATH, override=False)
 
@@ -112,6 +119,52 @@ async def lifespan(app: FastAPI):
     )
     tunnel_startup_thread.start()
 
+    def _status_cache_warmup():
+        try:
+            import time as _time
+            from types import SimpleNamespace
+
+            from backend.database import SessionLocal
+            from backend.routers import account as account_router
+            from backend.routers import control as control_router
+            from backend.routers import system as system_router
+
+            _time.sleep(5)
+            while True:
+                db = SessionLocal()
+                try:
+                    dummy_request = SimpleNamespace(
+                        app=app, client=SimpleNamespace(host="127.0.0.1")
+                    )
+                    try:
+                        account_router.get_runtime_activity(
+                            mode="live", request=dummy_request, db=db
+                        )
+                    except Exception:
+                        pass
+                    try:
+                        account_router.get_trading_status(
+                            mode="live", request=dummy_request, db=db
+                        )
+                    except Exception:
+                        pass
+                    try:
+                        control_router.get_control_state(request=dummy_request, db=db)
+                    except Exception:
+                        pass
+                    try:
+                        system_router.get_full_status(db=db)
+                    except Exception:
+                        pass
+                finally:
+                    db.close()
+                _time.sleep(3)
+        except Exception as exc:
+            logger.warning("Status cache warmup error: %s", exc)
+
+    status_cache_thread = threading.Thread(target=_status_cache_warmup, daemon=True)
+    status_cache_thread.start()
+
     print("✅ API gotowe do użycia")
     yield
     # Shutdown
@@ -141,7 +194,7 @@ app = FastAPI(
 _CORS_ORIGINS = [
     o.strip()
     for o in os.getenv(
-        "CORS_ALLOW_ORIGINS", "http://localhost:3000,http://192.168.0.109:3000"
+        "CORS_ALLOW_ORIGINS", "http://localhost:3000,http://127.0.0.1:3000"
     ).split(",")
     if o.strip()
 ]
@@ -168,10 +221,14 @@ async def root():
 
 @app.get("/health")
 async def health_check():
-    """Health check endpoint — stan backendu, Binance, AI i uptime."""
+    """Health check endpoint — stan backendu, DB, AI i uptime."""
     import time as _time
 
     from backend.database import SessionLocal
+
+    cached = get_cached("health", ttl_seconds=1.5)
+    if cached is not None:
+        return cached
 
     uptime: float = 0.0
     try:
@@ -179,17 +236,8 @@ async def health_check():
     except Exception:
         pass
 
-    # Binance connectivity
-    binance_status = "unknown"
-    try:
-        from backend.binance_client import BinanceClient
-
-        _bc = BinanceClient()
-        # Sprawdź czas serwera (minimalne zapytanie)
-        _ticker = _bc.get_ticker_price("BTCEUR")
-        binance_status = "ok" if _ticker else "no_data"
-    except Exception as _e:
-        binance_status = f"error: {type(_e).__name__}"
+    # Health ma być lekki i lokalny — Binance sprawdzają osobne, cache'owane endpointy.
+    binance_status = "deferred"
 
     # DB connectivity
     db_status = "unknown"
@@ -242,7 +290,8 @@ async def health_check():
     except Exception:
         pass
 
-    return {
+    result = {
+        "status": "healthy" if db_status == "connected" else "degraded",
         "backend": "ok",
         "database": db_status,
         "binance": binance_status,
@@ -265,6 +314,8 @@ async def health_check():
         "version": "0.7.0",
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
+    set_cached("health", result)
+    return result
 
 
 @app.get("/api/health")
@@ -352,6 +403,48 @@ async def live_state_for_overlay():
     }
 
 
+@app.get("/api/live/state", tags=["Overlay"])
+@app.get("/api/broadcast/live", tags=["Overlay"])
+@app.get("/api/overlay/live", tags=["Overlay"])
+async def live_state_compat_alias():
+    """Aliasy kompatybilności dla starszych klientów overlay/live."""
+    return await live_state_for_overlay()
+
+
+@app.get("/api/status")
+def status_compat_alias(db: Session = Depends(get_db)):
+    """Alias kompatybilności dla klientów oczekujących /api/status."""
+    return system_router.get_full_status(db)
+
+
+@app.get("/api/runtime/state")
+def runtime_state_compat_alias(request: Request, db: Session = Depends(get_db)):
+    """Alias kompatybilności dla klientów oczekujących /api/runtime/state."""
+    return control.get_control_state(request, db)
+
+
+@app.get("/api/runtime-settings")
+def runtime_settings_compat_alias(db: Session = Depends(get_db)):
+    """Alias kompatybilności dla klientów oczekujących root /api/runtime-settings."""
+    return account.get_runtime_settings_alias(db)
+
+
+@app.get("/api/runtime-config")
+def runtime_config_compat_alias(db: Session = Depends(get_db)):
+    """Alias kompatybilności dla klientów oczekujących root /api/runtime-config."""
+    return account.get_runtime_config_alias(db)
+
+
+@app.get("/api/account/positions")
+def account_positions_compat_alias(
+    mode: str = "live",
+    symbol: str | None = None,
+    db: Session = Depends(get_db),
+):
+    """Alias kompatybilności dla starszych klientów oczekujących /api/account/positions."""
+    return positions.get_positions(mode=mode, symbol=symbol, db=db)
+
+
 # Register routers
 app.include_router(market.router, prefix="/api/market", tags=["Market"])
 app.include_router(portfolio.router, prefix="/api/portfolio", tags=["Portfolio"])
@@ -436,7 +529,11 @@ if __name__ == "__main__":
         web_cmd = [
             "bash",
             "-lc",
-            'export NVM_DIR="$HOME/.nvm" && . "$NVM_DIR/nvm.sh" && nvm use 20.11.1 >/dev/null && cd web_portal && npm run dev',
+            (
+                'export NVM_DIR="$HOME/.nvm" && . "$NVM_DIR/nvm.sh" '
+                "&& nvm use 20.11.1 >/dev/null "
+                f"&& cd {shlex.quote(str(_WEB_PORTAL_DIR))} && npm run dev"
+            ),
         ]
         web_proc = subprocess.Popen(
             web_cmd,

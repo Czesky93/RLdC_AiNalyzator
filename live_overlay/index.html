@@ -1,94 +1,1621 @@
 <!doctype html>
 <html lang="pl">
 <head>
-  <meta charset="utf-8"/>
-  <meta name="viewport" content="width=device-width, initial-scale=1"/>
-  <title>RLdC LIVE Overlay</title>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>RLdC LIVE Trading Overlay — Bot Sync</title>
   <style>
-    :root{--bg:#060807;--card:#101613;--green:#4cff85;--orange:#ff9d2e;--red:#ff4c4c;--muted:#a7b6aa;--line:#223126}
-    *{box-sizing:border-box}
-    body{margin:0;background:radial-gradient(circle at top,#18301f 0,#060807 42%,#020302 100%);color:#effff1;font-family:Arial,Helvetica,sans-serif;overflow:hidden}
-    .wrap{width:100vw;height:100vh;padding:18px;display:grid;grid-template-rows:auto auto 1fr auto;gap:14px}
-    .top{display:flex;justify-content:space-between;align-items:center;border:1px solid var(--line);background:rgba(12,18,14,.88);border-radius:22px;padding:14px 18px;box-shadow:0 0 30px rgba(76,255,133,.12)}
-    .brand{font-size:30px;font-weight:900;letter-spacing:.5px}.brand span{color:var(--green)}
-    .status{text-align:right;color:var(--muted);font-size:14px}.status b{color:var(--orange)}
-    .ticker{display:flex;gap:10px;overflow:hidden;white-space:nowrap}
-    .pill{border:1px solid var(--line);background:#0c120e;border-radius:999px;padding:9px 13px;font-size:14px}.pill b{color:var(--green)}
-    .main{display:grid;grid-template-columns:1.1fr .9fr;gap:14px;min-height:0}
-    .card{border:1px solid var(--line);background:rgba(12,18,14,.88);border-radius:28px;padding:18px;box-shadow:0 0 45px rgba(0,0,0,.25);min-height:0}
-    .headline{font-size:18px;color:var(--muted);margin-bottom:8px}.pair{font-size:58px;font-weight:900;line-height:.95;color:#fff}.decision{font-size:30px;color:var(--orange);font-weight:900;margin-top:8px}
-    .chart{height:300px;margin-top:18px;border-radius:22px;background:linear-gradient(145deg,#0b110d,#16251a);border:1px solid #243928;position:relative;overflow:hidden}
-    .chart:before{content:"";position:absolute;inset:0;background:repeating-linear-gradient(0deg,transparent 0,transparent 39px,rgba(255,255,255,.06) 40px),repeating-linear-gradient(90deg,transparent 0,transparent 59px,rgba(255,255,255,.05) 60px)}
-    .line{position:absolute;left:4%;right:4%;top:48%;height:4px;background:linear-gradient(90deg,var(--green),var(--orange));border-radius:99px;transform:skewY(-9deg);box-shadow:0 0 24px rgba(76,255,133,.45)}
-    .grid{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:14px}
-    .mini{border:1px solid var(--line);border-radius:18px;background:#0b100d;padding:12px}.mini small{display:block;color:var(--muted)}.mini b{font-size:22px}
-    .list{height:100%;overflow:hidden;display:flex;flex-direction:column;gap:10px}
-    .row{display:grid;grid-template-columns:1.1fr .8fr .8fr;gap:8px;align-items:center;border:1px solid var(--line);background:#0b100d;border-radius:18px;padding:12px}
-    .row .sym{font-weight:900;color:var(--green)}.row .val{text-align:right}.row .dec{text-align:right;color:var(--orange);font-size:12px}
-    .warn{border:1px solid #60451d;background:rgba(255,157,46,.12);color:#ffd8a3;border-radius:18px;padding:12px;font-size:14px;text-align:center}
-    .footer{font-size:13px;color:#b9c9bb;text-align:center}
+    :root {
+      --bg: #0d1117;
+      --card: #1a1f29;
+      --card2: #121824;
+      --border: #2f374a;
+      --txt: #f5f5f5;
+      --muted: #a8b1c4;
+      --green: #00c781;
+      --red: #ff334b;
+      --yellow: #ffd966;
+      --orange: #ff9d22;
+      --blue: #50a7ff;
+    }
+
+    * { box-sizing: border-box; }
+    html, body {
+      margin: 0;
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      background: var(--bg);
+      color: var(--txt);
+      font-family: Arial, Helvetica, sans-serif;
+    }
+
+    .app {
+      width: 100vw;
+      height: 100vh;
+      display: flex;
+      background:
+        radial-gradient(circle at 10% 0%, rgba(0, 199, 129, .12), transparent 25%),
+        radial-gradient(circle at 85% 25%, rgba(255, 157, 34, .10), transparent 25%),
+        var(--bg);
+    }
+
+    .side {
+      width: 82px;
+      min-width: 82px;
+      background: linear-gradient(180deg, var(--card), #101620);
+      border-right: 1px solid var(--border);
+      display: flex;
+      flex-direction: column;
+      align-items: stretch;
+      padding-top: 8px;
+      gap: 2px;
+    }
+
+    .nav {
+      width: 100%;
+      padding: 10px 0;
+      text-align: center;
+      font-size: 18px;
+      color: var(--txt);
+      border: 0;
+      background: transparent;
+      cursor: pointer;
+      transition: .18s ease;
+    }
+
+    .nav:hover { background: rgba(80, 167, 255, .08); }
+    .nav.active {
+      background: rgba(0, 199, 129, .13);
+      border-left: 3px solid var(--green);
+    }
+
+    .nav span {
+      display: block;
+      margin-top: 3px;
+      font-size: 10px;
+      color: var(--muted);
+    }
+
+    .spacer { flex: 1; }
+
+    .ver {
+      width: 100%;
+      padding: 8px 2px;
+      border-top: 1px solid var(--border);
+      text-align: center;
+      color: var(--muted);
+      font-size: 10px;
+      line-height: 1.35;
+    }
+
+    .main {
+      flex: 1;
+      min-width: 0;
+      display: flex;
+      flex-direction: column;
+      position: relative;
+    }
+
+    .top {
+      height: 54px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 8px 18px;
+      background: linear-gradient(90deg, var(--card), #141b26);
+      border-bottom: 1px solid var(--border);
+      gap: 12px;
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      min-width: 0;
+    }
+
+    .logo {
+      font-weight: 900;
+      letter-spacing: .08em;
+      color: var(--green);
+      text-shadow: 0 0 16px rgba(0, 199, 129, .45);
+    }
+
+    .sub {
+      font-size: 12px;
+      color: var(--muted);
+      font-weight: 700;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .headline {
+      font-size: 13px;
+      font-weight: 800;
+      color: #e9eef6;
+      flex: 1;
+      min-width: 0;
+      text-align: center;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .topRight {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      font-size: 12px;
+      white-space: nowrap;
+    }
+
+    .badge {
+      padding: 4px 8px;
+      border-radius: 5px;
+      background: var(--orange);
+      color: #140900;
+      font-weight: 900;
+    }
+
+    .badge.ok {
+      background: var(--green);
+      color: #00150e;
+    }
+
+    .badge.bad {
+      background: var(--red);
+      color: white;
+      box-shadow: 0 0 18px rgba(255, 51, 75, .5);
+    }
+
+    .warning {
+      min-height: 66px;
+      padding: 8px 16px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      text-align: center;
+      background: linear-gradient(90deg, #710000, #f40021, #710000);
+      border-bottom: 3px solid #ffb3bd;
+      color: #fff;
+      font-size: clamp(19px, 1.65vw, 32px);
+      font-weight: 1000;
+      text-transform: uppercase;
+      box-shadow: 0 0 34px rgba(244, 0, 33, .55);
+      animation: pulse 1.3s infinite alternate;
+    }
+
+    .warning small {
+      display: block;
+      font-size: .52em;
+      text-transform: none;
+      margin-top: 3px;
+      font-weight: 800;
+    }
+
+    @keyframes pulse {
+      from { filter: brightness(.9); }
+      to { filter: brightness(1.18); }
+    }
+
+    .ticker {
+      height: 103px;
+      display: flex;
+      overflow: hidden;
+      border-bottom: 1px solid var(--border);
+      background: rgba(13, 17, 23, .45);
+    }
+
+    .pair {
+      min-width: 172px;
+      padding: 9px 10px;
+      border-right: 1px solid var(--border);
+      background: linear-gradient(180deg, rgba(26, 31, 41, .96), rgba(17, 23, 34, .96));
+      display: grid;
+      grid-template-columns: 30px 1fr auto;
+      gap: 7px;
+      align-items: center;
+      position: relative;
+      cursor: pointer;
+      transition: .18s ease;
+    }
+
+    .pair:hover { background: linear-gradient(180deg, rgba(32, 39, 52, .98), rgba(18, 25, 37, .98)); }
+    .pair.focus::after {
+      content: "FOCUS";
+      position: absolute;
+      right: 6px;
+      top: 5px;
+      background: var(--green);
+      color: #00150e;
+      border-radius: 4px;
+      padding: 1px 5px;
+      font-size: 10px;
+      font-weight: 900;
+    }
+
+    .dot {
+      width: 26px;
+      height: 26px;
+      border-radius: 50%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-weight: 900;
+      background: var(--yellow);
+      color: #111;
+    }
+
+    .dot.up { background: var(--green); }
+    .dot.down { background: var(--red); color: white; }
+    .favBtn {
+      border: 0;
+      background: transparent;
+      color: var(--muted);
+      font-size: 18px;
+      cursor: pointer;
+      padding: 4px;
+    }
+
+    .favBtn.on { color: var(--yellow); }
+    .pname {
+      font-weight: 900;
+      font-size: 13px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .pprice { font-size: 12px; margin-top: 3px; }
+    .pline {
+      font-size: 11px;
+      margin-top: 3px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .up { color: var(--green); }
+    .down { color: var(--red); }
+    .wait { color: var(--yellow); }
+    .muted { color: var(--muted); }
+
+    .content {
+      flex: 1;
+      min-height: 0;
+      display: flex;
+      gap: 14px;
+      padding: 14px 18px 12px;
+    }
+
+    .chartCard {
+      flex: 1;
+      min-width: 0;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      background: linear-gradient(180deg, rgba(26, 31, 41, .95), rgba(15, 20, 30, .96));
+      padding: 11px;
+      display: flex;
+      flex-direction: column;
+    }
+
+    .chartHead {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+    }
+
+    .symbolWrap {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .symbol {
+      font-size: 22px;
+      font-weight: 1000;
+      color: var(--green);
+    }
+
+    .pin {
+      border: 1px solid var(--border);
+      border-radius: 7px;
+      background: #111824;
+      color: var(--muted);
+      cursor: pointer;
+      padding: 6px 9px;
+      font-size: 14px;
+    }
+
+    .pin.on {
+      color: var(--yellow);
+      border-color: rgba(255, 217, 102, .45);
+    }
+
+    .priceInfo {
+      font-size: 13px;
+      text-align: right;
+      color: var(--muted);
+    }
+
+    .tf {
+      margin: 7px 0;
+      display: flex;
+      gap: 6px;
+      flex-wrap: wrap;
+    }
+
+    .tf button {
+      font-size: 12px;
+      background: #222a39;
+      border-radius: 5px;
+      padding: 3px 7px;
+      color: var(--muted);
+      border: 1px solid transparent;
+      cursor: pointer;
+    }
+
+    .tf button.on {
+      color: var(--green);
+      font-weight: 900;
+      border-color: rgba(0, 199, 129, .45);
+    }
+
+    .chartBox {
+      flex: 1;
+      position: relative;
+      min-height: 190px;
+      background: #161c26;
+      border: 1px solid var(--border);
+      border-radius: 7px;
+      overflow: hidden;
+    }
+
+    .chartBox canvas {
+      width: 100%;
+      height: 100%;
+      display: block;
+    }
+
+    .chartNote {
+      position: absolute;
+      right: 8px;
+      top: 8px;
+      max-width: 60%;
+      padding: 5px 8px;
+      border-radius: 6px;
+      background: rgba(0, 0, 0, .52);
+      border: 1px solid rgba(255, 255, 255, .12);
+      font-size: 11px;
+      color: var(--muted);
+      text-align: right;
+    }
+
+    .levels, .inds {
+      display: flex;
+      gap: 7px;
+      flex-wrap: wrap;
+      margin-top: 8px;
+      font-size: 12px;
+    }
+
+    .lvl {
+      background: var(--card2);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 4px 7px;
+      color: var(--muted);
+    }
+
+    .lvl b { color: var(--txt); }
+    .inds div {
+      font-size: 11px;
+      background: #222a39;
+      border-radius: 4px;
+      padding: 3px 7px;
+    }
+
+    .ai {
+      width: 330px;
+      min-width: 310px;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      background: linear-gradient(180deg, rgba(26, 31, 41, .96), rgba(17, 23, 34, .97));
+      padding: 11px;
+      overflow: auto;
+    }
+
+    .ai h3 {
+      margin: 0 0 7px;
+      color: var(--green);
+      font-size: 16px;
+    }
+
+    .sec {
+      border-top: 1px solid rgba(255, 255, 255, .07);
+      padding-top: 8px;
+      margin-top: 9px;
+    }
+
+    .st {
+      color: var(--green);
+      font-weight: 1000;
+      font-size: 12px;
+      letter-spacing: .04em;
+    }
+
+    .sx {
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.32;
+      margin-top: 3px;
+      white-space: pre-wrap;
+    }
+
+    .pill {
+      display: inline-block;
+      padding: 6px 9px;
+      border-radius: 6px;
+      background: var(--yellow);
+      color: #111;
+      font-weight: 1000;
+      font-size: 16px;
+    }
+
+    .pill.buy { background: var(--green); color: #00150e; }
+    .pill.sell { background: var(--red); color: #fff; }
+
+    .bottom {
+      height: 166px;
+      display: grid;
+      grid-template-columns: 1.15fr 1fr 1fr 1.15fr;
+      gap: 14px;
+      padding: 0 18px 14px;
+    }
+
+    .card {
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      background: linear-gradient(180deg, rgba(26, 31, 41, .96), rgba(17, 23, 34, .97));
+      padding: 10px;
+      overflow: auto;
+    }
+
+    .card h4 {
+      margin: 0 0 6px;
+      color: var(--green);
+      font-size: 14px;
+    }
+
+    .row {
+      display: flex;
+      justify-content: space-between;
+      gap: 8px;
+      border-bottom: 1px solid rgba(255, 255, 255, .06);
+      padding: 4px 0;
+      font-size: 12px;
+    }
+
+    .row span, .row b {
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .row span { color: var(--muted); }
+    .wave {
+      height: 34px;
+      margin: 8px 0;
+      border: 1px solid var(--border);
+      border-radius: 5px;
+      background: repeating-linear-gradient(90deg, #101620 0 8px, #182130 8px 12px);
+      position: relative;
+      overflow: hidden;
+    }
+
+    .wave::after {
+      content: "";
+      position: absolute;
+      top: 0;
+      bottom: 0;
+      left: -40%;
+      width: 35%;
+      background: linear-gradient(90deg, transparent, rgba(0, 199, 129, .45), transparent);
+      animation: scan 2.1s linear infinite;
+    }
+
+    @keyframes scan { to { left: 110%; } }
+
+    .narr {
+      font-size: 13px;
+      color: var(--muted);
+      line-height: 1.3;
+      white-space: pre-wrap;
+    }
+
+    .footer {
+      height: 36px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 7px 16px;
+      background: #12090b;
+      border-top: 1px solid rgba(255, 51, 75, .55);
+      color: var(--yellow);
+      font-size: 13px;
+      font-weight: 900;
+      text-align: center;
+    }
+
+    .apiErr {
+      position: fixed;
+      left: 100px;
+      right: 18px;
+      bottom: 47px;
+      display: none;
+      z-index: 30;
+      background: rgba(120, 0, 15, .94);
+      border: 2px solid rgba(255, 190, 200, .82);
+      border-radius: 10px;
+      color: #fff;
+      padding: 12px 16px;
+      font-size: 15px;
+      font-weight: 900;
+      box-shadow: 0 0 30px rgba(255, 0, 31, .45);
+    }
+
+    .drawer {
+      position: absolute;
+      right: 18px;
+      top: 68px;
+      bottom: 58px;
+      width: min(520px, calc(100vw - 130px));
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      background: linear-gradient(180deg, rgba(15, 20, 30, .98), rgba(10, 14, 22, .99));
+      box-shadow: 0 0 34px rgba(0, 0, 0, .45);
+      z-index: 25;
+      display: none;
+      flex-direction: column;
+      overflow: hidden;
+    }
+
+    .drawer.visible { display: flex; }
+
+    .drawerHead {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 12px 14px;
+      border-bottom: 1px solid rgba(255, 255, 255, .08);
+      background: rgba(80, 167, 255, .06);
+    }
+
+    .drawerTitle {
+      font-size: 16px;
+      font-weight: 900;
+      color: var(--txt);
+    }
+
+    .drawerSub {
+      font-size: 12px;
+      color: var(--muted);
+      margin-top: 2px;
+    }
+
+    .closeBtn {
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: #121824;
+      color: var(--txt);
+      cursor: pointer;
+      padding: 7px 10px;
+      font-size: 13px;
+    }
+
+    .drawerBody {
+      flex: 1;
+      overflow: auto;
+      padding: 14px;
+      display: grid;
+      gap: 12px;
+    }
+
+    .panelCard {
+      border: 1px solid rgba(255, 255, 255, .07);
+      border-radius: 10px;
+      background: rgba(255, 255, 255, .02);
+      padding: 12px;
+    }
+
+    .panelCard h5 {
+      margin: 0 0 8px;
+      font-size: 14px;
+      color: var(--green);
+    }
+
+    .miniList {
+      display: grid;
+      gap: 6px;
+    }
+
+    .miniBtn, .ghostBtn {
+      width: 100%;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: #121824;
+      color: var(--txt);
+      padding: 8px 10px;
+      text-align: left;
+      cursor: pointer;
+      font-size: 13px;
+    }
+
+    .miniBtn:hover, .ghostBtn:hover { border-color: rgba(80, 167, 255, .5); }
+    .ghostBtn {
+      width: auto;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .grid2 {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 8px;
+    }
+
+    .kv {
+      display: flex;
+      justify-content: space-between;
+      gap: 10px;
+      font-size: 12px;
+      padding: 5px 0;
+      border-bottom: 1px solid rgba(255, 255, 255, .05);
+    }
+
+    .kv span { color: var(--muted); }
+    .tag {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 4px 7px;
+      border-radius: 999px;
+      background: rgba(80, 167, 255, .10);
+      color: #d9ebff;
+      font-size: 11px;
+      font-weight: 700;
+      margin: 3px 4px 0 0;
+    }
+
+    .empty {
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.45;
+    }
+
+    @media (max-width: 1280px), (max-height: 760px) {
+      .ai { width: 300px; min-width: 280px; }
+      .bottom { grid-template-columns: repeat(2, 1fr); height: 210px; }
+      .pair { min-width: 150px; }
+      .warning { min-height: 56px; }
+      .drawer { width: min(480px, calc(100vw - 120px)); }
+    }
   </style>
 </head>
 <body>
-<div class="wrap">
-  <div class="top">
-    <div class="brand">RLdC <span>AiNalyzer</span> LIVE</div>
-    <div class="status">Backend: <b id="backend">...</b><br/>Aktualizacja: <span id="updated">...</span></div>
-  </div>
-  <div class="ticker" id="ticker"></div>
-  <div class="main">
-    <div class="card">
-      <div class="headline">Aktualnie obserwowana para</div>
-      <div class="pair" id="pair">ŁADOWANIE</div>
-      <div class="decision" id="decision">ANALIZA</div>
-      <div class="chart"><div class="line"></div></div>
-      <div class="grid">
-        <div class="mini"><small>Wartość</small><b id="value">--</b></div>
-        <div class="mini"><small>Ilość</small><b id="qty">--</b></div>
-        <div class="mini"><small>Auto trading</small><b id="auto">--</b></div>
-        <div class="mini"><small>Minimum BUY</small><b id="minbuy">--</b></div>
+  <div class="app">
+    <aside class="side">
+      <button class="nav active" data-view="live">🔥<span>LIVE</span></button>
+      <button class="nav" data-view="favorites">❤️<span>Ulub.</span></button>
+      <button class="nav" data-view="history">📈<span>Historia</span></button>
+      <button class="nav" data-view="analysis">🔍<span>Analizy</span></button>
+      <button class="nav" data-view="settings">⚙️<span>Ustaw.</span></button>
+      <button class="nav" data-view="stream">🎥<span>Stream</span></button>
+      <div class="spacer"></div>
+      <div class="ver">
+        <div>RLdC AI</div>
+        <div>BOT SYNC</div>
+        <div id="clock">--:--<br>--.--.----</div>
       </div>
-    </div>
-    <div class="card list" id="positions"></div>
+    </aside>
+
+    <main class="main">
+      <header class="top">
+        <div class="brand">
+          <div class="logo">RLdC</div>
+          <div class="sub">LIVE TRADING AI — SYNCHRONIZACJA Z BOTEM</div>
+        </div>
+        <div class="headline" id="headline">Rynek → decyzja → pozycja → wyjaśnienie</div>
+        <div class="topRight">
+          <div id="focusMeta">Brak focusu</div>
+          <div class="badge" id="apiStatus">ŁADOWANIE</div>
+        </div>
+      </header>
+
+      <div class="warning">
+        <div>
+          ⚠ FAZA TESTÓW I DOSTRAJANIA — AKTUALNE DANE MOGĄ BYĆ NIEKOMPLETNE LUB BŁĘDNE ⚠
+          <small>Overlay pokazuje stan zwrócony przez bota. To nie jest porada inwestycyjna ani gwarancja zysku.</small>
+        </div>
+      </div>
+
+      <section class="ticker" id="ticker"></section>
+
+      <section class="content">
+        <div class="chartCard">
+          <div class="chartHead">
+            <div class="symbolWrap">
+              <div class="symbol" id="symbol">BRAK DANYCH</div>
+              <button class="pin" id="pinSymbol" title="Dodaj/usuń z ulubionych">☆</button>
+            </div>
+            <div class="priceInfo" id="priceInfo">Oczekuję na dane z backendu RLdC...</div>
+          </div>
+
+          <div class="tf" id="timeframes">
+            <button class="on" data-tf="1m">1m</button>
+            <button data-tf="5m">5m</button>
+            <button data-tf="15m">15m</button>
+            <button data-tf="1h">1h</button>
+            <button data-tf="4h">4h</button>
+            <button data-tf="1d">1d</button>
+          </div>
+
+          <div class="chartBox">
+            <canvas id="chart"></canvas>
+            <div class="chartNote" id="chartNote">Wykres używa tylko danych zwróconych przez bota.</div>
+          </div>
+
+          <div class="levels">
+            <div class="lvl">ENTRY: <b id="entry">--</b></div>
+            <div class="lvl">TP: <b class="up" id="tp">--</b></div>
+            <div class="lvl">SL: <b class="down" id="sl">--</b></div>
+            <div class="lvl">CONF: <b id="conf">--</b></div>
+            <div class="lvl">UPDATE: <b id="upd">--</b></div>
+          </div>
+
+          <div class="inds" id="chips">
+            <div>ŚWIECE</div>
+            <div>EMA 9/21/50/200</div>
+            <div>BOLL</div>
+            <div>RSI</div>
+            <div>MACD</div>
+            <div>VWAP</div>
+            <div>FORECAST 15–20m</div>
+            <div>WHALE</div>
+          </div>
+        </div>
+
+        <aside class="ai">
+          <h3>Analiza AI / stan bota</h3>
+          <div class="sec">
+            <div class="st">DECYZJA</div>
+            <div class="sx"><span class="pill" id="decision">CZEKAJ</span></div>
+          </div>
+          <div class="sec">
+            <div class="st">TREND</div>
+            <div class="sx" id="trend">Brak potwierdzonego trendu z bota.</div>
+          </div>
+          <div class="sec">
+            <div class="st">CZY WARTO INWESTOWAĆ?</div>
+            <div class="sx" id="invest">Bot nie zwrócił jeszcze kanonicznej oceny opłacalności.</div>
+          </div>
+          <div class="sec">
+            <div class="st">CO SIĘ DZIEJE?</div>
+            <div class="sx" id="explain">Czekam na zsynchronizowany stan RLdC.</div>
+          </div>
+          <div class="sec">
+            <div class="st">RUCHY GRUBYCH GRACZY</div>
+            <div class="sx" id="whale">Brak potwierdzonej anomalii z bota.</div>
+          </div>
+          <div class="sec">
+            <div class="st">ILE ZAINWESTOWAĆ?</div>
+            <div class="sx" id="capital">Minimalna sensowna kwota: --</div>
+          </div>
+        </aside>
+      </section>
+
+      <section class="bottom">
+        <div class="card">
+          <h4>Watchlist / kolejka bota</h4>
+          <div id="queue"><div class="row"><span>Brak danych</span><b>--</b></div></div>
+        </div>
+        <div class="card">
+          <h4>Portfel / wynik</h4>
+          <div class="row"><span>Wartość</span><b id="value">--</b></div>
+          <div class="row"><span>Wynik netto</span><b id="pnl">--</b></div>
+          <div class="row"><span>Pozycje</span><b id="count">--</b></div>
+          <div class="row"><span>Tryb</span><b id="mode">--</b></div>
+          <div class="row"><span>Status bota</span><b id="botStatus">--</b></div>
+        </div>
+        <div class="card">
+          <h4>Lektor / komentarz prosty</h4>
+          <div class="wave"></div>
+          <div class="narr" id="narr">Bot czeka na dane. Komentarz pojawi się po synchronizacji.</div>
+        </div>
+        <div class="card">
+          <h4>Status źródeł</h4>
+          <div class="narr" id="sourceHealth">Ładowanie diagnostyki źródeł...</div>
+        </div>
+      </section>
+
+      <div class="footer">⚠ Analizy RLdC nie gwarantują zysku. Rynek jest zmienny. Kopiowanie działań odbywa się na własne ryzyko.</div>
+
+      <aside class="drawer" id="drawer">
+        <div class="drawerHead">
+          <div>
+            <div class="drawerTitle" id="drawerTitle">Panel</div>
+            <div class="drawerSub" id="drawerSub">Overlay RLdC</div>
+          </div>
+          <button class="closeBtn" id="closeDrawer">Zamknij</button>
+        </div>
+        <div class="drawerBody" id="drawerBody"></div>
+      </aside>
+    </main>
   </div>
-  <div class="warn" id="warning">LIVE overlay startuje...</div>
-  <div class="footer">To nie jest gwarancja zysku. Rynek krypto jest ryzykowny. Dane mogą być niepełne lub opóźnione.</div>
-</div>
 
-<script>
-async function load(){
-  try{
-    const r = await fetch('/api/live-state?_=' + Date.now(), {cache:'no-store'});
-    const s = await r.json();
-    const positions = s.positions || [];
-    document.getElementById('backend').textContent = s.ok ? 'OK' : 'BŁĄD';
-    document.getElementById('updated').textContent = s.updated_at || new Date().toISOString();
-    document.getElementById('warning').textContent = s.warning || 'LIVE';
+  <div class="apiErr" id="apiErr"></div>
 
-    const cfg = s.strategy || {};
-    document.getElementById('auto').textContent = s.enable_auto_trading ? 'ON' : 'OFF';
-    document.getElementById('minbuy').textContent = (s.min_buy_usdc || cfg.min_buy_usdc || 60) + ' USDC';
+  <script>
+    const OVERLAY_API = '/overlay/api/live-state';
+    const refreshMs = 3000;
+    const rotateMs = 6500;
+    const TF_LIST = ['1m', '5m', '15m', '1h', '4h', '1d'];
+    const $ = (id) => document.getElementById(id);
 
-    const main = positions.find(p => p.source === 'binance') || positions[0] || {};
-    document.getElementById('pair').textContent = main.symbol || 'BRAK POZYCJI';
-    document.getElementById('decision').textContent = main.decision || 'CZEKAM';
-    document.getElementById('value').textContent = main.value_usdc ? Number(main.value_usdc).toFixed(2)+' USDC' : '--';
-    document.getElementById('qty').textContent = main.quantity ? Number(main.quantity).toFixed(6) : '--';
+    const appState = {
+      nav: 'live',
+      selectedTf: '15m',
+      focusSymbol: null,
+      focusPinned: false,
+      focusIndex: 0,
+      lastRotate: 0,
+      overlay: null,
+      cache: {
+        klines: new Map(),
+        forecast: new Map(),
+        decision: new Map(),
+        history: null,
+        runtime: null,
+        settings: null,
+        stream: null,
+      },
+      favorites: new Set(JSON.parse(localStorage.getItem('rldc_overlay_favorites') || '[]')),
+    };
 
-    document.getElementById('ticker').innerHTML = positions.slice(0,12).map(p =>
-      `<div class="pill"><b>${p.symbol||p.asset}</b> ${p.value_usdc ? Number(p.value_usdc).toFixed(1)+' USDC' : ''}</div>`
-    ).join('') || '<div class="pill"><b>RLdC</b> czeka na dane</div>';
+    function clock() {
+      const d = new Date();
+      $('clock').innerHTML = d.toLocaleTimeString('pl-PL', { hour: '2-digit', minute: '2-digit' }) + '<br>' + d.toLocaleDateString('pl-PL');
+    }
 
-    document.getElementById('positions').innerHTML = positions.slice(0,14).map(p =>
-      `<div class="row"><div class="sym">${p.symbol||p.asset}</div><div class="val">${p.value_usdc ? Number(p.value_usdc).toFixed(2)+' USDC' : '-'}</div><div class="dec">${p.decision||'HOLD'}</div></div>`
-    ).join('') || '<div class="row"><div class="sym">Brak pozycji</div><div></div><div class="dec">WAIT</div></div>';
-  }catch(e){
-    document.getElementById('backend').textContent='ERROR';
-    document.getElementById('warning').textContent='Błąd overlay: '+e;
-  }
-}
-load();
-setInterval(load, 4000);
-</script>
+    function n(v) {
+      const x = Number(v);
+      return Number.isFinite(x) ? x : null;
+    }
+
+    function fmt(v, d = 2) {
+      const x = n(v);
+      return x === null ? '--' : x.toLocaleString('pl-PL', { minimumFractionDigits: d, maximumFractionDigits: d });
+    }
+
+    function price(v) {
+      const x = n(v);
+      if (x === null) return '--';
+      const d = Math.abs(x) < 0.01 ? 8 : Math.abs(x) < 1 ? 5 : 2;
+      return x.toLocaleString('pl-PL', { minimumFractionDigits: Math.min(2, d), maximumFractionDigits: d });
+    }
+
+    function pct(v) {
+      const x = n(v);
+      return x === null ? '--' : (x >= 0 ? '+' : '') + fmt(x, 2) + '%';
+    }
+
+    function money(v, c = '€') {
+      const x = n(v);
+      return x === null ? '--' : fmt(x, 2) + ' ' + c;
+    }
+
+    function cls(v) {
+      const x = n(v);
+      return x === null || x === 0 ? 'wait' : x > 0 ? 'up' : 'down';
+    }
+
+    function sym(s) {
+      return String(s || '--').replace('USDC', '/USDC').replace('USDT', '/USDT').replace('EUR', '/EUR');
+    }
+
+    function action(a) {
+      a = String(a || 'wait').toLowerCase();
+      if (['buy', 'kup', 'kupno', 'entry', 'enter'].includes(a)) return ['KUP', 'buy'];
+      if (['sell', 'sprzedaj', 'sprzedaż', 'exit', 'close', 'blokada'].includes(a)) return ['SPRZEDAJ', 'sell'];
+      if (['hold', 'trzymaj'].includes(a)) return ['TRZYMAJ', ''];
+      if (['skip', 'blocked', 'block', 'zablokowane'].includes(a)) return ['BLOKADA', 'sell'];
+      return ['CZEKAJ', ''];
+    }
+
+    function saveFavorites() {
+      localStorage.setItem('rldc_overlay_favorites', JSON.stringify(Array.from(appState.favorites)));
+    }
+
+    function escapeHtml(text) {
+      return String(text ?? '')
+        .replaceAll('&', '&amp;')
+        .replaceAll('<', '&lt;')
+        .replaceAll('>', '&gt;')
+        .replaceAll('"', '&quot;');
+    }
+
+    async function apiJson(path) {
+      const sep = path.includes('?') ? '&' : '?';
+      const res = await fetch(path + sep + '_=' + Date.now(), { cache: 'no-store' });
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      return await res.json();
+    }
+
+    function getRows() {
+      return Array.isArray(appState.overlay?.active_pairs) ? appState.overlay.active_pairs : [];
+    }
+
+    function getRow(symbol = appState.focusSymbol) {
+      return getRows().find((row) => row.symbol === symbol) || null;
+    }
+
+    function getFocusRow() {
+      const rows = getRows();
+      if (!rows.length) return null;
+      if (appState.focusPinned && appState.focusSymbol) {
+        const existing = getRow(appState.focusSymbol);
+        if (existing) return existing;
+      }
+      return focusRowByRotation(rows) || rows[0];
+    }
+
+    function setFocus(symbol, pinned = true) {
+      if (!symbol) return;
+      appState.focusSymbol = symbol;
+      appState.focusPinned = pinned;
+      renderTicker();
+      renderFocus();
+      renderDrawer();
+      prefetchFocusData(symbol);
+    }
+
+    function toggleFavorite(symbol) {
+      if (!symbol) return;
+      if (appState.favorites.has(symbol)) appState.favorites.delete(symbol);
+      else appState.favorites.add(symbol);
+      saveFavorites();
+      renderTicker();
+      renderFocus();
+      renderDrawer();
+    }
+
+    function focusRowByRotation(rows) {
+      if (!rows.length) return null;
+      const explicit = appState.focusPinned ? getRow(appState.focusSymbol) : null;
+      if (explicit) return explicit;
+      const urgentRows = rows.filter((row) => ['buy', 'sell', 'kup', 'sprzedaj', 'entry', 'exit'].includes(String(row.action || '').toLowerCase()));
+      const regularRows = rows.filter((row) => !urgentRows.includes(row));
+      const orderedRows = urgentRows.length ? [...urgentRows, ...regularRows] : rows;
+      if (Date.now() - appState.lastRotate > rotateMs) {
+        appState.focusIndex = (appState.focusIndex + 1) % orderedRows.length;
+        appState.lastRotate = Date.now();
+      }
+      return orderedRows[appState.focusIndex % orderedRows.length];
+    }
+
+    function getSourceHealthText(st) {
+      const statuses = st.endpoint_status || {};
+      const ok = Object.values(statuses).filter((value) => value === 'ok').length;
+      const total = Object.keys(statuses).length;
+      const bad = total - ok;
+      const lines = [
+        `Źródła OK: ${ok}/${total || 0}`,
+        st.warning || 'Adapter ma komplet odpowiedzi dla głównych endpointów.',
+      ];
+      if (bad > 0) {
+        const failed = Object.entries(statuses)
+          .filter(([, value]) => value !== 'ok')
+          .slice(0, 4)
+          .map(([key, value]) => `${key} → ${value}`);
+        lines.push(...failed);
+      }
+      return lines.join('\n');
+    }
+
+    function renderTicker() {
+      const rows = getRows();
+      const focus = getFocusRow();
+      if (!rows.length) {
+        $('ticker').innerHTML = '<div class="pair focus"><div class="dot">!</div><div><div class="pname">BRAK DANYCH</div><div class="pprice">Backend nie zwrócił par</div><div class="pline wait">Sprawdź bota :8000</div><div class="pline muted">Overlay nie zmyśla wyników</div></div></div>';
+        return;
+      }
+      $('ticker').innerHTML = rows.slice(0, 8).map((row) => {
+        const change = n(row.change_pct) !== null ? row.change_pct : (row.pnl_pct || 0);
+        const color = cls(change);
+        const icon = color === 'up' ? '▲' : color === 'down' ? '▼' : '•';
+        const label = action(row.action)[0];
+        const isFocus = focus && focus.symbol === row.symbol ? ' focus' : '';
+        const isFav = appState.favorites.has(row.symbol) ? ' on' : '';
+        return `
+          <div class="pair${isFocus}" data-symbol="${escapeHtml(row.symbol)}">
+            <div class="dot ${color}">${icon}</div>
+            <div>
+              <div class="pname">${sym(row.symbol)}</div>
+              <div class="pprice">${price(row.price)} ${row.quote || ''}</div>
+              <div class="pline ${color}">${pct(change)} | ${label}</div>
+              <div class="pline muted">ENTRY: ${price(row.entry)} | TP: ${price(row.target)}</div>
+            </div>
+            <button class="favBtn${isFav}" data-fav="${escapeHtml(row.symbol)}" title="Ulubione">★</button>
+          </div>
+        `;
+      }).join('');
+
+      document.querySelectorAll('.pair[data-symbol]').forEach((node) => {
+        node.addEventListener('click', (event) => {
+          if (event.target.closest('.favBtn')) return;
+          setFocus(node.dataset.symbol);
+        });
+      });
+      document.querySelectorAll('.favBtn[data-fav]').forEach((node) => {
+        node.addEventListener('click', (event) => {
+          event.stopPropagation();
+          toggleFavorite(node.dataset.fav);
+        });
+      });
+    }
+
+    function buildForecastPath(row, forecastData) {
+      if (Array.isArray(row?.forecast_path) && row.forecast_path.length >= 2) return row.forecast_path;
+      const current = n(row?.price);
+      if (current === null || !forecastData) return [];
+      const out = [];
+      for (const key of ['forecast_1h', 'forecast_4h', 'forecast_24h']) {
+        const projected = n(forecastData[key]?.projected_price);
+        if (projected !== null) out.push(projected);
+      }
+      return out;
+    }
+
+    function renderFocus() {
+      const row = getFocusRow();
+      const decisionData = appState.cache.decision.get(row?.symbol || '');
+      const decision = decisionData?.data || {};
+      const forecast = appState.cache.forecast.get(row?.symbol || '');
+
+      if (!row) {
+        $('symbol').textContent = 'BRAK DANYCH Z BOTA';
+        $('priceInfo').textContent = 'Backend nie zwrócił aktywnej pary ani pozycji.';
+        $('decision').textContent = 'BRAK DANYCH';
+        $('decision').className = 'pill sell';
+        $('trend').textContent = 'Brak danych trendu.';
+        $('invest').textContent = 'Nie można ocenić opłacalności bez danych z bota.';
+        $('explain').textContent = 'Overlay czeka na kanoniczny stan RLdC.';
+        $('whale').textContent = 'Brak danych.';
+        $('capital').textContent = 'Minimalna sensowna kwota: --';
+        $('focusMeta').textContent = 'Brak focusu';
+        $('pinSymbol').className = 'pin';
+        $('pinSymbol').textContent = '☆';
+        ['entry', 'tp', 'sl', 'conf', 'upd'].forEach((id) => { $(id).textContent = '--'; });
+        draw([], []);
+        return;
+      }
+
+      const [decisionLabel, pillClass] = action(decision.final_signal || row.action);
+      $('symbol').textContent = sym(row.symbol);
+      $('focusMeta').textContent = `${sym(row.symbol)} | TF ${appState.selectedTf}`;
+      $('pinSymbol').className = 'pin' + (appState.favorites.has(row.symbol) ? ' on' : '');
+      $('pinSymbol').textContent = appState.favorites.has(row.symbol) ? '★' : '☆';
+      $('priceInfo').innerHTML = `Aktualna cena: <span class="${cls(row.change_pct)}">${price(row.price)} ${row.quote || ''}</span> | Wynik: <span class="${cls(row.pnl_pct)}">${pct(row.pnl_pct)}</span> | Sygnał: <span class="wait">${decisionLabel}</span>`;
+      $('decision').textContent = decisionLabel;
+      $('decision').className = 'pill ' + pillClass;
+
+      let conf = decision.final_confidence ?? row.confidence ?? row.overall_decision_confidence ?? row.direction_confidence;
+      if (n(conf) !== null && Number(conf) <= 1) conf = Number(conf) * 100;
+      $('trend').textContent = (decision.market_context?.trend || row.trend || 'Brak potwierdzenia') + (n(conf) !== null ? ` | confidence: ${pct(conf)}` : '');
+      $('invest').textContent = decision.final_signal_reason
+        ? `${decision.final_signal_reason}. Blockery: ${(decision.blockers || []).join(', ') || 'brak'}.`
+        : (n(row.edge) !== null ? `Opłacalność po kosztach / score: ${fmt(row.edge, 2)}. Ryzyko: ${row.risk_score || 'brak oceny'}.` : 'Bot nie zwrócił jeszcze jednoznacznej oceny opłacalności po kosztach.');
+      $('explain').textContent = decision.explanation?.short || row.reason || row.plan || 'Bot nie zwrócił jeszcze prostego wyjaśnienia dla tej pary.';
+      $('whale').textContent = row.whale || row.whale_state || row.anomaly || 'Brak potwierdzonej anomalii / danych whale z bota.';
+      $('capital').textContent = 'Minimalna sensowna kwota: ' + (row.min_capital ? money(row.min_capital, row.capital_ccy || '€') : '--');
+      $('entry').textContent = price(row.entry ?? decision.cta?.entry_price);
+      $('tp').textContent = price(row.target ?? decision.cta?.take_profit);
+      $('sl').textContent = price(row.stop ?? decision.cta?.stop_loss);
+      $('conf').textContent = n(conf) !== null ? pct(conf) : '--';
+      $('upd').textContent = row.updated_at || appState.overlay?.fetched_at_local || '--';
+
+      const chips = [
+        `TF ${appState.selectedTf}`,
+        decision.data_quality ? `DATA ${String(decision.data_quality).toUpperCase()}` : null,
+        decision.ai_available === true ? 'AI/SYGNAŁ OK' : null,
+        forecast?.forecast_1h?.direction ? `1H ${forecast.forecast_1h.direction}` : null,
+        forecast?.forecast_4h?.direction ? `4H ${forecast.forecast_4h.direction}` : null,
+        forecast?.forecast_24h?.direction ? `24H ${forecast.forecast_24h.direction}` : null,
+      ].filter(Boolean);
+      $('chips').innerHTML = chips.map((chip) => `<div>${escapeHtml(chip)}</div>`).join('');
+
+      const klineData = appState.cache.klines.get(`${row.symbol}:${appState.selectedTf}`);
+      const history = Array.isArray(klineData) && klineData.length >= 2
+        ? klineData
+        : (Array.isArray(row.history) ? row.history : []);
+      const forecastPath = buildForecastPath(row, forecast);
+      if ((!history || history.length < 2) && row.chart_tf && row.chart_tf !== appState.selectedTf) {
+        $('chartNote').textContent = `Brak pełnych świec ${appState.selectedTf}. Pokazuję ostatnie dane ${row.chart_tf} z backendu.`;
+      }
+      draw(history, forecastPath);
+    }
+
+    function renderBottom() {
+      const st = appState.overlay || {};
+      const summary = st.summary || {};
+      const rows = getRows();
+      $('value').textContent = money(summary.total_value_eur ?? summary.portfolio_value_eur ?? summary.total_value, summary.currency || '€');
+      const pnlValue = summary.total_pnl_eur ?? summary.pnl_eur ?? summary.net_pnl_eur;
+      const pnlPct = summary.total_pnl_pct ?? summary.pnl_pct;
+      $('pnl').innerHTML = `<span class="${cls(pnlValue ?? pnlPct)}">${money(pnlValue, summary.currency || '€')} / ${pct(pnlPct)}</span>`;
+      $('count').textContent = summary.positions_count ?? summary.valid_positions_count ?? rows.length ?? '--';
+      $('mode').textContent = summary.mode || summary.trading_mode || st.mode || '--';
+      $('botStatus').textContent = summary.bot_status || '--';
+      $('sourceHealth').textContent = getSourceHealthText(st);
+      $('narr').textContent = st.narration || st.explanation || 'Bot czeka. Dane są testowe i mogą być niekompletne albo błędne.';
+
+      const queue = (Array.isArray(st.queue) && st.queue.length ? st.queue : rows).slice(0, 7);
+      $('queue').innerHTML = queue.length
+        ? queue.map((row) => `
+            <div class="row">
+              <span>${sym(row.symbol)} — ${escapeHtml(row.queue_state || row.action || 'watch')}</span>
+              <b class="${cls(row.opportunity_score ?? row.pnl_pct ?? row.change_pct)}">${n(row.opportunity_score ?? row.pnl_pct ?? row.change_pct) !== null ? fmt(row.opportunity_score ?? row.pnl_pct ?? row.change_pct, 2) : '--'}</b>
+            </div>
+          `).join('')
+        : '<div class="row"><span>Brak kolejki z bota</span><b>--</b></div>';
+    }
+
+    function draw(history, forecastPath) {
+      const canvas = $('chart');
+      const bounds = canvas.parentElement.getBoundingClientRect();
+      const ratio = window.devicePixelRatio || 1;
+      canvas.width = Math.max(300, bounds.width * ratio);
+      canvas.height = Math.max(180, bounds.height * ratio);
+      const ctx = canvas.getContext('2d');
+      ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
+      const w = bounds.width;
+      const h = bounds.height;
+
+      ctx.fillStyle = '#161c26';
+      ctx.fillRect(0, 0, w, h);
+      ctx.strokeStyle = 'rgba(255,255,255,.06)';
+      for (let i = 1; i < 8; i += 1) {
+        ctx.beginPath();
+        ctx.moveTo(w / 8 * i, 0);
+        ctx.lineTo(w / 8 * i, h);
+        ctx.stroke();
+      }
+      for (let i = 1; i < 5; i += 1) {
+        ctx.beginPath();
+        ctx.moveTo(0, h / 5 * i);
+        ctx.lineTo(w, h / 5 * i);
+        ctx.stroke();
+      }
+
+      const hist = Array.isArray(history) ? history.map(Number).filter(Number.isFinite) : [];
+      const fc = Array.isArray(forecastPath) ? forecastPath.map(Number).filter(Number.isFinite) : [];
+      if (hist.length < 2) {
+        ctx.fillStyle = 'rgba(255,217,102,.95)';
+        ctx.font = 'bold 18px Arial';
+        ctx.textAlign = 'center';
+        ctx.fillText('BRAK ŚWIEŻEJ HISTORII CEN Z BOTA', w / 2, h / 2 - 10);
+        ctx.fillStyle = 'rgba(168,177,196,.95)';
+        ctx.font = '13px Arial';
+        ctx.fillText('Kliknij inny TF lub poczekaj na dane świec z backendu.', w / 2, h / 2 + 16);
+        $('chartNote').textContent = 'Brak historii cen dla wybranego timeframe w odpowiedzi API.';
+        return;
+      }
+
+      const all = hist.concat(fc);
+      let min = Math.min(...all);
+      let max = Math.max(...all);
+      if (min === max) {
+        min *= .995;
+        max *= 1.005;
+      }
+      const pad = (max - min) * .12;
+      min -= pad;
+      max += pad;
+      const xx = (i, len, span = .72, offset = .04) => w * offset + w * span * (i / Math.max(1, len - 1));
+      const yy = (v) => h * .84 - ((v - min) / (max - min)) * h * .68;
+
+      ctx.lineWidth = 3;
+      ctx.strokeStyle = '#00c781';
+      ctx.beginPath();
+      hist.forEach((v, i) => {
+        if (i === 0) ctx.moveTo(xx(i, hist.length), yy(v));
+        else ctx.lineTo(xx(i, hist.length), yy(v));
+      });
+      ctx.stroke();
+
+      ctx.strokeStyle = 'rgba(255,217,102,.9)';
+      ctx.lineWidth = 2;
+      ctx.setLineDash([8, 8]);
+      ctx.beginPath();
+      hist.forEach((v, i) => {
+        const avg = hist.slice(Math.max(0, i - 4), i + 1).reduce((acc, value) => acc + value, 0) / Math.min(5, i + 1);
+        if (i === 0) ctx.moveTo(xx(i, hist.length), yy(avg));
+        else ctx.lineTo(xx(i, hist.length), yy(avg));
+      });
+      ctx.stroke();
+      ctx.setLineDash([]);
+
+      if (fc.length >= 1) {
+        const startX = xx(hist.length - 1, hist.length);
+        const start = hist.at(-1);
+        ctx.strokeStyle = '#50a7ff';
+        ctx.lineWidth = 3;
+        ctx.setLineDash([9, 7]);
+        ctx.beginPath();
+        ctx.moveTo(startX, yy(start));
+        fc.forEach((v, i) => ctx.lineTo(startX + w * .22 * ((i + 1) / Math.max(1, fc.length)), yy(v)));
+        ctx.stroke();
+        ctx.setLineDash([]);
+      }
+
+      ctx.fillStyle = 'rgba(168,177,196,.96)';
+      ctx.font = '12px Arial';
+      ctx.textAlign = 'left';
+      ctx.fillText(`min ${price(min)}  max ${price(max)}`, 12, h - 12);
+      $('chartNote').textContent = `Zielona: świece ${appState.selectedTf} | żółta: średnia | niebieska: forecast z backendu`;
+    }
+
+    function statusBadge(st) {
+      const badge = $('apiStatus');
+      const error = $('apiErr');
+      badge.className = 'badge';
+      if (st.ok && !st.partial) {
+        badge.textContent = 'POŁĄCZONO';
+        badge.classList.add('ok');
+        error.style.display = 'none';
+      } else if (st.ok && st.partial) {
+        badge.textContent = 'DANE NIEPEŁNE';
+        error.textContent = st.warning || 'Backend odpowiada, ale część danych jest niekompletna.';
+        error.style.display = 'block';
+      } else {
+        badge.textContent = 'BŁĄD DANYCH';
+        badge.classList.add('bad');
+        error.textContent = st.warning || st.error || 'Brak połączenia z backendem RLdC. Overlay nie pokazuje zmyślonych danych.';
+        error.style.display = 'block';
+      }
+    }
+
+    async function loadOverlayState() {
+      clock();
+      let overlay;
+      try {
+        overlay = await apiJson(OVERLAY_API);
+      } catch (error) {
+        overlay = { ok: false, warning: 'Nie można pobrać /overlay/api/live-state: ' + error.message, active_pairs: [], summary: {} };
+      }
+      const rows = Array.isArray(overlay.active_pairs) ? overlay.active_pairs : [];
+      if (appState.focusIndex >= Math.max(1, rows.length)) appState.focusIndex = 0;
+      const focus = focusRowByRotation(rows);
+      if (focus?.symbol && (!appState.focusPinned || !appState.focusSymbol || !getRow(appState.focusSymbol))) {
+        appState.focusSymbol = focus.symbol;
+      }
+      overlay.fetched_at_local = new Date().toLocaleTimeString('pl-PL');
+      appState.overlay = overlay;
+      statusBadge(overlay);
+      $('headline').textContent = overlay.source ? `Źródło: ${overlay.source} | backend: ${overlay.backend_url || 'local'}` : 'Rynek → decyzja → pozycja → wyjaśnienie';
+      renderTicker();
+      renderFocus();
+      renderBottom();
+      renderDrawer();
+      if (appState.focusSymbol) prefetchFocusData(appState.focusSymbol);
+      rows.slice(0, 3).forEach((row) => {
+        if (row?.symbol && row.symbol !== appState.focusSymbol) prefetchFocusData(row.symbol);
+      });
+    }
+
+    async function ensureKlines(symbol, tf) {
+      const key = `${symbol}:${tf}`;
+      if (appState.cache.klines.has(key)) return appState.cache.klines.get(key);
+      try {
+        const payload = await apiJson(`/api/market/kline?symbol=${encodeURIComponent(symbol)}&tf=${encodeURIComponent(tf)}&limit=120`);
+        const data = Array.isArray(payload.data) ? payload.data.map((row) => n(row.close)).filter((value) => value !== null) : [];
+        appState.cache.klines.set(key, data);
+        return data;
+      } catch {
+        appState.cache.klines.set(key, []);
+        return [];
+      }
+    }
+
+    async function ensureForecast(symbol) {
+      if (appState.cache.forecast.has(symbol)) return appState.cache.forecast.get(symbol);
+      try {
+        const payload = await apiJson(`/api/market/forecast/${encodeURIComponent(symbol)}`);
+        appState.cache.forecast.set(symbol, payload);
+        return payload;
+      } catch {
+        appState.cache.forecast.set(symbol, null);
+        return null;
+      }
+    }
+
+    async function ensureDecision(symbol) {
+      if (appState.cache.decision.has(symbol)) return appState.cache.decision.get(symbol);
+      try {
+        const payload = await apiJson(`/api/signals/${encodeURIComponent(symbol)}/decision-view?mode=live`);
+        appState.cache.decision.set(symbol, payload);
+        return payload;
+      } catch {
+        appState.cache.decision.set(symbol, null);
+        return null;
+      }
+    }
+
+    async function ensureHistory() {
+      if (appState.cache.history) return appState.cache.history;
+      try {
+        appState.cache.history = await apiJson('/api/account/history?mode=live&hours=24');
+      } catch {
+        appState.cache.history = null;
+      }
+      return appState.cache.history;
+    }
+
+    async function ensureSettings() {
+      if (appState.cache.settings) return appState.cache.settings;
+      try {
+        const [runtime, config, control] = await Promise.all([
+          apiJson('/api/account/runtime-settings'),
+          apiJson('/api/account/runtime-config'),
+          apiJson('/api/control/state'),
+        ]);
+        appState.cache.settings = { runtime, config, control };
+      } catch {
+        appState.cache.settings = null;
+      }
+      return appState.cache.settings;
+    }
+
+    async function ensureStream() {
+      if (appState.cache.stream) return appState.cache.stream;
+      try {
+        const [tunnel, ip, system] = await Promise.all([
+          apiJson('/api/account/tunnel-status'),
+          apiJson('/api/account/ip-diagnostics'),
+          apiJson('/api/system/full-status'),
+        ]);
+        appState.cache.stream = { tunnel, ip, system };
+      } catch {
+        appState.cache.stream = null;
+      }
+      return appState.cache.stream;
+    }
+
+    async function prefetchFocusData(symbol) {
+      if (!symbol) return;
+      await Promise.all([
+        ensureKlines(symbol, appState.selectedTf),
+        ensureForecast(symbol),
+        ensureDecision(symbol),
+      ]);
+      if (getRow(symbol)) renderFocus();
+      if (appState.nav === 'analysis') renderDrawer();
+    }
+
+    function setNav(view) {
+      appState.nav = view;
+      document.querySelectorAll('.nav[data-view]').forEach((node) => {
+        node.classList.toggle('active', node.dataset.view === view);
+      });
+      $('drawer').classList.toggle('visible', view !== 'live');
+      renderDrawer();
+    }
+
+    function favRows() {
+      const rows = getRows();
+      return rows.filter((row) => appState.favorites.has(row.symbol));
+    }
+
+    function renderFavoritesPanel() {
+      const favorites = favRows();
+      const fallback = getRows().slice(0, 10);
+      const list = favorites.length ? favorites : fallback;
+      const title = favorites.length ? 'Ulubione pary' : 'Brak zapisanych ulubionych — proponowane focusy';
+      return `
+        <div class="panelCard">
+          <h5>${title}</h5>
+          <div class="miniList">
+            ${list.length ? list.map((row) => `
+              <button class="miniBtn" data-focus="${escapeHtml(row.symbol)}">
+                ${sym(row.symbol)} — ${action(row.action)[0]} — ${price(row.price)} ${row.quote || ''}
+              </button>
+            `).join('') : '<div class="empty">Brak par do pokazania.</div>'}
+          </div>
+        </div>
+        <div class="panelCard">
+          <h5>Jak to działa</h5>
+          <div class="empty">Kliknij gwiazdkę przy fokusie lub na kafelku w tickerze. Zakładka „Ulub.” przechowuje wybór lokalnie w przeglądarce/OBS.</div>
+        </div>
+      `;
+    }
+
+    function renderHistoryPanel() {
+      const history = appState.cache.history;
+      const rows = Array.isArray(history?.data) ? history.data.slice(-12).reverse() : [];
+      return `
+        <div class="panelCard">
+          <h5>Historia equity (24h)</h5>
+          ${rows.length ? rows.map((row) => `
+            <div class="kv">
+              <span>${new Date(row.timestamp).toLocaleString('pl-PL')}</span>
+              <b>${money(row.equity)}</b>
+            </div>
+          `).join('') : '<div class="empty">Brak snapshotów live w ostatnich 24h.</div>'}
+        </div>
+      `;
+    }
+
+    function renderAnalysisPanel() {
+      const row = getFocusRow();
+      const decision = appState.cache.decision.get(row?.symbol || '')?.data || {};
+      const forecast = appState.cache.forecast.get(row?.symbol || '');
+      const blockers = Array.isArray(decision.blockers) ? decision.blockers : [];
+      const horizons = decision.horizons || {};
+      return `
+        <div class="panelCard">
+          <h5>Kanoniczna decyzja — ${row ? sym(row.symbol) : 'brak focusu'}</h5>
+          ${row ? `
+            <div class="grid2">
+              <div class="kv"><span>Final signal</span><b>${decision.final_signal || row.action || '--'}</b></div>
+              <div class="kv"><span>Jakość danych</span><b>${decision.data_quality || '--'}</b></div>
+              <div class="kv"><span>Aktualna cena</span><b>${price(decision.market_context?.current_price ?? row.price)}</b></div>
+              <div class="kv"><span>Wiek danych</span><b>${decision.market_context?.data_age_s ?? '--'} s</b></div>
+            </div>
+            <div class="narr">${escapeHtml(decision.explanation?.short || decision.final_signal_reason || row.reason || 'Brak wyjaśnienia.')}</div>
+            <div style="margin-top:8px;">
+              ${(blockers.length ? blockers : ['Brak aktywnych blockerów dla focusu.']).map((item) => `<span class="tag">${escapeHtml(item)}</span>`).join('')}
+            </div>
+          ` : '<div class="empty">Wybierz parę z tickeru.</div>'}
+        </div>
+        <div class="panelCard">
+          <h5>Forecast / horyzonty</h5>
+          ${row ? `
+            <div class="grid2">
+              <div class="kv"><span>1h</span><b>${forecast?.forecast_1h?.direction || horizons['1h']?.direction || '--'} ${forecast?.forecast_1h?.projected_pct ? `(${pct(forecast.forecast_1h.projected_pct)})` : ''}</b></div>
+              <div class="kv"><span>4h</span><b>${forecast?.forecast_4h?.direction || horizons['4h']?.direction || '--'} ${forecast?.forecast_4h?.projected_pct ? `(${pct(forecast.forecast_4h.projected_pct)})` : ''}</b></div>
+              <div class="kv"><span>24h</span><b>${forecast?.forecast_24h?.direction || horizons['24h']?.direction || '--'} ${forecast?.forecast_24h?.projected_pct ? `(${pct(forecast.forecast_24h.projected_pct)})` : ''}</b></div>
+              <div class="kv"><span>Trend</span><b>${decision.market_context?.trend || row?.trend || '--'}</b></div>
+            </div>
+          ` : '<div class="empty">Brak focusu dla analizy.</div>'}
+        </div>
+      `;
+    }
+
+    function renderSettingsPanel() {
+      const settings = appState.cache.settings;
+      const runtime = settings?.runtime?.data || {};
+      const config = settings?.config?.data || {};
+      const control = settings?.control?.data || {};
+      return `
+        <div class="panelCard">
+          <h5>Runtime / execution</h5>
+          ${settings ? `
+            <div class="grid2">
+              <div class="kv"><span>Trading mode</span><b>${config.trading_mode || '--'}</b></div>
+              <div class="kv"><span>Live trading</span><b>${config.allow_live_trading ? 'TAK' : 'NIE'}</b></div>
+              <div class="kv"><span>Execution</span><b>${config.execution_enabled ? 'TAK' : 'NIE'}</b></div>
+              <div class="kv"><span>Auto execute</span><b>${config.enable_auto_execute ? 'TAK' : 'NIE'}</b></div>
+              <div class="kv"><span>WS enabled</span><b>${control.ws_enabled ? 'TAK' : 'NIE'}</b></div>
+              <div class="kv"><span>Watchlist</span><b>${Array.isArray(control.watchlist) ? control.watchlist.length : 0}</b></div>
+            </div>
+            <div style="margin-top:8px;">
+              ${Object.entries(runtime).slice(0, 12).map(([key, value]) => `<span class="tag">${escapeHtml(key)}=${escapeHtml(typeof value === 'object' ? JSON.stringify(value) : value)}</span>`).join('')}
+            </div>
+          ` : '<div class="empty">Nie udało się pobrać ustawień runtime.</div>'}
+        </div>
+      `;
+    }
+
+    function renderStreamPanel() {
+      const data = appState.cache.stream;
+      const tunnel = data?.tunnel?.data || {};
+      const ip = data?.ip?.data || {};
+      const system = data?.system?.data || {};
+      const overlayUrl = tunnel.overlay_url || `${window.location.origin}/index.html`;
+      return `
+        <div class="panelCard">
+          <h5>Źródła streamu / publiczny dostęp</h5>
+          ${data ? `
+            <div class="kv"><span>Overlay URL</span><b>${escapeHtml(overlayUrl)}</b></div>
+            <div class="kv"><span>Tunel aktywny</span><b>${tunnel.active_url || tunnel.frontend_url || 'brak'}</b></div>
+            <div class="kv"><span>Overlay tunnel</span><b>${tunnel.overlay_url || 'brak osobnego URL'}</b></div>
+            <div class="kv"><span>Backend live execution</span><b>${system.live_execution_ok ? 'TAK' : 'NIE'}</b></div>
+            <div class="kv"><span>Local IP</span><b>${ip.local?.ip || ip.local_ip || 'brak'}</b></div>
+            <div class="kv"><span>Public egress IP</span><b>${ip.public?.ip || ip.public_ip || 'brak'}</b></div>
+          ` : '<div class="empty">Nie udało się pobrać diagnostyki stream/tunnel.</div>'}
+        </div>
+      `;
+    }
+
+    async function renderDrawer() {
+      const drawer = $('drawer');
+      if (appState.nav === 'live') {
+        drawer.classList.remove('visible');
+        return;
+      }
+      drawer.classList.add('visible');
+
+      const titles = {
+        favorites: ['Ulubione / szybki focus', 'Lokalne zapisane symbole do OBS i operatora'],
+        history: ['Historia / equity', 'Ostatnie snapshoty portfela live z backendu'],
+        analysis: ['Analizy / decyzja', 'Kanoniczny decision-view i forecast dla focusu'],
+        settings: ['Ustawienia runtime', 'Flagi live/execution/watchlist z backendu'],
+        stream: ['Stream / tunele / adresy', 'Status tunelu, IP i źródeł overlayu'],
+      };
+
+      $('drawerTitle').textContent = titles[appState.nav]?.[0] || 'Panel';
+      $('drawerSub').textContent = titles[appState.nav]?.[1] || 'Overlay RLdC';
+      $('drawerBody').innerHTML = '<div class="panelCard"><div class="empty">Ładowanie danych panelu...</div></div>';
+
+      if (appState.nav === 'history') await ensureHistory();
+      if (appState.nav === 'analysis' && appState.focusSymbol) {
+        await Promise.all([ensureDecision(appState.focusSymbol), ensureForecast(appState.focusSymbol)]);
+      }
+      if (appState.nav === 'settings') await ensureSettings();
+      if (appState.nav === 'stream') await ensureStream();
+
+      let html = '';
+      if (appState.nav === 'favorites') html = renderFavoritesPanel();
+      if (appState.nav === 'history') html = renderHistoryPanel();
+      if (appState.nav === 'analysis') html = renderAnalysisPanel();
+      if (appState.nav === 'settings') html = renderSettingsPanel();
+      if (appState.nav === 'stream') html = renderStreamPanel();
+      $('drawerBody').innerHTML = html || '<div class="panelCard"><div class="empty">Brak danych panelu.</div></div>';
+
+      document.querySelectorAll('[data-focus]').forEach((node) => {
+        node.addEventListener('click', () => {
+          setFocus(node.dataset.focus);
+          setNav('live');
+        });
+      });
+    }
+
+    function bindStaticEvents() {
+      document.querySelectorAll('.nav[data-view]').forEach((node) => {
+        node.addEventListener('click', () => setNav(node.dataset.view));
+      });
+      $('closeDrawer').addEventListener('click', () => setNav('live'));
+      $('pinSymbol').addEventListener('click', () => toggleFavorite(appState.focusSymbol));
+      document.querySelectorAll('#timeframes button[data-tf]').forEach((node) => {
+        node.addEventListener('click', async () => {
+          const tf = node.dataset.tf;
+          appState.selectedTf = tf;
+          document.querySelectorAll('#timeframes button[data-tf]').forEach((button) => {
+            button.classList.toggle('on', button.dataset.tf === tf);
+          });
+          if (appState.focusSymbol) {
+            await ensureKlines(appState.focusSymbol, tf);
+            renderFocus();
+          }
+        });
+      });
+      window.addEventListener('resize', () => {
+        const row = getFocusRow();
+        const history = appState.cache.klines.get(`${row?.symbol}:${appState.selectedTf}`) || row?.history || [];
+        const forecast = buildForecastPath(row, appState.cache.forecast.get(row?.symbol || ''));
+        draw(history, forecast);
+      });
+    }
+
+    bindStaticEvents();
+    clock();
+    loadOverlayState();
+    setInterval(loadOverlayState, refreshMs);
+  </script>
 </body>
 </html>

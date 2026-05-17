@@ -80,6 +80,16 @@ def _http_get_json(
         return {}, "invalid_json"
 
 
+def _http_post_json(
+    url: str, payload: dict, timeout: tuple = _HTTP_TIMEOUT_LIGHT
+) -> tuple[int, dict]:
+    resp = requests.post(url, json=payload, headers=_api_headers(), timeout=timeout)
+    try:
+        return resp.status_code, resp.json() or {}
+    except Exception:
+        return resp.status_code, {}
+
+
 def _is_lightweight_nl(text: str) -> Optional[str]:
     norm = (text or "").strip().lower()
     if not norm:
@@ -100,6 +110,17 @@ def _command_timeout_message() -> str:
         "⏱️ Backend odpowiada zbyt wolno dla tego polecenia. "
         "Spróbuj za chwilę albo użyj lekkich komend: /status, /ai, /ip."
     )
+
+
+def _runtime_mode() -> str:
+    payload, err = _http_get_json(
+        f"{API_BASE_URL}/api/system/full-status", timeout=_HTTP_TIMEOUT_LIGHT
+    )
+    if not err:
+        mode = str(((payload or {}).get("data") or {}).get("trading_mode") or "").strip()
+        if mode in {"live", "demo"}:
+            return mode
+    return TRADING_MODE
 
 
 def _fmt_money(value: Optional[float], ccy: str = "EUR") -> str:
@@ -154,6 +175,9 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "\n"
         "📈 Trading:\n"
         "  /status     — pełny status systemu\n"
+        "  /start_trading — włącz wykonanie live\n"
+        "  /stop_trading  — zatrzymaj nowe wykonania\n"
+        "  /reboot_bot    — restart backend/frontend/telegram/runtime\n"
         "  /portfolio  — portfel i pozycje\n"
         "  /positions  — alias /portfolio\n"
         "  /orders     — ostatnie zlecenia\n"
@@ -192,7 +216,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "  potwierdź trade 12 / odrzuć trade 12\n"
         "  zamknij incydent 33\n"
         "\n"
-        f"Tryb: {TRADING_MODE}"
+        f"Tryb: {_runtime_mode()}"
     )
     await _send_reply(update, text, "/start")
 
@@ -210,12 +234,13 @@ async def chatid_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await _check_auth(update):
         return
+    mode = _runtime_mode()
     try:
         full_payload, full_err = _http_get_json(
             f"{API_BASE_URL}/api/system/full-status", timeout=_HTTP_TIMEOUT_LIGHT
         )
         runtime_payload, runtime_err = _http_get_json(
-            f"{API_BASE_URL}/api/account/runtime-activity?mode={TRADING_MODE}",
+            f"{API_BASE_URL}/api/account/runtime-activity?mode={mode}",
             timeout=_HTTP_TIMEOUT_LIGHT,
         )
         ai_payload, ai_err = _http_get_json(
@@ -236,7 +261,7 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         exchange_connected = (full.get("live_execution_ok") is True) or (
             full.get("trading_mode") != "live"
         )
-        mode_label = str(full.get("trading_mode") or TRADING_MODE)
+        mode_label = str(full.get("trading_mode") or mode)
 
         text = (
             "✅ Pelny status systemu\n"
@@ -267,33 +292,87 @@ async def stop_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await _check_auth(update):
         return
     try:
-        resp = requests.post(
+        status_code, _ = _http_post_json(
             f"{API_BASE_URL}/api/control/state",
-            json={"demo_trading_enabled": False},
-            headers={"X-Admin-Token": ADMIN_TOKEN},
+            {"allow_live_trading": False, "execution_enabled": False, "enable_auto_execute": False},
             timeout=5,
         )
-        if resp.status_code == 200:
-            text = "🛑 Demo trading zatrzymany. Kolektor nadal śledzi dane."
-        elif resp.status_code == 401:
+        if status_code == 200:
+            text = "🛑 Trading zatrzymany. Nowe wykonania live są wyłączone, kolektor nadal śledzi dane."
+        elif status_code == 401:
             text = "⛔ Brak autoryzacji API — sprawdź ADMIN_TOKEN w .env."
         else:
             text = (
-                f"⚠️ Nie udało się zatrzymać (status {resp.status_code}). Sprawdź API."
+                f"⚠️ Nie udało się zatrzymać tradingu (status {status_code}). Sprawdź API."
             )
     except Exception as exc:
         text = f"❌ Błąd wywołania API: {exc}"
     await _send_reply(update, text, "/stop")
 
 
+async def start_trading_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await _check_auth(update):
+        return
+    try:
+        status_code, _ = _http_post_json(
+            f"{API_BASE_URL}/api/control/state",
+            {
+                "trading_mode": "live",
+                "allow_live_trading": True,
+                "execution_enabled": True,
+                "enable_auto_execute": True,
+                "demo_trading_enabled": False,
+            },
+            timeout=5,
+        )
+        if status_code == 200:
+            text = "🟢 Trading live włączony. Nowe wejścia mogą być wykonywane tylko jeśli przejdą wszystkie gate'y ryzyka i kosztów."
+        elif status_code == 401:
+            text = "⛔ Brak autoryzacji API — sprawdź ADMIN_TOKEN w .env."
+        else:
+            text = f"⚠️ Nie udało się włączyć tradingu (status {status_code})."
+    except Exception as exc:
+        text = f"❌ Błąd wywołania API: {exc}"
+    await _send_reply(update, text, "/start_trading")
+
+
+async def stop_trading_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await stop_command(update, context)
+
+
+async def reboot_bot_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await _check_auth(update):
+        return
+    try:
+        status_code, payload = _http_post_json(
+            f"{API_BASE_URL}/api/system/runtime-action",
+            {"action": "restart_runtime"},
+            timeout=5,
+        )
+        if status_code == 200:
+            data = (payload or {}).get("data") or {}
+            overlay_note = (
+                "overlay restart: TAK" if data.get("overlay_restart_attempted") else "overlay restart: pominięty"
+            )
+            text = f"♻️ Restart runtime zaplanowany. {overlay_note}."
+        elif status_code == 401:
+            text = "⛔ Brak autoryzacji API — sprawdź ADMIN_TOKEN w .env."
+        else:
+            text = f"⚠️ Nie udało się zaplanować restartu (status {status_code})."
+    except Exception as exc:
+        text = f"❌ Błąd wywołania API: {exc}"
+    await _send_reply(update, text, "/reboot_bot")
+
+
 async def risk_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    mode = _runtime_mode()
     max_daily_loss = float(os.getenv("MAX_DAILY_LOSS_PERCENT", "5.0"))
     max_drawdown = float(os.getenv("MAX_DRAWDOWN_PERCENT", "10.0"))
     initial_balance = float(os.getenv("DEMO_INITIAL_BALANCE", "10000"))
 
     db = SessionLocal()
     try:
-        positions = db.query(Position).filter(Position.mode == TRADING_MODE).all()
+        positions = db.query(Position).filter(Position.mode == mode).all()
         unrealized_pnl = sum((p.unrealized_pnl or 0.0) for p in positions)
         worst_dd = 0.0
         for p in positions:
@@ -364,9 +443,10 @@ async def top5_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def portfolio_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await _check_auth(update):
         return
+    mode = _runtime_mode()
     try:
         resp = requests.get(
-            f"{API_BASE_URL}/api/portfolio/wealth?mode={TRADING_MODE}",
+            f"{API_BASE_URL}/api/portfolio/wealth?mode={mode}",
             timeout=8,
         )
         if resp.status_code != 200:
@@ -415,11 +495,12 @@ async def portfolio_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def orders_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    mode = _runtime_mode()
     db = SessionLocal()
     try:
         orders = (
             db.query(Order)
-            .filter(Order.mode == TRADING_MODE)
+            .filter(Order.mode == mode)
             .order_by(Order.timestamp.desc())
             .limit(10)
             .all()
@@ -579,6 +660,7 @@ async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def confirm_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await _check_auth(update):
         return
+    mode = _runtime_mode()
     db = SessionLocal()
     try:
         if not context.args:
@@ -597,7 +679,7 @@ async def confirm_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             db.query(PendingOrder)
             .filter(
                 PendingOrder.id == pending_id,
-                PendingOrder.mode == TRADING_MODE,
+                PendingOrder.mode == mode,
             )
             .first()
         )
@@ -645,7 +727,7 @@ async def confirm_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await _send_reply(
             update,
             (
-                f"❌ Nie znaleziono pending trade #{pending_id} w trybie {TRADING_MODE}.\n"
+                f"❌ Nie znaleziono pending trade #{pending_id} w trybie {mode}.\n"
                 f"Sprawdź listę: /pending"
             ),
             "/confirm",
@@ -657,6 +739,7 @@ async def confirm_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def reject_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await _check_auth(update):
         return
+    mode = _runtime_mode()
     db = SessionLocal()
     try:
         if not context.args:
@@ -675,7 +758,7 @@ async def reject_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             db.query(PendingOrder)
             .filter(
                 PendingOrder.id == pending_id,
-                PendingOrder.mode == TRADING_MODE,
+                PendingOrder.mode == mode,
             )
             .first()
         )
@@ -717,7 +800,7 @@ async def reject_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await _send_reply(
             update,
             (
-                f"❌ Nie znaleziono pending trade #{pending_id} w trybie {TRADING_MODE}.\n"
+                f"❌ Nie znaleziono pending trade #{pending_id} w trybie {mode}.\n"
                 f"Sprawdź listę: /pending"
             ),
             "/reject",
@@ -932,11 +1015,16 @@ async def ip_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 lines.append("Brak skonfigurowanych publicznych URL-i")
 
             act_fe = d.get("active_frontend_url") or tun_data.get("active_url")
+            overlay_url = tun_data.get("overlay_url")
             if act_fe:
                 lines.append("")
                 lines.append("🟢 Aktywny adres publiczny:")
                 src = tun_data.get("source") or "?"
                 lines.append(f"  {act_fe} [{src}]")
+            if overlay_url:
+                lines.append("")
+                lines.append("🎥 Overlay publiczny:")
+                lines.append(f"  {overlay_url}")
             elif url_status:
                 lines.append("")
                 any_reachable = any(u.get("reachable") for u in url_status)
@@ -1309,12 +1397,13 @@ async def pending_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Lista oczekujących transakcji (tylko trades, bez incydentów)."""
     if not await _check_auth(update):
         return
+    mode = _runtime_mode()
     db = SessionLocal()
     try:
         pending_list = (
             db.query(PendingOrder)
             .filter(
-                PendingOrder.mode == TRADING_MODE,
+                PendingOrder.mode == mode,
                 PendingOrder.status.in_(ACTIVE_PENDING_STATUSES),
             )
             .order_by(PendingOrder.created_at.desc())
@@ -1322,11 +1411,9 @@ async def pending_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             .all()
         )
         if not pending_list:
-            text = f"✅ Brak oczekujących transakcji (tryb: {TRADING_MODE})"
+            text = f"✅ Brak oczekujących transakcji (tryb: {mode})"
         else:
-            lines = [
-                f"⏸ Pending trades (tryb: {TRADING_MODE}) — {len(pending_list)} szt:"
-            ]
+            lines = [f"⏸ Pending trades (tryb: {mode}) — {len(pending_list)} szt:"]
             for p in pending_list:
                 age_s = (
                     (utc_now_naive() - p.created_at).total_seconds()
@@ -1541,11 +1628,12 @@ async def reconcile_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Ręczna synchronizacja DB z Binance."""
     if not await _check_auth(update):
         return
+    mode = _runtime_mode()
     await _send_reply(update, "🔄 Uruchamiam reconcile DB ↔ Binance...", "/reconcile")
     try:
         resp = requests.post(
             f"{API_BASE_URL}/api/system/reconcile",
-            params={"mode": TRADING_MODE, "trigger": "telegram", "force": "true"},
+            params={"mode": mode, "trigger": "telegram", "force": "true"},
             headers=_api_headers(),
             timeout=30,
         )
@@ -1720,9 +1808,10 @@ async def quote_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def quote_status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await _check_auth(update):
         return
+    mode = _runtime_mode()
     try:
         resp = requests.get(
-            f"{API_BASE_URL}/api/account/entry-readiness?mode={TRADING_MODE}",
+            f"{API_BASE_URL}/api/account/entry-readiness?mode={mode}",
             timeout=8,
         )
         if resp.status_code == 200:
@@ -1731,7 +1820,7 @@ async def quote_status_command(update: Update, context: ContextTypes.DEFAULT_TYP
             eur_rate = d.get("eur_usdc_rate")
             text = (
                 f"💱 Quote Status\n"
-                f"Tryb: {TRADING_MODE}\n"
+                f"Tryb: {mode}\n"
                 f"USDC: {balances.get('usdc', '?')}\n"
                 f"EUR: {balances.get('eur', '?')}\n"
                 f"Kurs EUR/USDC: {eur_rate or '?'}\n"
@@ -1774,13 +1863,16 @@ def main():
 
     print(
         "[telegram_bot] start: polling aktywny, "
-        f"configured_chat_id={TELEGRAM_CHAT_ID or 'brak'}, mode={TRADING_MODE}, api_base={API_BASE_URL}"
+        f"configured_chat_id={TELEGRAM_CHAT_ID or 'brak'}, mode={_runtime_mode()}, api_base={API_BASE_URL}"
     )
 
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CommandHandler("chatid", chatid_command))
     app.add_handler(CommandHandler("status", status_command))
     app.add_handler(CommandHandler("stop", stop_command))
+    app.add_handler(CommandHandler("start_trading", start_trading_command))
+    app.add_handler(CommandHandler("stop_trading", stop_trading_command))
+    app.add_handler(CommandHandler("reboot_bot", reboot_bot_command))
     app.add_handler(CommandHandler("risk", risk_command))
     app.add_handler(CommandHandler("top10", top10_command))
     app.add_handler(CommandHandler("top5", top5_command))

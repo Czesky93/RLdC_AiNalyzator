@@ -1,5 +1,53 @@
 # TASK_QUEUE — RLdC Trading Bot
 
+## DONE (zamkniete w sesji 42 — T-121 RUNTIME PATH SYNC + TELEGRAM MODE SYNC)
+
+| ID | Zadanie | Plik/Modul | Wplyw | Status |
+|----|---------|------------|-------|--------|
+| T-131 | **Domkniecie runtime WWW/overlay po fixie `state_manager.reconcile`**: `system-status` i `runtime-activity` ukrywaja juz nieaktywny blad po nowszym heartbeat runtime, overlay auto-rotuje focus, dostaje historię/forecast dla top symboli, a quicktunnel zapisuje osobny `overlay_url` bez nadpisywania go przez równoległe parsery. Walidacja: `bash -n scripts/run_quicktunnel.sh`, `tests/test_trading_state_manager.py` 28/28 PASS, smoke `curl` dla `/api/account/system-status`, `/api/account/runtime-activity`, `/overlay/api/live-state`, `/api/account/tunnel-status`. | `backend/routers/account.py`, `live_overlay/index.html`, `live_overlay/serve_live_overlay.py`, `backend/tunnel_manager.py`, `scripts/run_quicktunnel.sh`, `CURRENT_STATE.md`, `CHANGELOG_LIVE.md`, `PROJECT_AUDIT_MASTER.md`, `TASK_QUEUE.md` | Stabilnosc: UI nie pokazuje juz stalego falszywego alarmu. UX: overlay rotuje focus i ma aktualne wykresy. Operacyjnie: overlay ma oddzielny adres trycloudflare. | DONE |
+| T-130 | **Naprawa błędu `state_manager.reconcile`**: `backend/trading/state_manager.py` używał nieistniejącego `cfg.sync_interval_sec`, mimo że kanoniczny `TradeConfig` wystawia `reconcile_interval_sec`. Dodano fallback legacy, usunięto deprecacyjne `datetime.utcnow()` w module i dopięto regresję z domyślnym `TradeConfig()`. Walidacja: `tests/test_trading_state_manager.py` -> 28/28 PASS. | `backend/trading/state_manager.py`, `tests/test_trading_state_manager.py`, `CURRENT_STATE.md`, `PROJECT_AUDIT_MASTER.md`, `TASK_QUEUE.md` | Stabilność: collector LIVE nie wywraca już supplemental reconcile przed wejściem do logiki. | DONE |
+| T-129 | **Audyt instrukcji i potwierdzenie Binance live trader**: odczytano lokalne instrukcje, zweryfikowano runtime DB/.env, publiczne tickery Binance, endpointy live, collector/WS/reconcile oraz pełne testy. Usunięto niespójności `health`, cache `full-status`, zbieranie starych testów i lint Next 16. | `backend/app.py`, `backend/routers/system.py`, `pytest.ini`, `web_portal/package.json`, `log.txt`, `CURRENT_STATE.md`, `TASK_QUEUE.md`, `PROJECT_AUDIT_MASTER.md` | Stabilność: aktualny runtime nie pokazuje stale demo/live. Operacyjnie: projekt jest skonfigurowany jako Binance Spot trader z potwierdzonymi endpointami live. Walidacja: 650 pytest PASS, lint PASS, build PASS. | DONE |
+| T-127 | **Stabilizacja watchdoga i prawdomowna diagnostyka AI**: `scripts/watchdog.sh` dostal lock, grace period i prog kolejnych faili, przez co przestal restartowac backend w petli podczas rozruchu, a `GET /api/account/ai-status` raportuje juz realnego primary providera z orchestratora zamiast reklamowac niedostepny local AI jako aktywny. | `scripts/watchdog.sh`, `backend/routers/account.py`, `tests/test_smoke.py` | Stabilnosc: backend nie jest juz ubijany przez watchdog. Prawdomownosc: UI/API widza `groq` jako aktywny provider, a martwy `ollama` jako blad. | DONE |
+| T-126 | **Aktywacja funkcji overlayu**: `live_overlay/index.html` dostal dzialajace zakladki, focus symboli, ulubione, timeframe i panele danych z backendu, a `serve_live_overlay.py` pobiera stan równolegle zamiast sekwencyjnie. | `live_overlay/index.html`, `live_overlay/serve_live_overlay.py` | Stabilnosc: mniej timeoutow i martwych ekranow. UX: overlay pokazuje realne funkcje, nie atrapy. | DONE |
+| T-125 | **Synchronizacja sterowania runtime**: backend dostal `POST /api/system/runtime-action`, Telegram komendy `/start_trading` `/stop_trading` `/reboot_bot`, a WWW steruje juz realnymi flagami live/execution zamiast demo-only. | `backend/routers/system.py`, `telegram_bot/bot.py`, `web_portal/src/components/Topbar.tsx`, `web_portal/src/components/MainContent.tsx`, `tests/test_smoke.py` | Stabilnosc: jeden operator flow w backendzie/WWW/Telegramie. Ryzyko: mniej falszywych STOP/START. | DONE |
+| T-124 | **Naprawa portability runtime i aliasow endpointow**: backend dostal kompatybilne aliasy dla legacy sciezek status/runtime/live/positions, `backend.app --all` startuje `web_portal` po absolutnej sciezce, a overlay adapter odpyta kanoniczne endpointy zamiast znanych 404. | `backend/app.py`, `live_overlay/serve_live_overlay.py`, `tests/test_smoke.py` | Stabilnosc: mniej 404 i lepsza kompatybilnosc klientow. Operacyjnie: latwiejsze przenoszenie repo i mniej zaleznosci od cwd. | DONE |
+| T-123 | **Naprawa kontraktu analizy live dla signal engine**: `get_live_context()` nie zwracal `klines_count`, `_klines_to_df()` gubil `quote_volume` i `trades`, a fast timeframe byl pobierany z limitem mniejszym niz minimum analizy. To blokowalo live entry falszywym `insufficient_klines` i `liquidity_too_low`. | `backend/analysis.py`, `backend/trading/signal_engine.py`, `tests/test_trading_signal_engine.py` | Zysk: pipeline live znow ocenia realny edge. Ryzyko: mniej falszywych blokad. Stabilnosc: spójny kontrakt analiza↔execution. | DONE |
+
+| ID | Zadanie | Plik/Modul | Wplyw | Status |
+|----|---------|------------|-------|--------|
+| T-121 | **Ujednolicenie runtime na aktualne repo**: systemd i skrypty startowe byly rozjechane miedzy `/media/...` i `/home/...`, Telegram trzymal staly `TRADING_MODE`, a `8099` nadal obslugiwal legacy overlay. Przepieto runtime na `/home/...`, Telegram czyta tryb z backendu, a `8099` serwuje `serve_live_overlay.py`. | `telegram_bot/bot.py`, `backend/tunnel_manager.py`, `scripts/run_quicktunnel.sh`, `~/.rldc_runtime/*`, `~/.config/systemd/user/rldc-*.service` | Stabilnosc: jeden aktywny runtime. Ryzyko: mniej rozjazdow operator↔backend. Overlay: poprawny adapter na docelowym porcie. | DONE |
+
+## BLOCKED (zewnetrzne)
+
+| ID | Zadanie | Plik/Modul | Wplyw | Status |
+|----|---------|------------|-------|--------|
+| T-122 | **Panelowy trycloudflare / drugi publiczny adres**: lokalny frontend i backend sa zdrowe, ale nowe requesty quick tunnel dla panelu sa odrzucane przez Cloudflare `1015 / 429 Too Many Requests`. Overlay ma aktywny publiczny URL; panel wymaga cooldown albo named tunnel. | `scripts/run_quicktunnel.sh`, `backend/tunnel_manager.py`, infrastruktura Cloudflare | Dostepnosc zewnetrzna panelu: zablokowana przez rate limit dostawcy, nie przez lokalny runtime. | BLOCKED |
+
+## DONE (zamknięte w sesji 41 — T-120 LIVE PLAN SYNC + OVERLAY ADAPTER)
+
+| ID | Zadanie | Plik/Moduł | Wpływ | Status |
+|----|---------|------------|-------|--------|
+| T-120 | **Naprawa spójności planu trade'u po BUY fill**: LIVE pipeline zachowuje teraz plan `SL/TP/TP2/trailing/break-even` policzony przy wejściu i przypisuje go do pozycji po execution, zamiast odbudowywać nowy fallback ATR. Dodatkowo uruchomiono poprawny adapter overlay na `8100`, bo domyślny `8099` jest zajęty przez legacy `serve_live.py`. | `backend/collector.py`, `tests/test_live_execution_cash_management.py`, `live_overlay/serve_live_overlay.py` | Zysk: pozycja jest zarządzana zgodnie z oceną wejścia. Ryzyko: mniej rozjazdów entry↔exit. Stabilność: działający JSON overlay mimo blokady legacy portu. | DONE |
+
+## DONE (zamknięte w sesji 40 — T-119 WWW pending sync)
+
+| ID | Zadanie | Plik/Moduł | Wpływ | Status |
+|----|---------|------------|-------|--------|
+| T-119 | **Naprawa synchronizacji pending w WWW**: `DecisionsRiskPanel` pytał o legacy `status=PENDING`, więc panel gubił nowe rekordy `PENDING_CREATED`. Backend `GET /api/orders/pending` obsługuje teraz CSV statusów i aliasy `ACTIONABLE`/`ACTIVE`, a frontend używa filtra `PENDING_CREATED,PENDING`. Dodano smoke test zabezpieczający lifecycle sync. | `backend/routers/orders.py`, `web_portal/src/components/widgets/DecisionsRiskPanel.tsx`, `tests/test_smoke.py` | Zysk: operator widzi realną kolejkę wejść/wyjść. Ryzyko: mniej błędnych decyzji przy pustym panelu. Stabilność: spójność WWW↔API. | DONE |
+
+## DONE (zamknięte w sesji 39 — T-114 NOWY PIPELINE LIVE)
+
+| ID | Zadanie | Plik/Moduł | Wpływ | Status |
+|----|---------|------------|-------|--------|
+| T-114 | **Wire trading modules do collector.py** — UKOŃCZONE: (1) `__init__`: dodano `_risk_engine`, `_state_manager`, `_state_manager_started`. (2) Helpery `_get_risk_engine()` / `_get_state_manager()` — lazy init z refreshem cfg. (3) Nowa metoda `_live_entry_new_pipeline()` — guard pending, `evaluate_entry_signal()`, `risk_engine.evaluate()`, `_create_pending_order()`, trace + Telegram. (4) `_screen_entry_candidates()`: LIVE bypass → `_live_entry_new_pipeline()` + `continue`. DEMO ścieżka niezmieniona. (5) `_sync_binance_positions()`: dodano `state_manager.reconcile_live_positions()` jako supplemental. (6) `run_once()`: dodano `state_manager.check_pending_fills()` co cykl dla LIVE. (7) `start()`: dodano `state_manager.recover_on_startup()` jednorazowo przy starcie LIVE. Wynik: 484/484 testów, syntax OK. | `backend/collector.py`, `backend/trading/*.py` | Zysk: nowa logika sygnałów + ATR sizing + EV gate + state recovery wchodzi do produkcji LIVE. DEMO niezmienione. Testy: 484/484 PASS. | DONE |
+
+## DONE (zamknięte w sesji 38 — T-113 LIVE MODE + USDC + BEZ LIMITÓW)
+
+| ID | Zadanie | Plik/Moduł | Wpływ | Status |
+|----|---------|------------|-------|--------|
+| T-113 | **LIVE MODE + PEŁNY USDC + USUNIĘCIE BLOKAD**: (1) Usunięto makro-gate BTC/ETH (~55 linii) blokujący wszystkie altoiny gdy BTC bearish — żadna para nie powinna blokować reszty. (2) Usunięto `tier_daily_trade_limit` z głównej pętli tradingowej — bot nie był w stanie handlować BANKUSDC/BANANAS31USDC po 3 transakcjach dziennie dla ALTCOIN tier. (3) `runtime_settings.py`: max_trades_per_day 20→200, limity wszystkich tierów → 99. (4) `.env`: WATCHLIST zmieniony z EUR par na USDC (BTCUSDC,ETHUSDC,SOLUSDC,BNBUSDC,...), DEMO_TRADING_ENABLED=false, tryb live włączony. Weryfikacja: 484/484 testów, `tier_daily_trade_limit` nie pojawia się w decision_traces po restarcie, grep w collector.py zwraca 0 wyników. | `backend/collector.py`, `backend/runtime_settings.py`, `.env` | Zysk: bot handluje bez sztucznych ograniczeń. Watchlist USDC. Pełny tryb live. Blokady usunięte. | DONE |
+| T-113b | **Telegram false alerts + averaging down fix** (commit `bc158a3`+`d4a4c11`): (1) Telegram ogłaszał kupno przed wykonaniem zlecenia na Binance — dodano `_exit_alert_sent_at` i cooldown 10min na rejection. (2) Bot kupował więcej tracących pozycji (BANKUSDC 1685→3375, BANANAS31USDC dwa zakupy) — dodano guard w `add_to_position`: blokuje gdy `pnl_pct <= 0.0`. (3) `/api/debug/state-consistency` zwracał fałszywe alerty (BANKUSDC vs BANK) — naprawiono przez ekstrakcję base_asset. | `backend/collector.py`, `backend/routers/debug.py` | Redukcja szumu Telegram. Brak uśredniania w dół. Czysta diagnostyka. | DONE |
+
 ## DONE (zamknięte w sesji 37 — T-112 RECONCILIATION FIX)
 
 | ID | Zadanie | Plik/Moduł | Wpływ | Status |
@@ -54,19 +102,28 @@
 
 ### HIGH
 
-*Brak otwartych zadań wysokiego priorytetu.*
+| ID | Zadanie | Plik/Moduł | Wpływ | Status |
+|----|---------|------------|-------|--------|
+| T-115 | **Testy modułów trading** — unit tests: signal_engine scoring, symbol_filter validate_order, risk_engine sizing, execution_engine state machine, state_manager orphan detection. | `tests/test_trading_signal_engine.py`, `tests/test_trading_risk_engine.py`, `tests/test_trading_execution_engine.py`, `tests/test_trading_state_manager.py` | Stabilność: regresje wykrywane przed wdrożeniem. | DONE |
 
 ### MEDIUM
 
 | ID | Zadanie | Plik/Moduł | Wpływ | Status |
 |----|---------|------------|-------|--------|
-*Brak otwartych zadań średniego priorytetu.*
+| T-116 | **Trailing stop w execution cycle** — po osiągnięciu `trailing_activation_price` włącz trailing stop: przesuwaj SL do `current - atr * stop_mult`; update w każdym cyklu LONG_OPEN; wywoływać z collector cyklu. | `backend/trading/execution_engine.py`, `backend/collector.py` | Zysk: lock-in zysku, mniej strat z przebitych TP. | OPEN |
+| T-117 | **Partial take profit** — po osiągnięciu TP1: sell 50% pozycji, przesuń SL na break-even; po TP2: sell resztę. Wymaga queue_sell(partial=True) i aktualizacji position.quantity. | `backend/trading/execution_engine.py` | Zysk: realizacja częściowych profitów, ochrona kapitału. | OPEN |
 
 ### LOW
 
 | ID | Zadanie | Plik/Moduł | Wpływ | Status |
 |----|---------|------------|-------|--------|
-*Brak otwartych zadań niskiego priorytetu.*
+| T-118 | **Endpoint diagnostyczny stanu state machine** — `GET /api/trading/states` — zwraca wszystkie SymbolExecState per mode (symbol, state, cooldown, pending_id, sl, tp). Do wyświetlenia w WWW. | `backend/routers/` (nowy router), `web_portal` | Obserwability. | OPEN |
+
+### DONE (zamknięte w sesji 43 — T-128 HEALTH FAST PATH)
+
+| ID | Zadanie | Plik/Moduł | Wpływ | Status |
+|----|---------|------------|-------|--------|
+| T-128 | **Health endpoint fast path** — `/health` jest lokalny i szybki, bez sieciowego probe Binance; `system-health` przestal losowo wpadać w `false` przez timeout backendu. | `backend/app.py`, `backend/routers/account.py` | Stabilność: brak fałszywych alarmów health. Diagnostyka: system-health pokazuje realny stan runtime. | DONE |
 
 ### DONE (zamknięte w sesji 29 — T-104 v2 USDC-first)
 
@@ -461,5 +518,3 @@ Otwórz `http://192.168.0.109:3000` i sprawdź: **Ryzyko, Rynki, Portfel, Strate
 1. Dopracować widok `PositionAnalysisView` — WLFI ma 0.01 szt; podsumowanie portfela powinno uwzględniać REAL (3260 szt WLFI).
 2. Dodać nową demo-pozycję BTCEUR z aktualną ceną zakupu i sprawdzić, czy analiza sugeruje decyzję poprawnie.
 3. Poprawić DashboardV2View — tabela "Positions" ma angielskie nagłówki (`Symbol`, `Side`, `Qty`).
-
-

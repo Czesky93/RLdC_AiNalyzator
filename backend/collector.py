@@ -117,6 +117,7 @@ ACTIVE_PENDING_STATUSES = {
 # Kompatybilność: obsługujemy legacy CONFIRMED/PENDING, ale canonical flow to
 # PENDING_CREATED -> PENDING_CONFIRMED -> EXCHANGE_SUBMITTED -> FILLED/PARTIALLY_FILLED.
 EXECUTABLE_PENDING_STATUSES = {"PENDING_CONFIRMED", "CONFIRMED"}
+TRADE_PLAN_REASON_PREFIX = "RLDC_TRADE_PLAN="
 
 
 def _load_timeframe_indicators(
@@ -221,6 +222,11 @@ class DataCollector:
             os.getenv("BINANCE_REJECTION_COOLDOWN_SECONDS", "600")  # 10 minut
         )
 
+        # Nowy pipeline tradingowy (T-114): signal_engine + risk_engine + state_manager
+        self._risk_engine = None          # lazy RiskEngine instance
+        self._state_manager = None        # lazy StateManager instance
+        self._state_manager_started: bool = False  # czy recovery już wykonano
+
         logger.info(f"📊 DataCollector initialized")
         logger.info(f"   Watchlist: {', '.join(self.watchlist)}")
         logger.info(f"   Interval: {self.interval}s")
@@ -252,6 +258,242 @@ class DataCollector:
                 _db.close()
         except Exception as exc:
             logger.warning(f"⚠️ Nie można wczytać symbol_params z DB: {exc}")
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # T-114: Helpery nowego pipeline (signal_engine + risk_engine + state_manager)
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def _get_risk_engine(self, db: Session):
+        """Lazy-init RiskEngine z aktualnym TradeConfig (T-114)."""
+        from backend.trading.risk_engine import RiskEngine
+        from backend.trading.trade_config import get_trade_config
+
+        cfg = get_trade_config(db)
+        if self._risk_engine is None:
+            self._risk_engine = RiskEngine(cfg)
+            logger.info("RiskEngine: zainicjalizowany (T-114)")
+        else:
+            # Odśwież cfg przy każdym wywołaniu — ustawienia mogą zmienić się w runtime
+            self._risk_engine.cfg = cfg
+        return self._risk_engine
+
+    def _get_state_manager(self, db: Session):
+        """Lazy-init StateManager z aktualnym TradeConfig (T-114)."""
+        from backend.trading.state_manager import StateManager
+        from backend.trading.trade_config import get_trade_config
+
+        cfg = get_trade_config(db)
+        if self._state_manager is None:
+            self._state_manager = StateManager(cfg, self.binance)
+            logger.info("StateManager: zainicjalizowany (T-114)")
+        else:
+            self._state_manager.cfg = cfg
+        return self._state_manager
+
+    def _live_entry_new_pipeline(
+        self,
+        db: Session,
+        symbol: str,
+        tc: dict,
+        runtime_ctx: dict,
+    ) -> int:
+        """
+        LIVE entry pipeline korzystający z signal_engine + risk_engine (T-114).
+
+        Zastępuje stary screening oparty o range_map/AI zakresy dla trybu LIVE.
+        Używa EV gate: expected_net_edge_pct >= min_net_edge_pct i rr >= min_expected_rr.
+
+        Zwraca 1 jeśli stworzono pending order BUY, 0 w przeciwnym razie.
+        """
+        from backend.trading.signal_engine import evaluate_entry_signal
+        from backend.trading.risk_engine import build_account_state, build_open_positions
+        from backend.trading.trade_config import get_trade_config
+
+        mode = "live"
+        _has_active_pending = tc["_has_active_pending"]
+        _pending_in_cooldown = tc["_pending_in_cooldown"]
+        min_order_notional = float(tc.get("min_order_notional", 25.0))
+
+        # 1. Guard: aktywny pending lub cooldown → skip
+        if _has_active_pending(symbol):
+            return 0
+        if _pending_in_cooldown(symbol):
+            self._trace_decision(
+                db, symbol=symbol, action="SKIP",
+                reason_code="symbol_cooldown_active",
+                runtime_ctx=runtime_ctx, mode=mode,
+            )
+            return 0
+
+        # 2. Oceń sygnał wejścia (signal_engine)
+        try:
+            cfg = get_trade_config(db)
+            sig_result = evaluate_entry_signal(
+                db, symbol, cfg,
+                meta=None,
+                binance_client=self.binance,
+            )
+        except Exception as exc:
+            log_exception(
+                "live_entry_pipeline",
+                f"Błąd signal_engine dla {symbol}",
+                exc, db=db,
+            )
+            return 0
+
+        if not sig_result.is_valid:
+            self._trace_decision(
+                db, symbol=symbol, action="SKIP",
+                reason_code=sig_result.reason_code or "signal_engine_rejected",
+                runtime_ctx=runtime_ctx, mode=mode,
+                signal_summary={
+                    "score": sig_result.score,
+                    "confidence": sig_result.confidence,
+                    "edge_pct": sig_result.expected_net_edge_pct,
+                    "skip_reasons": sig_result.skip_reasons,
+                },
+                details=sig_result.details,
+            )
+            return 0
+
+        # 3. Brama ryzyka (risk_engine)
+        try:
+            risk_engine = self._get_risk_engine(db)
+            account = build_account_state(db, mode=mode, binance_client=self.binance)
+            open_positions = build_open_positions(db, mode=mode)
+            risk_result = risk_engine.evaluate(
+                db=db,
+                symbol=symbol,
+                entry_price=sig_result.entry_price,
+                atr=sig_result.atr,
+                account=account,
+                open_positions=open_positions,
+                mode=mode,
+            )
+        except Exception as exc:
+            log_exception(
+                "live_entry_pipeline",
+                f"Błąd risk_engine dla {symbol}",
+                exc, db=db,
+            )
+            return 0
+
+        if not risk_result.is_allowed:
+            self._trace_decision(
+                db, symbol=symbol, action="SKIP",
+                reason_code=risk_result.reason_code or "risk_engine_blocked",
+                runtime_ctx=runtime_ctx, mode=mode,
+                risk_check={
+                    "allowed": False,
+                    "reason": risk_result.reason_code,
+                    "reason_pl": risk_result.reason_pl,
+                    "cooldown_remaining": risk_result.cooldown_remaining_sec,
+                    "details": risk_result.details,
+                },
+            )
+            return 0
+
+        # 4. Oba silniki OK → utwórz pending order BUY
+        qty = float(risk_result.recommended_qty)
+        price = float(sig_result.entry_price)
+
+        if qty <= 0 or price <= 0:
+            return 0
+
+        notional = qty * price
+        if notional < min_order_notional:
+            self._trace_decision(
+                db, symbol=symbol, action="SKIP",
+                reason_code="min_notional_guard",
+                runtime_ctx=runtime_ctx, mode=mode,
+                execution_check={
+                    "qty": qty, "price": price,
+                    "notional": notional, "min_notional": min_order_notional,
+                },
+            )
+            return 0
+
+        trade_plan = {
+            "version": 1,
+            "source": "live_new_pipeline",
+            "entry_price": price,
+            "stop_loss": float(risk_result.stop_loss_price or 0.0),
+            "take_profit": float(risk_result.take_profit_price or 0.0),
+            "take_profit_2": float(risk_result.take_profit_2_price or 0.0),
+            "trailing_activation_price": float(
+                risk_result.trailing_activation_price or 0.0
+            ),
+            "break_even_price": float(risk_result.break_even_price or 0.0),
+            "risk_amount": float(risk_result.risk_amount or 0.0),
+            "atr": float(sig_result.atr or 0.0),
+        }
+        reason_msg = (
+            f"[LIVE-T114] score={sig_result.score:.3f} "
+            f"conf={sig_result.confidence:.3f} "
+            f"edge={sig_result.expected_net_edge_pct:.3f}% "
+            f"sl={risk_result.stop_loss_price:.6f} "
+            f"tp={risk_result.take_profit_price:.6f} | "
+            f"{self._encode_trade_plan_reason(trade_plan)}"
+        )
+
+        pending_id = self._create_pending_order(
+            db=db,
+            symbol=symbol,
+            side="BUY",
+            price=price,
+            qty=qty,
+            mode=mode,
+            reason=reason_msg,
+            config_snapshot_id=runtime_ctx.get("snapshot_id"),
+            strategy_name="live_new_pipeline",
+        )
+
+        self._trace_decision(
+            db, symbol=symbol, action="CREATE_PENDING",
+            reason_code="live_new_pipeline_entry",
+            runtime_ctx=runtime_ctx, mode=mode,
+            signal_summary={
+                "score": sig_result.score,
+                "confidence": sig_result.confidence,
+                "edge_pct": sig_result.expected_net_edge_pct,
+                "atr": sig_result.atr,
+                "spread_pct": sig_result.spread_pct,
+            },
+            risk_check={
+                "qty": qty,
+                "sl": risk_result.stop_loss_price,
+                "tp": risk_result.take_profit_price,
+                "tp2": risk_result.take_profit_2_price,
+                "risk_amount": risk_result.risk_amount,
+            },
+            execution_check={"pending_id": pending_id, "eligible": True},
+        )
+
+        msg = (
+            f"🟢 [LIVE] WEJŚCIE — {symbol}\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"Score: {sig_result.score:.3f} | Conf: {sig_result.confidence:.3f}\n"
+            f"Edge po kosztach: {sig_result.expected_net_edge_pct:.3f}%\n"
+            f"Cena wejścia: {price:.6f}\n"
+            f"Ilość: {qty:.8g}\n"
+            f"SL: {risk_result.stop_loss_price:.6f}\n"
+            f"TP: {risk_result.take_profit_price:.6f}\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"Pipeline: signal_engine + risk_engine (T-114)"
+        )
+        self._send_telegram_alert(f"LIVE BUY {symbol}", msg, force_send=True)
+
+        logger.info(
+            "🟢 LIVE PIPELINE BUY: %s qty=%.8g @ %.6f "
+            "score=%.3f edge=%.3f%% sl=%.6f tp=%.6f pending_id=%s",
+            symbol, qty, price, sig_result.score,
+            sig_result.expected_net_edge_pct,
+            risk_result.stop_loss_price, risk_result.take_profit_price,
+            pending_id,
+        )
+        return 1
+
+    # ─────────────────────────────────────────────────────────────────────────
 
     def _runtime_context(self, db: Session) -> dict[str, Any]:
         active_position_count = int(
@@ -924,6 +1166,29 @@ class DataCollector:
         db.commit()
         db.refresh(pending)
         return pending.id
+
+    def _encode_trade_plan_reason(self, plan: dict[str, Any]) -> str:
+        if not plan:
+            return ""
+        payload = json.dumps(plan, ensure_ascii=True, separators=(",", ":"), sort_keys=True)
+        return f"{TRADE_PLAN_REASON_PREFIX}{payload}"
+
+    def _extract_trade_plan_from_reason(self, reason: Optional[str]) -> Optional[dict[str, Any]]:
+        raw = str(reason or "")
+        marker_idx = raw.find(TRADE_PLAN_REASON_PREFIX)
+        if marker_idx < 0:
+            return None
+
+        payload = raw[marker_idx + len(TRADE_PLAN_REASON_PREFIX) :]
+        payload = payload.split(" | idem:", 1)[0].strip()
+        if not payload:
+            return None
+
+        try:
+            parsed = json.loads(payload)
+        except Exception:
+            return None
+        return parsed if isinstance(parsed, dict) else None
 
     def _inflight_key(self, mode: str, symbol: str, side: str) -> str:
         return f"{(mode or 'demo').lower()}:{(symbol or '').upper()}:{(side or '').upper()}"
@@ -2067,38 +2332,71 @@ class DataCollector:
                 _closed_pos_id: Optional[int] = None  # zachowamy przed db.delete
 
                 if pending.side == "BUY":
-                    # Wylicz TP/SL z ATR na potrzeby exit quality tracking
+                    # Zachowaj plan wyjścia policzony przy wejściu; fallback tylko gdy go brak.
                     _planned_tp = None
                     _planned_sl = None
                     _exit_plan = None
-                    try:
-                        _ctx = get_live_context(
-                            db, pending.symbol, timeframe="1h", limit=120
-                        )
-                        if _ctx and _ctx.get("atr") and float(_ctx["atr"]) > 0:
-                            _atr = float(_ctx["atr"])
-                            _costs = estimate_trade_costs(config)
-                            _plan = build_long_plan(
-                                entry=exec_price,
-                                atr=_atr,
-                                costs=_costs,
-                                rr1=2.0,
-                                rr2=3.2,
+                    _stored_plan = self._extract_trade_plan_from_reason(pending.reason)
+                    if _stored_plan:
+                        _planned_tp = float(
+                            _stored_plan.get("take_profit_2")
+                            or _stored_plan.get("take_profit")
+                            or 0.0
+                        ) or None
+                        _planned_sl = float(_stored_plan.get("stop_loss") or 0.0) or None
+                        _exit_plan = {
+                            "entry": float(
+                                _stored_plan.get("entry_price") or exec_price or 0.0
+                            ),
+                            "stop_loss": _planned_sl,
+                            "take_profit_1": float(
+                                _stored_plan.get("take_profit") or 0.0
                             )
-                            _planned_tp = _plan.take_profit_2
-                            _planned_sl = _plan.stop_loss
-                            _exit_plan = {
-                                "entry": _plan.entry,
-                                "stop_loss": _plan.stop_loss,
-                                "take_profit_1": _plan.take_profit_1,
-                                "take_profit_2": _plan.take_profit_2,
-                                "trailing_activation_price": _plan.trailing_activation_price,
-                                "break_even_price": _plan.break_even_price,
-                                "estimated_total_cost_pct": _costs.total_cost_pct,
-                                "expected_hold_regime": "TREND_UP",
-                            }
-                    except Exception:
-                        pass
+                            or None,
+                            "take_profit_2": _planned_tp,
+                            "trailing_activation_price": float(
+                                _stored_plan.get("trailing_activation_price") or 0.0
+                            )
+                            or None,
+                            "break_even_price": float(
+                                _stored_plan.get("break_even_price") or 0.0
+                            )
+                            or None,
+                            "estimated_total_cost_pct": None,
+                            "expected_hold_regime": "TREND_UP",
+                            "source": _stored_plan.get("source") or "stored_trade_plan",
+                        }
+
+                    if _exit_plan is None:
+                        try:
+                            _ctx = get_live_context(
+                                db, pending.symbol, timeframe="1h", limit=120
+                            )
+                            if _ctx and _ctx.get("atr") and float(_ctx["atr"]) > 0:
+                                _atr = float(_ctx["atr"])
+                                _costs = estimate_trade_costs(config)
+                                _plan = build_long_plan(
+                                    entry=exec_price,
+                                    atr=_atr,
+                                    costs=_costs,
+                                    rr1=2.0,
+                                    rr2=3.2,
+                                )
+                                _planned_tp = _plan.take_profit_2
+                                _planned_sl = _plan.stop_loss
+                                _exit_plan = {
+                                    "entry": _plan.entry,
+                                    "stop_loss": _plan.stop_loss,
+                                    "take_profit_1": _plan.take_profit_1,
+                                    "take_profit_2": _plan.take_profit_2,
+                                    "trailing_activation_price": _plan.trailing_activation_price,
+                                    "break_even_price": _plan.break_even_price,
+                                    "estimated_total_cost_pct": _costs.total_cost_pct,
+                                    "expected_hold_regime": "TREND_UP",
+                                    "source": "fallback_rebuilt_after_fill",
+                                }
+                        except Exception:
+                            pass
 
                     if not position:
                         position = Position(
@@ -2471,6 +2769,22 @@ class DataCollector:
             return
         if not tc.get("allow_live_trading"):
             return
+
+        # T-114: Dodatkowy reconcile przez state_manager (nowy pipeline)
+        try:
+            _sm = self._get_state_manager(db)
+            _sm_result = _sm.reconcile_live_positions(db, force=False)
+            if _sm_result.positions_discrepancy or _sm_result.errors:
+                log_to_db(
+                    "WARNING",
+                    "binance_sync",
+                    f"state_manager.reconcile: reconciled={_sm_result.positions_reconciled} "
+                    f"discrepancies={_sm_result.positions_discrepancy} "
+                    f"errors={_sm_result.errors}",
+                    db=db,
+                )
+        except Exception as _sm_exc:
+            log_exception("binance_sync", "Błąd state_manager.reconcile", _sm_exc, db=db)
 
         # Guard: jeśli mamy świeże pending CONFIRMED/PENDING, odrocz sync żeby
         # nie raportować fałszywego mismatch w oknie Binance execution -> DB commit.
@@ -4743,6 +5057,7 @@ class DataCollector:
                 return None
             return None
 
+        entries_created = 0  # Licznik nowych pending orders w tej pętli (dla LIVE pipeline)
         for symbol in candidate_symbols:
             if not symbol:
                 continue
@@ -4804,6 +5119,15 @@ class DataCollector:
                 else 99
             )
             tier_name = sym_tier.get("tier", "UNKNOWN") if sym_tier else "UNKNOWN"
+
+            # ── LIVE: nowy pipeline (signal_engine + risk_engine) — T-114 ────────
+            # DEMO: stary pipeline (kod poniżej). Dla LIVE pomijamy cały stary screening.
+            if _current_mode == "live":
+                entries_created += self._live_entry_new_pipeline(
+                    db, symbol, tc, runtime_ctx
+                )
+                continue
+            # ── koniec LIVE pipeline ──────────────────────────────────────────────
 
             # Pending orders NIE blokują już globalnie decyzji BUY.
             # Portfolio engine decyduje: keep/cancel/replace pending.
@@ -6391,6 +6715,15 @@ class DataCollector:
             except Exception as exc:
                 log_exception("collector", "Błąd sync Binance", exc, db=db)
 
+            # T-114: Sprawdź fill statusy EXCHANGE_SUBMITTED orders (state_manager)
+            try:
+                _sm_config = get_runtime_config(db)
+                if str((_sm_config or {}).get("trading_mode") or "demo").lower() == "live":
+                    _sm = self._get_state_manager(db)
+                    _sm.check_pending_fills(db, mode="live")
+            except Exception as exc:
+                log_exception("collector", "Błąd check_pending_fills (T-114)", exc, db=db)
+
             # DB self-heal / reconcile z Binance (co 60s dla LIVE)
             try:
                 from backend.portfolio_reconcile import run_reconcile_cycle
@@ -6876,6 +7209,24 @@ class DataCollector:
         """Uruchom kolektor w pętli"""
         self.running = True
         logger.info("🚀 DataCollector started")
+
+        # T-114: Recovery po restarcie (state_manager) — wykonaj raz na start
+        if not self._state_manager_started:
+            try:
+                from backend.database import SessionLocal as _SL_recovery
+
+                _rdb = _SL_recovery()
+                try:
+                    _rc_startup = get_runtime_config(_rdb)
+                    if str((_rc_startup or {}).get("trading_mode") or "demo").lower() == "live":
+                        _sm_startup = self._get_state_manager(_rdb)
+                        _sm_startup.recover_on_startup(_rdb, mode="live")
+                        logger.info("✅ StateManager: recovery na starcie zakończone (T-114)")
+                finally:
+                    _rdb.close()
+            except Exception as _exc_startup:
+                logger.warning("⚠️ StateManager recovery startup error (T-114): %s", _exc_startup)
+            self._state_manager_started = True
 
         while self.running:
             try:

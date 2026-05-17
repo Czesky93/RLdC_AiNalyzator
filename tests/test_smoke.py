@@ -316,6 +316,64 @@ def test_pending_create_live_mode_allowed(client):
         db.close()
 
 
+def test_pending_list_supports_actionable_alias_and_csv_status(client):
+    db = SessionLocal()
+    try:
+        rows = [
+            PendingOrder(
+                symbol="ACT1EUR",
+                side="BUY",
+                order_type="MARKET",
+                price=100.0,
+                quantity=0.1,
+                mode="demo",
+                status="PENDING_CREATED",
+            ),
+            PendingOrder(
+                symbol="ACT2EUR",
+                side="BUY",
+                order_type="MARKET",
+                price=100.0,
+                quantity=0.1,
+                mode="demo",
+                status="PENDING",
+            ),
+            PendingOrder(
+                symbol="ACT3EUR",
+                side="BUY",
+                order_type="MARKET",
+                price=100.0,
+                quantity=0.1,
+                mode="demo",
+                status="PENDING_CONFIRMED",
+            ),
+        ]
+        db.add_all(rows)
+        db.commit()
+    finally:
+        db.close()
+
+    resp = client.get(
+        "/api/orders/pending?mode=demo&status=ACTIONABLE&include_total=true"
+    )
+    assert resp.status_code == 200
+    payload = resp.json()
+    symbols = {item["symbol"] for item in payload.get("data") or []}
+    assert {"ACT1EUR", "ACT2EUR"}.issubset(symbols)
+    assert "ACT3EUR" not in symbols
+    assert int(payload.get("total") or 0) >= 2
+
+    resp = client.get(
+        "/api/orders/pending?mode=demo&status=PENDING_CREATED,PENDING_CONFIRMED"
+    )
+    assert resp.status_code == 200
+    payload = resp.json()
+    symbols = {item["symbol"] for item in payload.get("data") or []}
+    assert "ACT1EUR" in symbols
+    assert "ACT3EUR" in symbols
+    assert "ACT2EUR" not in symbols
+
+
 def test_control_state_no_admin_token(client):
     resp = client.get("/api/control/state")
     assert resp.status_code == 200
@@ -1064,7 +1122,7 @@ def test_portfolio_summary_uses_accounting_fields(client):
 def test_runtime_updates_persist_full_config_snapshot_payload():
     db = SessionLocal()
     try:
-        baseline = build_runtime_state(db, active_position_count=0)
+        baseline = build_runtime_state(db, active_position_count=0, persist_snapshot=True)
         baseline_snapshot_id = baseline.get("config_snapshot_id")
         baseline_snapshot = get_config_snapshot(db, baseline_snapshot_id)
         assert baseline_snapshot is not None
@@ -1108,6 +1166,19 @@ def test_runtime_updates_persist_full_config_snapshot_payload():
         changed_fields = snapshot.get("changed_fields") or []
         assert "min_edge_multiplier" in changed_fields
         assert "max_trades_per_day" in changed_fields
+    finally:
+        db.close()
+
+
+def test_runtime_state_read_does_not_persist_snapshot_row():
+    db = SessionLocal()
+    try:
+        before = db.query(ConfigSnapshot).count()
+        state = build_runtime_state(db, active_position_count=0)
+        after = db.query(ConfigSnapshot).count()
+        assert state.get("config_snapshot_id")
+        assert (state.get("config_snapshot") or {}).get("source") == "runtime_state_read"
+        assert after == before
     finally:
         db.close()
 
@@ -3491,7 +3562,7 @@ def test_rollback_execution_success_flow(client):
 
     db = SessionLocal()
     try:
-        state = build_runtime_state(db, active_position_count=0)
+        state = build_runtime_state(db, active_position_count=0, persist_snapshot=True)
     finally:
         db.close()
     assert state.get("config_snapshot_id") == rollback.get("rollback_snapshot_id")
@@ -7590,6 +7661,35 @@ def test_api_diagnostic_bot_activity_endpoint(client):
     assert isinstance(d["open_positions"], list)
 
 
+def test_runtime_compatibility_aliases(client):
+    """Legacy aliasy runtime/status nie mogą zwracać 404 dla starszych klientów."""
+    for path in (
+        "/api/status",
+        "/api/runtime/state",
+        "/api/runtime-settings",
+        "/api/runtime-config",
+    ):
+        resp = client.get(path)
+        assert resp.status_code == 200, f"{path} zwrócił {resp.status_code}: {resp.text}"
+        body = resp.json()
+        assert isinstance(body, dict)
+        assert body.get("success") is True
+
+
+def test_live_overlay_compatibility_aliases(client):
+    """Legacy endpointy overlay/live muszą zwracać JSON zamiast 404."""
+    for path in (
+        "/api/live/state",
+        "/api/broadcast/live",
+        "/api/overlay/live",
+    ):
+        resp = client.get(path)
+        assert resp.status_code == 200, f"{path} zwrócił {resp.status_code}: {resp.text}"
+        body = resp.json()
+        assert isinstance(body, dict)
+        assert "ok" in body
+
+
 def test_api_diagnostic_execution_trace_endpoint(client):
     """GET /api/signals/execution-trace — musi zwrócić listę data z polami symbol i reason_code."""
     resp = client.get("/api/signals/execution-trace?mode=live&limit_minutes=30")
@@ -7669,7 +7769,71 @@ def test_ai_status_endpoint_has_runtime_field(client):
             "ok",
             "backoff",
             "unconfigured",
+            "error",
         ), f"Provider '{name}'.runtime.status ma nieoczekiwaną wartość: {rt['status']}"
+        assert "status_raw" in rt, f"Provider '{name}'.runtime nie ma pola 'status_raw'"
+        assert "usable" in rt, f"Provider '{name}'.runtime nie ma pola 'usable'"
+
+
+def test_ai_status_prefers_orchestrator_primary_over_unreachable_local(client, monkeypatch):
+    """ai-status ma raportować realnego primary providera, a nie samo configured local AI."""
+    from backend.routers import account as account_router
+
+    monkeypatch.setattr(
+        account_router,
+        "get_ai_orchestrator_status",
+        lambda force=False: {
+            "primary": "groq",
+            "fallback_chain": ["local", "gemini", "openai", "heuristic"],
+            "fallback_active": False,
+            "active_providers": ["groq", "gemini"],
+            "providers": {
+                "local": {
+                    "configured": True,
+                    "usable": False,
+                    "status": "unreachable",
+                    "reason": "connection refused",
+                },
+                "gemini": {
+                    "configured": True,
+                    "usable": True,
+                    "status": "ready",
+                    "reason": "configured",
+                },
+                "groq": {
+                    "configured": True,
+                    "usable": True,
+                    "status": "ready",
+                    "reason": "configured",
+                },
+                "openai": {
+                    "configured": False,
+                    "usable": False,
+                    "status": "missing",
+                    "reason": "missing key",
+                },
+            },
+        },
+    )
+    monkeypatch.setattr(
+        account_router,
+        "_resolve_openai_status",
+        lambda force=False: {
+            "status": "missing",
+            "code": "missing_api_key",
+            "message": "missing key",
+            "key_len": 0,
+        },
+    )
+
+    resp = client.get("/api/account/ai-status")
+    assert resp.status_code == 200, f"Oczekiwano 200, got {resp.status_code}: {resp.text}"
+    data = resp.json()["data"]
+    assert data["active_provider"] == "groq"
+    assert data["fallback_chain"][0] == "ollama"
+    assert data["providers"]["ollama"]["runtime"]["status"] == "error"
+    assert data["providers"]["ollama"]["runtime"]["status_raw"] == "unreachable"
+    assert data["providers"]["ollama"]["selected"] is False
 
 
 def test_ai_providers_status_function():
@@ -7687,6 +7851,29 @@ def test_ai_providers_status_function():
         assert (
             p["status"] in VALID_STATUSES
         ), f"Provider '{p['name']}' ma nieprawidłowy status: '{p['status']}'"
+
+
+def test_system_runtime_action_restart_endpoint(client, monkeypatch):
+    """POST /api/system/runtime-action — powinien akceptować restart runtime bez restartu procesów w testach."""
+    from backend.routers import system as system_router
+
+    monkeypatch.setattr(
+        system_router,
+        "_schedule_runtime_restart",
+        lambda: {
+            "scheduled": True,
+            "action": "restart_runtime",
+            "services": ["rldc-backend.service"],
+            "overlay_restart_attempted": False,
+        },
+    )
+    resp = client.post("/api/system/runtime-action", json={"action": "restart_runtime"})
+    assert resp.status_code == 200, f"Oczekiwano 200, got {resp.status_code}: {resp.text}"
+    payload = resp.json()
+    assert payload.get("success") is True
+    data = payload.get("data") or {}
+    assert data.get("scheduled") is True
+    assert data.get("action") == "restart_runtime"
 
 
 # ---------------------------------------------------------------------------

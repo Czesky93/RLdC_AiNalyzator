@@ -30,6 +30,16 @@ from backend.runtime_settings import get_runtime_config
 
 router = APIRouter()
 
+_ACTIONABLE_PENDING_STATUSES = ("PENDING", "PENDING_CREATED")
+_ACTIVE_PENDING_STATUSES = (
+    "PENDING",
+    "PENDING_CREATED",
+    "CONFIRMED",
+    "PENDING_CONFIRMED",
+    "EXCHANGE_SUBMITTED",
+    "PARTIALLY_FILLED",
+)
+
 
 class OrderCreate(BaseModel):
     """Model do tworzenia zlecenia"""
@@ -47,6 +57,33 @@ class PendingOrderCreate(BaseModel):
     quantity: float
     price: Optional[float] = None
     reason: Optional[str] = None
+
+
+def _expand_pending_status_filter(status: Optional[str]) -> Optional[list[str]]:
+    if not status:
+        return None
+
+    requested = []
+    for raw in str(status).split(","):
+        normalized = raw.strip().upper()
+        if not normalized:
+            continue
+        if normalized in {"ACTIONABLE", "ACTION_REQUIRED"}:
+            requested.extend(_ACTIONABLE_PENDING_STATUSES)
+            continue
+        if normalized in {"ACTIVE", "OPEN"}:
+            requested.extend(_ACTIVE_PENDING_STATUSES)
+            continue
+        requested.append(normalized)
+
+    if not requested:
+        return None
+
+    deduped: list[str] = []
+    for item in requested:
+        if item not in deduped:
+            deduped.append(item)
+    return deduped
 
 
 @router.get("")
@@ -122,7 +159,7 @@ def get_pending_orders(
     mode: str = Query("live", description="Tryb: live lub demo"),
     status: Optional[str] = Query(
         None,
-        description="PENDING_CREATED/PENDING_CONFIRMED/EXCHANGE_SUBMITTED/PARTIALLY_FILLED/FILLED/REJECTED/FAILED (legacy: PENDING, CONFIRMED)",
+        description="Status pojedynczy lub CSV. Alias: ACTIONABLE=PENDING/PENDING_CREATED, ACTIVE=open lifecycle",
     ),
     limit: int = Query(100, ge=1, le=500, description="Limit"),
     include_total: bool = Query(
@@ -132,8 +169,12 @@ def get_pending_orders(
 ):
     try:
         query = db.query(PendingOrder).filter(PendingOrder.mode == mode)
-        if status:
-            query = query.filter(PendingOrder.status == status)
+        statuses = _expand_pending_status_filter(status)
+        if statuses:
+            if len(statuses) == 1:
+                query = query.filter(PendingOrder.status == statuses[0])
+            else:
+                query = query.filter(PendingOrder.status.in_(statuses))
         total = query.count() if include_total else None
         items = query.order_by(desc(PendingOrder.created_at)).limit(limit).all()
         data = []

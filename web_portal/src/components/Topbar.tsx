@@ -12,7 +12,7 @@ interface TopbarProps {
 export default function Topbar({ activeView, setActiveView }: TopbarProps) {
   const [tradingEnabled, setTradingEnabled] = useState<boolean | null>(null)
   const [controlError, setControlError] = useState<string | null>(null)
-  const [stopping, setStopping] = useState(false)
+  const [switchingTrading, setSwitchingTrading] = useState(false)
 
   const navItems = useMemo(
     () => [
@@ -33,7 +33,7 @@ export default function Topbar({ activeView, setActiveView }: TopbarProps) {
       if (!res.ok) throw new Error('Błąd control')
       const json = await res.json()
       const d = json?.data
-      setTradingEnabled(Boolean(d?.live_trading_enabled ?? d?.demo_trading_enabled))
+      setTradingEnabled(Boolean(d?.live_trading_enabled && d?.execution_enabled))
       setControlError(null)
     } catch {
       setTradingEnabled(null)
@@ -122,32 +122,49 @@ export default function Topbar({ activeView, setActiveView }: TopbarProps) {
           </button>
         </div>
 
-        {/* Stop Trading Button */}
+        {/* Trading Button */}
         <button
           onClick={async () => {
-            if (stopping) return
-            setStopping(true)
+            if (switchingTrading) return
+            setSwitchingTrading(true)
             try {
               const headers: Record<string, string> = withAdminToken({ 'Content-Type': 'application/json' })
+              const enableTrading = !Boolean(tradingEnabled)
               const res = await fetch(`${getApiBase()}/api/control/state`, {
                 method: 'POST',
                 headers,
-                body: JSON.stringify({ demo_trading_enabled: false }),
+                body: JSON.stringify(
+                  enableTrading
+                    ? {
+                        trading_mode: 'live',
+                        allow_live_trading: true,
+                        execution_enabled: true,
+                        enable_auto_execute: true,
+                        demo_trading_enabled: false,
+                      }
+                    : {
+                        allow_live_trading: false,
+                        execution_enabled: false,
+                        enable_auto_execute: false,
+                      }
+                ),
               })
-              if (!res.ok) throw new Error('Błąd stop')
+              if (!res.ok) throw new Error('Błąd sterowania')
               await refreshControl()
             } catch {
-              setControlError('STOP TRADING nieudany')
+              setControlError('Sterowanie tradingiem nieudane')
             } finally {
-              setStopping(false)
+              setSwitchingTrading(false)
             }
           }}
           className="btn-danger flex items-center space-x-2"
-          disabled={stopping || tradingEnabled === false}
-          title={tradingEnabled === false ? 'Trading już wyłączony' : 'Wyłącz trading'}
+          disabled={switchingTrading}
+          title={tradingEnabled ? 'Wyłącz nowe wykonania live' : 'Włącz wykonanie live'}
         >
           <Power size={16} />
-          <span className="hidden sm:inline">{stopping ? 'ZATRZYMUJĘ...' : 'STOP HANDEL'}</span>
+          <span className="hidden sm:inline">
+            {switchingTrading ? 'PRZEŁĄCZAM...' : tradingEnabled ? 'STOP HANDEL' : 'START HANDEL'}
+          </span>
         </button>
       </div>
     </div>

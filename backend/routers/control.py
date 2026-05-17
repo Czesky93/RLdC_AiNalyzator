@@ -47,6 +47,7 @@ from backend.runtime_settings import (
     build_symbol_tier_map,
     get_runtime_config,
 )
+from backend.status_cache import get_cached, set_cached
 from backend.symbol_universe import (
     get_symbol_registry,
     resolve_asset_symbol,
@@ -136,7 +137,12 @@ def _update_payload(update: ControlStateUpdate) -> Dict[str, Any]:
 @router.get("/state")
 def get_control_state(request: Request, db: Session = Depends(get_db)):
     try:
-        return {"success": True, "data": _build_response_state(request, db)}
+        cached = get_cached("control_state", ttl_seconds=2.5)
+        if cached is not None:
+            return cached
+        result = {"success": True, "data": _build_response_state(request, db)}
+        set_cached("control_state", result)
+        return result
     except RuntimeSettingsError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
     except Exception as exc:
@@ -161,6 +167,7 @@ def set_control_state(
             active_position_count=_active_position_count(db),
         )
         state = _build_response_state(request, db)
+        set_cached("control_state", {"success": True, "data": state})
         return {
             "success": True,
             "data": state,

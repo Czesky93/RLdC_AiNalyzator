@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import sys
 from pathlib import Path
@@ -296,6 +297,67 @@ def test_confirmed_pending_live_buy_is_executed_with_conversion_path():
         final_buy = buy_orders[-1]
         final_notional = float(final_buy[2]) * 2000.0
         assert final_notional >= 66.0
+    finally:
+        db.close()
+
+
+def test_confirmed_pending_live_buy_preserves_trade_plan_from_entry():
+    db = SessionLocal()
+    try:
+        db.query(PendingOrder).delete()
+        db.query(Position).delete()
+        db.commit()
+
+        collector = _collector_with_mock_binance()
+        plan = {
+            "version": 1,
+            "source": "live_new_pipeline",
+            "entry_price": 2000.0,
+            "stop_loss": 1910.0,
+            "take_profit": 2140.0,
+            "take_profit_2": 2230.0,
+            "trailing_activation_price": 2090.0,
+            "break_even_price": 2015.0,
+            "atr": 45.0,
+        }
+        reason = (
+            "pytest_trade_plan | "
+            + collector._encode_trade_plan_reason(plan)
+        )
+        pending = PendingOrder(
+            symbol="ETHUSDC",
+            side="BUY",
+            order_type="MARKET",
+            price=2000.0,
+            quantity=0.03,
+            mode="live",
+            status="PENDING_CONFIRMED",
+            reason=reason,
+            created_at=utc_now_naive(),
+            confirmed_at=utc_now_naive(),
+        )
+        db.add(pending)
+        db.commit()
+
+        collector._execute_confirmed_pending_orders(db)
+
+        position = (
+            db.query(Position)
+            .filter(
+                Position.symbol == "ETHUSDC",
+                Position.mode == "live",
+                Position.exit_reason_code.is_(None),
+            )
+            .first()
+        )
+        assert position is not None
+        assert position.planned_sl == 1910.0
+        assert position.planned_tp == 2230.0
+        assert position.exit_plan_json is not None
+        exit_plan = json.loads(position.exit_plan_json)
+        assert exit_plan["source"] == "live_new_pipeline"
+        assert exit_plan["trailing_activation_price"] == 2090.0
+        assert exit_plan["break_even_price"] == 2015.0
     finally:
         db.close()
 
