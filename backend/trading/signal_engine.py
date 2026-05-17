@@ -76,7 +76,9 @@ _REASON_PL = {
     "no_atr": "Brak ATR — nie można wyliczyć poziomów TP/SL",
     "no_price": "Brak aktualnej ceny — pobieranie danych nieudane",
     "spread_too_wide": "Spread bid/ask zbyt szeroki — wejście nieopłacalne",
+    "volume_below_trade_threshold": "Quote volume poniżej progu handlowego — tylko obserwacja",
     "volume_too_low": "Wolumen zbyt niski — ryzyko braku płynności",
+    "orderbook_depth_too_low": "Głębokość order booka zbyt mała — ryzyko poślizgu",
     "liquidity_too_low": "Niski wskaźnik płynności — zbyt mały market",
     "no_buy_signal": "Brak sygnału BUY — warunki techniczne niespełnione",
     "confidence_too_low": "Pewność sygnału poniżej progu",
@@ -324,6 +326,66 @@ def _get_spread_pct(binance_client, symbol: str) -> float:
     return 0.0
 
 
+def _effective_quote_volume_trade_threshold(cfg, volume_ratio: float, spread_pct: float) -> float:
+    """
+    Wyznacza dynamiczny próg quoteVolume dla realnego trade.
+
+    Gdy `use_dynamic_volume_threshold` jest aktywne, próg obniża się
+    wraz ze wzrostem potwierdzenia wolumenu i rośnie przy szerszym spreadzie.
+    """
+    base_threshold = _safe_float(getattr(cfg, "min_quote_volume_trade", 0.0), 0.0)
+    if base_threshold <= 0:
+        return 0.0
+
+    if not bool(getattr(cfg, "use_dynamic_volume_threshold", True)):
+        return base_threshold
+
+    volume_ratio_min = max(_safe_float(getattr(cfg, "volume_ratio_min", 1.0), 1.0), 0.1)
+    volume_boost = max(1.0, _safe_float(volume_ratio, 1.0) / volume_ratio_min)
+    spread_bps = max(0.0, spread_pct * 100.0)
+    spread_penalty = 1.0 + min(spread_bps, 100.0) / 200.0
+    return base_threshold * spread_penalty / volume_boost
+
+
+def _get_orderbook_depth_ratio(
+    binance_client,
+    symbol: str,
+    price: float,
+    depth_bps: float,
+    min_buy_notional: float,
+) -> Tuple[float, float]:
+    """
+    Zwraca (depth_ratio, quote_depth).
+
+    Liczymy tylko ask-side depth w pobliżu mid, bo dla wejścia BUY to on
+    najszybciej przekłada się na koszt poślizgu.
+    """
+    if not binance_client or price <= 0 or depth_bps <= 0:
+        return 0.0, 0.0
+
+    try:
+        orderbook = binance_client.get_orderbook(symbol, limit=20)
+        asks = (orderbook or {}).get("asks") or []
+        if not asks:
+            return 0.0, 0.0
+
+        max_ask_price = price * (1.0 + depth_bps / 10000.0)
+        quote_depth = 0.0
+        for ask_price, ask_qty in asks:
+            price_v = _safe_float(ask_price)
+            qty_v = _safe_float(ask_qty)
+            if price_v <= 0 or qty_v <= 0:
+                continue
+            if price_v > max_ask_price:
+                continue
+            quote_depth += price_v * qty_v
+
+        depth_ratio = quote_depth / max(1.0, min_buy_notional)
+        return depth_ratio, quote_depth
+    except Exception:
+        return 0.0, 0.0
+
+
 def evaluate_entry_signal(
     db: Session,
     symbol: str,
@@ -412,11 +474,24 @@ def evaluate_entry_signal(
         spread_pct = _get_spread_pct(binance_client, symbol)
     result.spread_pct = spread_pct
 
-    if cfg.max_allowed_spread_pct > 0 and spread_pct > cfg.max_allowed_spread_pct:
+    max_spread_bps = _safe_float(getattr(cfg, "max_spread_bps", 0.0), 0.0)
+    if max_spread_bps <= 0 and _safe_float(getattr(cfg, "max_allowed_spread_pct", 0.0), 0.0) > 0:
+        max_spread_bps = _safe_float(getattr(cfg, "max_allowed_spread_pct", 0.0), 0.0) * 100.0
+    if max_spread_bps > 0 and spread_pct * 100.0 > max_spread_bps:
         result.reason_code = "spread_too_wide"
         result.reason_pl = _REASON_PL["spread_too_wide"]
         result.details["spread_pct"] = round(spread_pct, 4)
-        result.details["max_allowed_spread_pct"] = cfg.max_allowed_spread_pct
+        result.details["spread_bps"] = round(spread_pct * 100.0, 4)
+        result.details["max_spread_bps"] = round(max_spread_bps, 4)
+        return result
+
+    spread_bps = spread_pct * 100.0
+    max_slippage_bps = _safe_float(getattr(cfg, "max_slippage_bps", 0.0), 0.0)
+    if max_slippage_bps > 0 and spread_bps > max_slippage_bps:
+        result.reason_code = "spread_too_wide"
+        result.reason_pl = _REASON_PL["spread_too_wide"]
+        result.details["spread_bps"] = round(spread_bps, 4)
+        result.details["max_slippage_bps"] = max_slippage_bps
         return result
 
     # ── 3. Komponenty score ───────────────────────────────────────────────
@@ -431,6 +506,25 @@ def evaluate_entry_signal(
     bb_upper = ctx_entry.get("bb_upper")
     bb_lower = ctx_entry.get("bb_lower")
     bb_mid = ctx_entry.get("bb_middle") or ctx_entry.get("bb_mid")
+    quote_volume_24h = _safe_float(ctx_entry.get("volume_24h_quote") or ctx_entry.get("quote_volume"))
+    trades_1h = _safe_float(ctx_entry.get("trade_count") or ctx_entry.get("num_trades"))
+    volume_ratio_v = _safe_float(volume_ratio, 1.0)
+
+    result.details.update({
+        "quote_volume_24h": round(quote_volume_24h, 4),
+        "spread_pct": round(spread_pct, 4),
+        "spread_bps": round(spread_bps, 4),
+        "trade_count_1h": round(trades_1h, 4),
+        "volume_ratio": round(volume_ratio_v, 4),
+    })
+
+    market_block: Optional[Tuple[int, str, str, Dict[str, Any]]] = None
+
+    def _mark_market_block(priority: int, reason_code: str, details: Dict[str, Any]) -> None:
+        nonlocal market_block
+        candidate = (priority, reason_code, _REASON_PL[reason_code], details)
+        if market_block is None or priority < market_block[0]:
+            market_block = candidate
 
     # Pozycja w pasmie Bollingera
     bb_pos = None
@@ -445,15 +539,64 @@ def evaluate_entry_signal(
     momentum_score = _compute_momentum_score(rsi, macd_hist, macd_sig)
     volume_score = _compute_volume_score(volume_ratio, volume_spike)
 
-    # Volume hard gate
-    if cfg.require_volume_confirmation:
-        vol_ratio_v = _safe_float(volume_ratio, 1.0)
-        if vol_ratio_v < cfg.volume_ratio_min:
-            result.reason_code = "volume_too_low"
-            result.reason_pl = _REASON_PL["volume_too_low"]
-            result.details["volume_ratio"] = round(vol_ratio_v, 3)
-            result.details["required"] = cfg.volume_ratio_min
-            return result
+    effective_min_quote_volume_trade = _effective_quote_volume_trade_threshold(
+        cfg,
+        volume_ratio=volume_ratio_v,
+        spread_pct=spread_pct,
+    )
+
+    if quote_volume_24h < effective_min_quote_volume_trade:
+        _mark_market_block(
+            1,
+            "volume_below_trade_threshold",
+            {
+                "quote_volume_24h": round(quote_volume_24h, 4),
+                "min_quote_volume_trade": round(_safe_float(getattr(cfg, "min_quote_volume_trade", 0.0), 0.0), 4),
+                "effective_min_quote_volume_trade": round(effective_min_quote_volume_trade, 4),
+                "volume_ratio": round(volume_ratio_v, 3),
+                "spread_bps": round(spread_bps, 4),
+                "market_mode": "observe_only",
+                "tradable": False,
+            },
+        )
+
+    if cfg.require_volume_confirmation and volume_ratio_v < cfg.volume_ratio_min:
+        _mark_market_block(
+            3,
+            "volume_too_low",
+            {
+                "volume_ratio": round(volume_ratio_v, 3),
+                "required": cfg.volume_ratio_min,
+                "market_mode": "observe_only",
+                "tradable": False,
+            },
+        )
+
+    min_depth_to_order_ratio = _safe_float(getattr(cfg, "min_depth_to_order_ratio", 0.0), 0.0)
+    orderbook_depth_bps = _safe_float(getattr(cfg, "orderbook_depth_bps", 20.0), 20.0)
+    depth_to_order_ratio = 0.0
+    orderbook_quote_depth = 0.0
+    if min_depth_to_order_ratio > 0:
+        depth_to_order_ratio, orderbook_quote_depth = _get_orderbook_depth_ratio(
+            binance_client,
+            symbol,
+            price,
+            orderbook_depth_bps,
+            _safe_float(getattr(cfg, "min_buy_notional", 60.0), 60.0),
+        )
+        if depth_to_order_ratio < min_depth_to_order_ratio:
+            _mark_market_block(
+                2,
+                "orderbook_depth_too_low",
+                {
+                    "orderbook_depth_bps": orderbook_depth_bps,
+                    "orderbook_quote_depth": round(orderbook_quote_depth, 4),
+                    "depth_to_order_ratio": round(depth_to_order_ratio, 4),
+                    "required_depth_to_order_ratio": min_depth_to_order_ratio,
+                    "market_mode": "observe_only",
+                    "tradable": False,
+                },
+            )
 
     # HTF agreement
     htf_ema_20 = ctx_htf.get("ema_20")
@@ -478,12 +621,8 @@ def evaluate_entry_signal(
         result.details["rsi"] = round(rsi_v, 2)
         return result
 
-    # Volume 24h do liquidity score
-    volume_24h = _safe_float(ctx_entry.get("volume_24h_quote") or ctx_entry.get("quote_volume"))
-    trades_1h = _safe_float(ctx_entry.get("trade_count") or ctx_entry.get("num_trades"))
-
     liquidity_score = _compute_liquidity_score(
-        volume_24h_quote=volume_24h,
+        volume_24h_quote=quote_volume_24h,
         trade_count_1h=trades_1h,
         spread_pct=spread_pct,
         min_volume_24h=50_000.0,   # 50k USDC/EUR minimum
@@ -491,11 +630,19 @@ def evaluate_entry_signal(
     )
 
     if liquidity_score < cfg.min_liquidity_score:
-        result.reason_code = "liquidity_too_low"
-        result.reason_pl = _REASON_PL["liquidity_too_low"]
-        result.details["liquidity_score"] = round(liquidity_score, 3)
-        result.details["required"] = cfg.min_liquidity_score
-        return result
+        _mark_market_block(
+            4,
+            "liquidity_too_low",
+            {
+                "liquidity_score": round(liquidity_score, 3),
+                "required": cfg.min_liquidity_score,
+                "quote_volume_24h": round(quote_volume_24h, 4),
+                "trade_count_1h": round(trades_1h, 4),
+                "spread_bps": round(spread_bps, 4),
+                "market_mode": "observe_only",
+                "tradable": False,
+            },
+        )
 
     regime_score = _compute_regime_score(bb_pos, rsi, bb_width)
 
@@ -563,6 +710,26 @@ def evaluate_entry_signal(
     result.liquidity_score = liquidity_score
     result.regime_score = regime_score
     result.htf_agreement_score = htf_score
+
+    result.details.update({
+        "score": round(entry_score, 4),
+        "min_score": _safe_float(getattr(cfg, "min_entry_score", 0.0), 0.0),
+        "confidence": round(confidence, 4),
+        "min_confidence": _safe_float(getattr(cfg, "min_signal_confidence", 0.0), 0.0),
+        "effective_min_quote_volume_trade": round(effective_min_quote_volume_trade, 4),
+        "orderbook_quote_depth": round(orderbook_quote_depth, 4),
+        "depth_to_order_ratio": round(depth_to_order_ratio, 4),
+        "orderbook_depth_bps": round(orderbook_depth_bps, 4),
+    })
+
+    if market_block is not None:
+        _, reason_code, reason_pl, block_details = market_block
+        result.reason_code = reason_code
+        result.reason_pl = reason_pl
+        result.details.update(block_details)
+        result.details.setdefault("final_action", "OBSERVE_ONLY")
+        result.details.setdefault("tradable", False)
+        return result
 
     # Score gate
     if entry_score < cfg.min_entry_score:
@@ -637,7 +804,13 @@ def evaluate_entry_signal(
         "rsi": round(rsi_v, 2),
         "macd_hist": _safe_float(macd_hist),
         "volume_ratio": _safe_float(volume_ratio),
+        "quote_volume_24h": round(quote_volume_24h, 4),
+        "effective_min_quote_volume_trade": round(effective_min_quote_volume_trade, 4),
+        "orderbook_quote_depth": round(orderbook_quote_depth, 4),
+        "depth_to_order_ratio": round(depth_to_order_ratio, 4),
+        "orderbook_depth_bps": round(orderbook_depth_bps, 4),
         "spread_pct": round(spread_pct, 4),
+        "spread_bps": round(spread_bps, 4),
         "atr": round(atr, 8),
         "rr_ratio": round(rr_ratio, 3),
         "htf_ema_20": _safe_float(htf_ema_20),

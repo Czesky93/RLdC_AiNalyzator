@@ -3,16 +3,24 @@
 Data aktualizacji: 2026-04-20
 
 ## CRITICAL
-- Brak otwartych blockerów krytycznych potwierdzonych testami/runtime.
+- T-134: Krytyczna niestabilność endpointów live pozycji: `/api/positions?mode=live` i `/api/positions/analysis?mode=live` timeoutują (20s) pod obciążeniem runtime, co blokuje overlay 8099 i część widoków WWW.
+- T-135: Overlay `/overlay/api/live-state` timeoutuje gdy backend pozycyjny przekracza SLA; potrzebny deterministyczny snapshot/cache i degradacja kontrolowana zamiast pełnego timeoutu.
 
 ## HIGH
-- Brak otwartych zadań wysokiego priorytetu.
+- T-136: Ujednolicić kontrakt danych dla 3000 i 8099 na wspólnym, lekkim snapshot_id (bez równoległego dociążania `/api/positions/analysis` w ścieżce startowej).
 
 ## MEDIUM
-- Brak otwartych zadań średniego priorytetu.
+- T-140: Ustabilizować intermitentne smoke fail (`test_market_summary`, `test_acceptance_live_positions_analysis_restores_entry_baseline`) i usunąć zależność od niestabilnych danych runtime/network podczas testów.
+- T-137: Profilowanie funkcji w `backend/routers/positions.py` (`_get_live_spot_positions`, `_analyze_spot_position`) i wydzielenie ciężkich kalkulacji do joba cyklicznego/cache.
 
 ## LOW
 - Ujednolicenie i utrzymanie dokumentów kontrolnych po każdej sesji.
+
+## DONE W TEJ SESJI (sesja 49)
+- **T-141**: overlay 8099 recovery + fallback wykresu. Adapter mapuje teraz pary bez świec EUR na dostępny symbol wykresowy (np. `AAVEEUR -> AAVEUSDC`), UI overlay usunięto z lewego paska opcji, a runtime usługi 8099 został przywrócony po awarii procesu.
+- **T-133**: naprawiono źródło prawdy dla `/api/rldc/safe/live-state` — endpoint czyta teraz kanoniczne live spot holdings (`_get_live_spot_positions`) zamiast lokalnej tabeli `Position`; dodano fallback do DB tylko awaryjnie.
+- **T-133b**: ograniczono request-storm frontendu (kolejka fetch, limit równoległości, backoff po błędach) bez zmian wyglądu UI.
+- Testy: `tests/test_smoke.py` -> **227/227 PASS**.
 
 ## DONE W TEJ SESJI (sesja 33)
 - **T-109**: domknięto krytyczne luki execution/Telegram. Naprawiono status typo `PENDING_CREATED_CREATED` blokujący wykonanie `sell_weakest`; dodano twardy gate runtime (`trading_mode==live` oraz `allow_live_trading==true`) przed LIVE execution; Telegram `/confirm` i `/reject` działają na `PendingOrder.id` w aktywnym trybie i nie mylą już kontekstu ID/mode. Walidacja: `tests/test_control_center.py` + `tests/test_smoke.py` = **257/257 PASS**.

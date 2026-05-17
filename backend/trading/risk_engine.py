@@ -321,12 +321,21 @@ class RiskEngine:
         available_for_trade = account.available_cash * 0.99
         qty_by_cash = available_for_trade / entry_price if entry_price > 0 else 0.0
 
-        # Min notional check
-        min_qty_by_notional = cfg.min_buy_notional / entry_price if entry_price > 0 else 0.0
-
         # Wybierz minimalny (nigdy nie przekraczaj limitów)
         qty = min(qty_by_risk, qty_by_exposure, qty_by_cash)
-        qty = max(qty, min_qty_by_notional)  # musi spełniać min notional
+
+        # Nie podbijamy qty do minimum notional kosztem ryzyka.
+        # Jeśli policzony rozmiar jest zbyt mały, wejście blokujemy.
+        raw_notional = qty * entry_price
+        if qty <= 0 or raw_notional < cfg.min_buy_notional:
+            result.reason_code = "qty_too_small"
+            result.reason_pl = _REASON_PL["qty_too_small"]
+            result.details["qty_by_risk"] = round(qty_by_risk, 8)
+            result.details["qty_by_exposure"] = round(qty_by_exposure, 8)
+            result.details["qty_by_cash"] = round(qty_by_cash, 8)
+            result.details["notional_by_limits"] = round(raw_notional, 4)
+            result.details["min_buy_notional"] = cfg.min_buy_notional
+            return result
 
         # Zaokrąglij do step_size (floor)
         if meta and meta.step_size and meta.step_size > 0:
@@ -339,6 +348,7 @@ class RiskEngine:
             result.reason_code = "qty_too_small"
             result.reason_pl = _REASON_PL["qty_too_small"]
             result.details["qty_by_risk"] = round(qty_by_risk, 8)
+            result.details["qty_by_exposure"] = round(qty_by_exposure, 8)
             result.details["qty_by_cash"] = round(qty_by_cash, 8)
             result.details["available_cash"] = round(account.available_cash, 4)
             result.details["min_order_notional"] = cfg.min_order_notional

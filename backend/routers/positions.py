@@ -3,6 +3,9 @@ Positions API Router - endpoints dla pozycji (otwarte pozycje)
 """
 
 import json
+import os
+import threading
+import time
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
@@ -31,8 +34,19 @@ from backend.database import (
     utc_now_naive,
 )
 from backend.runtime_settings import build_symbol_tier_map, get_runtime_config
+from backend.quote_currency import preferred_symbol_for_asset
 
 router = APIRouter()
+
+_LIVE_SPOT_CACHE_LOCK = threading.Lock()
+_LIVE_SPOT_CACHE: dict[str, Any] = {"ts": 0.0, "rows": []}
+_LIVE_SPOT_CACHE_TTL_SECONDS = float(
+    os.getenv("RLDC_LIVE_SPOT_CACHE_TTL", "20") or 20
+)
+
+
+def _clone_live_spot_rows(rows: Optional[List[Dict[str, Any]]]) -> List[Dict[str, Any]]:
+    return [dict(row) for row in (rows or [])]
 
 
 def _as_float(value: Any) -> float:
@@ -66,6 +80,96 @@ def _quote_from_symbol(symbol: str) -> str:
         if sym.endswith(quote) and len(sym) > len(quote):
             return quote
     return ""
+
+
+def _has_market_context(db: Session, symbol: str) -> bool:
+    sym = str(symbol or "").upper()
+    if not sym:
+        return False
+    md = (
+        db.query(MarketData.id)
+        .filter(MarketData.symbol == sym)
+        .order_by(desc(MarketData.timestamp))
+        .first()
+    )
+    if md:
+        return True
+    kl = (
+        db.query(Kline.id)
+        .filter(Kline.symbol == sym)
+        .order_by(desc(Kline.open_time))
+        .first()
+    )
+    return bool(kl)
+
+
+def _resolve_analysis_symbol(
+    db: Session,
+    *,
+    asset: str,
+    fallback_symbol: str,
+    settings: Dict[str, Any],
+) -> str:
+    """
+    Wybiera symbol do świec i wskaźników technicznych.
+    Pozycja spot jest wyceniana w EUR, ale trading live w tym projekcie działa
+    zwykle na USDC, więc dla wykresów i trendu preferujemy aktywny symbol quote.
+    """
+    quote_mode = str(settings.get("quote_currency_mode") or "USDC").upper()
+    primary_quote = str(settings.get("primary_quote") or "USDC").upper()
+    candidates: List[str] = []
+
+    preferred = preferred_symbol_for_asset(asset, quote_mode, primary_quote)
+    if preferred:
+        candidates.append(preferred)
+    for quote in (primary_quote, "USDC", "EUR"):
+        cand = f"{str(asset or '').upper()}{quote}"
+        if cand not in candidates:
+            candidates.append(cand)
+    fallback = str(fallback_symbol or "").upper()
+    if fallback and fallback not in candidates:
+        candidates.append(fallback)
+
+    for cand in candidates:
+        if _has_market_context(db, cand):
+            return cand
+    return candidates[0] if candidates else fallback
+
+
+def _plain_position_summary(
+    *,
+    symbol: str,
+    decision: str,
+    pnl_pct: Optional[float],
+    trend: str,
+    warning_message: Optional[str] = None,
+) -> str:
+    action = str(decision or "CZEKAJ").upper()
+    if action == "SPRZEDAJ":
+        first = "Bot mówi: sprzedaj albo mocno pilnuj wyjścia."
+    elif action == "TRZYMAJ":
+        first = "Bot mówi: trzymaj, ale dalej pilnuj ceny."
+    elif action == "DUST":
+        first = "To jest drobna resztka, nie normalna pozycja do handlu."
+    elif action == "BRAK DANYCH":
+        first = "Bot nie ma pełnych danych, więc nie udaje decyzji."
+    else:
+        first = "Bot mówi: czekaj i obserwuj."
+
+    parts = [f"{symbol}: {first}"]
+    if pnl_pct is not None:
+        parts.append(f"Wynik pozycji to około {pnl_pct:+.2f}%.")
+    if trend == "WZROSTOWY":
+        parts.append("Cena ma przewagę w górę.")
+    elif trend == "SPADKOWY":
+        parts.append("Cena ma przewagę w dół.")
+    elif trend == "BOCZNY":
+        parts.append("Cena chodzi bokiem.")
+    else:
+        parts.append("Brakuje świec do pewnej oceny trendu.")
+    if warning_message:
+        parts.append(warning_message)
+    return " ".join(parts)
 
 
 def _estimate_live_entry_from_trades(
@@ -284,6 +388,13 @@ def _get_live_spot_positions(db: Session) -> List[Dict[str, Any]]:
 
     from backend.routers.portfolio import _build_live_spot_portfolio
 
+    now_ts = time.time()
+    with _LIVE_SPOT_CACHE_LOCK:
+        cached_rows = _LIVE_SPOT_CACHE.get("rows") or []
+        cached_ts = float(_LIVE_SPOT_CACHE.get("ts") or 0.0)
+        if cached_rows and (now_ts - cached_ts) <= _LIVE_SPOT_CACHE_TTL_SECONDS:
+            return _clone_live_spot_rows(cached_rows)
+
     binance_client = get_binance_client()
     try:
         with ThreadPoolExecutor(max_workers=1) as _pool:
@@ -291,18 +402,16 @@ def _get_live_spot_positions(db: Session) -> List[Dict[str, Any]]:
             try:
                 live_data = _fut.result(timeout=8.0)
             except FuturesTimeoutError:
-                return []
+                return _clone_live_spot_rows(cached_rows)
     except Exception:
-        return []
+        return _clone_live_spot_rows(cached_rows)
     if live_data.get("error"):
-        return []
+        return _clone_live_spot_rows(cached_rows)
     result = []
     dirty = False
-    import os as _os
-
     # DISPLAY_DUST_EUR: próg prawdziwego pyłu dla wyświetlania danych (osobny od min_order_notional!)
     # min_order_notional (25 EUR) to próg HANDLOWY — nie używaj go do filtrowania wyświetlania.
-    _display_dust_eur = float(_os.getenv("DISPLAY_DUST_EUR", "0.50"))
+    _display_dust_eur = float(os.getenv("DISPLAY_DUST_EUR", "0.50"))
     for p in live_data["spot_positions"]:
         asset = p["asset"]
         # Pomijaj stablecoiny jako "pozycje" — one to gotówka
@@ -386,6 +495,9 @@ def _get_live_spot_positions(db: Session) -> List[Dict[str, Any]]:
         )
     if dirty:
         db.commit()
+    with _LIVE_SPOT_CACHE_LOCK:
+        _LIVE_SPOT_CACHE["ts"] = time.time()
+        _LIVE_SPOT_CACHE["rows"] = _clone_live_spot_rows(result)
     return result
 
 
@@ -1033,6 +1145,15 @@ def _analyze_position(
             if _is_valid_demo
             else "Brak ceny wejścia lub ilości w rekordzie pozycji"
         ),
+        "plain_summary": _plain_position_summary(
+            symbol=sym,
+            decision=decision,
+            pnl_pct=pnl_pct,
+            trend=trend,
+            warning_message=None
+            if _is_valid_demo
+            else "Brak ceny wejścia lub ilości w rekordzie pozycji",
+        ),
         "opened_at": pos.opened_at.isoformat() if pos.opened_at else None,
         "updated_at": pos.updated_at.isoformat() if pos.updated_at else None,
     }
@@ -1047,7 +1168,10 @@ def _analyze_position(
 
 
 def _analyze_spot_position(
-    spot: Dict[str, Any], db: Session, tier_map: Dict[str, Any]
+    spot: Dict[str, Any],
+    db: Session,
+    tier_map: Dict[str, Any],
+    settings: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """
     Buduje kartę analizy dla pozycji LIVE spot (z Binance).
@@ -1062,6 +1186,13 @@ def _analyze_spot_position(
     """
     sym = spot["symbol"]
     asset = spot.get("asset", sym.replace("EUR", ""))
+    effective_settings = settings or {}
+    analysis_symbol = _resolve_analysis_symbol(
+        db,
+        asset=asset,
+        fallback_symbol=sym,
+        settings=effective_settings,
+    )
     qty = float(spot.get("quantity", 0))
     current = float(spot.get("current_price", 0))
     value = float(spot.get("value_eur", current * qty))
@@ -1077,7 +1208,7 @@ def _analyze_spot_position(
         if pnl_eur is not None and cost_eur and cost_eur > 0
         else None
     )
-    tier_info = tier_map.get(sym, {})
+    tier_info = tier_map.get(sym) or tier_map.get(analysis_symbol, {})
     is_hold = tier_info.get("hold_mode", False)
 
     # ── KLASYFIKACJA POZYCJI ────────────────────────────────────────────────
@@ -1099,7 +1230,11 @@ def _analyze_spot_position(
 
     # Wskaźniki techniczne — pobieramy zawsze (do info), ale decyzja NA ICH PODSTAWIE
     # tylko dla valid_position.
-    ctx = get_live_context(db, sym, timeframe="1h", limit=200) if can_analyze else None
+    ctx = (
+        get_live_context(db, analysis_symbol, timeframe="1h", limit=200)
+        if can_analyze
+        else None
+    )
     rsi = ctx.get("rsi") if ctx else None
     ema_20 = ctx.get("ema_20") if ctx else None
     ema_50 = ctx.get("ema_50") if ctx else None
@@ -1265,6 +1400,9 @@ def _analyze_spot_position(
     decimals = 6 if value < 1.0 else 4 if value < 100 else 2
     card: Dict[str, Any] = {
         "symbol": sym,
+        "analysis_symbol": analysis_symbol,
+        "chart_symbol": analysis_symbol,
+        "display_symbol": sym,
         "asset": asset,
         "side": "LONG",
         "quantity": qty,
@@ -1299,6 +1437,22 @@ def _analyze_spot_position(
         "can_analyze": can_analyze,
         "can_compute_pnl": can_compute_pnl,
         "warning_message": warning_message,
+        "plain_summary": _plain_position_summary(
+            symbol=analysis_symbol,
+            decision=decision,
+            pnl_pct=pnl_pct,
+            trend=trend,
+            warning_message=warning_message,
+        ),
+        "plain_reasons": [
+            _plain_position_summary(
+                symbol=analysis_symbol,
+                decision=decision,
+                pnl_pct=pnl_pct,
+                trend=trend,
+                warning_message=warning_message,
+            )
+        ],
         # ────────────────────────────────────────────────────────────────────
         "opened_at": None,
         "updated_at": None,
@@ -1332,7 +1486,9 @@ def position_analysis(
 
         if mode == "live":
             spots = _get_live_spot_positions(db)
-            cards = [_analyze_spot_position(sp, db, tier_map) for sp in spots]
+            cards = [
+                _analyze_spot_position(sp, db, tier_map, settings) for sp in spots
+            ]
         else:
             positions = (
                 db.query(Position)

@@ -416,7 +416,12 @@ def get_runtime_config_alias(db: Session = Depends(get_db)):
     Alias kompatybilnosci dla starszych klientow: /api/account/runtime-config.
     """
     try:
-        data = build_runtime_state(db)
+        # Zwracaj jednocześnie runtime state i płaską konfigurację,
+        # aby klienci oczekujący kluczy control-plane nie dostawali null.
+        data = {
+            **build_runtime_state(db),
+            **get_runtime_config(db),
+        }
         return {"success": True, "data": data}
     except RuntimeSettingsError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
@@ -3175,7 +3180,7 @@ def get_runtime_activity(
     ostatni order, świeżość danych i status workerów.
     """
     cache_key = f"runtime_activity:{mode}"
-    cached = get_cached(cache_key, ttl_seconds=2.5)
+    cached = get_cached(cache_key, ttl_seconds=20.0)
     if cached is not None:
         return cached
     try:
@@ -3189,6 +3194,10 @@ def get_runtime_activity(
         collector_last_snapshot_ts = None
         collector_last_learning_ts = None
         collector_last_binance_sync_ts = None
+        collector_market_health = None
+        last_snapshot_ts = None
+        last_learning_ts = None
+        last_sync_ts = None
 
         if request is not None:
             state = getattr(getattr(request, "app", None), "state", None)
@@ -3214,6 +3223,10 @@ def get_runtime_activity(
                 last_sync_ts = getattr(coll_obj, "_last_binance_sync_ts", None)
                 if isinstance(last_sync_ts, datetime):
                     collector_last_binance_sync_ts = last_sync_ts.isoformat()
+
+                health_snapshot = getattr(coll_obj, "_last_market_health_state", None)
+                if isinstance(health_snapshot, dict):
+                    collector_market_health = dict(health_snapshot)
 
         worker_status = get_worker_status() or {}
 
@@ -3368,6 +3381,7 @@ def get_runtime_activity(
                     "last_snapshot_ts": collector_last_snapshot_ts,
                     "last_learning_ts": collector_last_learning_ts,
                     "last_binance_sync_ts": collector_last_binance_sync_ts,
+                    "market_health": collector_market_health,
                 },
                 "worker": worker_status,
                 "market_data": {
@@ -3386,6 +3400,7 @@ def get_runtime_activity(
                 "last_order": last_order_data,
                 "last_pending": last_pending_data,
                 "last_error": last_error_data,
+                "market_health": collector_market_health,
                 "recent_decisions": recent_traces,
                 "updated_at": now.isoformat(),
             },
@@ -3497,7 +3512,7 @@ def get_trading_status(
     Używany do panelu diagnostycznego 'Dlaczego bot nie handluje?'.
     """
     cache_key = f"trading_status:{mode}"
-    cached = get_cached(cache_key, ttl_seconds=2.5)
+    cached = get_cached(cache_key, ttl_seconds=20.0)
     if cached is not None:
         return cached
     try:
@@ -3518,6 +3533,7 @@ def get_trading_status(
         # --- Collector / WS status ---
         collector_running = False
         ws_running = False
+        collector_market_health = None
         active_symbols: set[str] = set()
         if request is not None:
             coll = getattr(getattr(request, "app", None), "state", None)
@@ -3526,6 +3542,9 @@ def get_trading_status(
                 if coll_obj:
                     collector_running = bool(getattr(coll_obj, "running", False))
                     ws_running = bool(getattr(coll_obj, "ws_running", False))
+                    health_snapshot = getattr(coll_obj, "_last_market_health_state", None)
+                    if isinstance(health_snapshot, dict):
+                        collector_market_health = dict(health_snapshot)
                     watchlist = getattr(coll_obj, "watchlist", []) or []
                     if isinstance(watchlist, list):
                         active_symbols = {
@@ -3694,6 +3713,37 @@ def get_trading_status(
                 }
             )
 
+        health_mode = str((collector_market_health or {}).get("mode") or "NORMAL").upper()
+        health_issues = (collector_market_health or {}).get("issues") or []
+        if mode == "live" and health_mode == "NO_TRADE":
+            blockers.append(
+                {
+                    "code": "MARKET_HEALTH_NO_TRADE",
+                    "stage": "market_health",
+                    "severity": "critical",
+                    "symbol": None,
+                    "message": (
+                        "Market health wymusił NO_TRADE — nowe wejścia live zablokowane "
+                        f"({', '.join(health_issues) if health_issues else 'brak szczegółów'})"
+                    ),
+                    "timestamp": now,
+                }
+            )
+        elif mode == "live" and health_mode == "REDUCE_ONLY":
+            blockers.append(
+                {
+                    "code": "MARKET_HEALTH_REDUCE_ONLY",
+                    "stage": "market_health",
+                    "severity": "warning",
+                    "symbol": None,
+                    "message": (
+                        "Market health wymusił REDUCE_ONLY — bot monitoruje wyjścia, "
+                        f"ale nie otwiera nowych pozycji ({', '.join(health_issues) if health_issues else 'brak szczegółów'})"
+                    ),
+                    "timestamp": now,
+                }
+            )
+
         # Kody non-blocker — to są informacyjne trace'y, nie blokady handlu
         _NON_BLOCKER_REASONS = {
             "sync_ignored_dust_residual",
@@ -3728,6 +3778,8 @@ def get_trading_status(
                 "cash_insufficient_after_conversion_attempt": "Brak środków po próbie konwersji EUR→USDC",
                 "execution_rejected_by_exchange": "Giełda odrzuciła zlecenie wykonania",
                 "temporary_execution_error": "Tymczasowy błąd wykonania (bez trwałego freeze)",
+                "market_health_no_trade": "NO_TRADE aktywny — nowe wejścia live są zablokowane",
+                "market_health_reduce_only": "REDUCE_ONLY aktywny — monitoruj wyjścia, brak nowych wejść",
             }
             label = _REJECTION_LABELS.get(
                 last_rejection_reason, f"Ostatnia blokada: {last_rejection_reason}"
@@ -3766,6 +3818,10 @@ def get_trading_status(
                 "data_stale": data_stale,
                 "last_tick_age_s": last_tick_age_s,
                 "available_to_trade": available_to_trade,
+                "allow_new_entries": bool((collector_market_health or {}).get("allow_new_entries", True)),
+                "no_trade_mode": health_mode == "NO_TRADE",
+                "reduce_only_mode": health_mode == "REDUCE_ONLY",
+                "market_health": collector_market_health,
                 "status_color": status_color,
                 "max_certainty_mode": max_cert,
                 "hold_mode": hold_only,

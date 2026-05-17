@@ -34,6 +34,7 @@ export default function DecisionRisk({ mode = 'demo' }: { mode?: 'demo' | 'live'
   const [risk, setRisk] = useState<RiskData | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  const focusQuote = mode === 'live' ? 'USDC' : 'EUR'
 
   useEffect(() => {
     let cancelled = false
@@ -50,8 +51,16 @@ export default function DecisionRisk({ mode = 'demo' }: { mode?: 'demo' | 'live'
         const rangesJson = await rangesRes.json()
         const riskJson = await riskRes.json()
 
-        const focus = new Set(['WLFIEUR', 'BTCEUR'])
-        const picked = (rangesJson.data || []).find((r: any) => focus.has(r.symbol)) || (rangesJson.data || [])[0] || null
+        const focus = new Set(
+          mode === 'live'
+            ? ['WLFIUSDC', 'BTCUSDC']
+            : ['WLFIEUR', 'BTCEUR']
+        )
+        const picked =
+          (rangesJson.data || []).find((r: any) => focus.has(r.symbol)) ||
+          (rangesJson.data || []).find((r: any) => String(r.symbol || '').toUpperCase().endsWith(focusQuote)) ||
+          (rangesJson.data || [])[0] ||
+          null
         if (!cancelled) {
           setRangeRow(picked)
           setRisk(riskJson.data || null)

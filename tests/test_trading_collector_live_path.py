@@ -82,6 +82,12 @@ def _make_collector():
             collector.symbol_params = {}
             collector._ws_tick_last_saved = {}
             collector._ws_tick_min_interval_s = 30
+            collector._last_market_health_state = {
+                "mode": "NORMAL",
+                "allow_new_entries": True,
+                "issues": [],
+            }
+            collector._last_market_health_alert_ts = None
 
             from backend.collector import AlertThrottler
             collector._sync_mismatch_throttler = AlertThrottler(cooldown_seconds=600)
@@ -200,6 +206,32 @@ class TestLiveEntryPipelineGuards:
         assert result == 0
         mock_sig.assert_not_called()
 
+    @pytest.mark.parametrize(
+        "health_mode,reason_code",
+        [
+            ("NO_TRADE", "market_health_no_trade"),
+            ("REDUCE_ONLY", "market_health_reduce_only"),
+        ],
+    )
+    def test_market_health_gate_blocks_new_entries(self, health_mode, reason_code):
+        db = MagicMock()
+        tc = _make_tc(has_active_pending=False, in_cooldown=False)
+        tc["live_market_health"] = {
+            "mode": health_mode,
+            "allow_new_entries": False,
+            "issues": ["market_data_stale"],
+        }
+        runtime_ctx = _make_runtime_ctx()
+
+        with patch("backend.trading.signal_engine.evaluate_entry_signal") as mock_sig:
+            with patch.object(self.collector, "_trace_decision") as mock_trace:
+                result = self.collector._live_entry_new_pipeline(db, "BTCUSDC", tc, runtime_ctx)
+
+        assert result == 0
+        mock_sig.assert_not_called()
+        called_reason_codes = [call.kwargs.get("reason_code") for call in mock_trace.call_args_list]
+        assert reason_code in called_reason_codes
+
 
 # ── 2. signal_engine rejects → 0 ─────────────────────────────────────────────
 
@@ -257,6 +289,36 @@ class TestLiveEntryPipelineRiskReject:
         mock_create.assert_not_called()
         called_reason_codes = [call.kwargs.get("reason_code") for call in mock_trace.call_args_list]
         assert "max_positions_reached" in called_reason_codes
+
+
+class TestOpenPositionsWatchlistGuard:
+    def setup_method(self):
+        self.collector, self.mock_bc = _make_collector()
+
+    def test_open_positions_are_kept_in_watchlist_and_override(self):
+        """Otwarta pozycja spoza top-listy musi zostać dopięta do watchlisty i override."""
+        db = MagicMock()
+        self.collector.watchlist = ["BTCUSDC", "ETHUSDC"]
+        self.collector.ws_running = False
+
+        with patch.object(
+            self.collector,
+            "_get_open_position_symbols",
+            return_value=["DOGEUSDC"],
+        ):
+            with patch("backend.collector.watchlist_override", return_value=["BTCUSDC", "ETHUSDC"]):
+                with patch("backend.collector.upsert_overrides") as mock_upsert:
+                    changed = self.collector._ensure_open_positions_in_watchlist(
+                        db,
+                        ws_enabled=True,
+                    )
+
+        assert changed is True
+        assert self.collector.watchlist == ["BTCUSDC", "ETHUSDC", "DOGEUSDC"]
+        mock_upsert.assert_called_once_with(
+            db,
+            {"watchlist": "BTCUSDC,ETHUSDC,DOGEUSDC"},
+        )
 
 
 # ── 4. Oba OK → 1, pending order stworzony ────────────────────────────────────
@@ -457,3 +519,39 @@ class TestScreenEntryCandidatesLiveVsDemo:
 
         # DEMO → _live_entry_new_pipeline NIE powinno być wywołane
         mock_pipeline.assert_not_called()
+
+
+class TestTradeConfigRegression:
+    def test_trade_config_runtime_alias_min_net_edge(self):
+        from backend.trading.trade_config import get_trade_config
+
+        with patch(
+            "backend.trading.trade_config._db_get",
+            side_effect=lambda _db, key, default=None: (
+                "1.1" if key == "min_symbol_net_expectancy" else None
+            ),
+        ):
+            cfg = get_trade_config(MagicMock())
+        assert cfg.min_net_edge_pct == pytest.approx(1.1)
+
+    def test_trade_cost_helpers_are_consistent(self):
+        from backend.trading.trade_config import (
+            TradeConfig,
+            min_required_move_pct,
+            total_entry_cost_pct,
+            total_round_trip_cost_pct,
+        )
+
+        cfg = TradeConfig(
+            taker_fee_pct=0.1,
+            slippage_bps=5.0,
+            spread_buffer_bps=3.0,
+            min_net_edge_pct=0.6,
+        )
+        entry = total_entry_cost_pct(cfg)
+        rtrip = total_round_trip_cost_pct(cfg)
+        req = min_required_move_pct(cfg)
+
+        assert entry == pytest.approx(0.0018)
+        assert rtrip == pytest.approx(entry * 2)
+        assert req == pytest.approx(rtrip + 0.006)

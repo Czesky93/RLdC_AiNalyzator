@@ -298,8 +298,23 @@ def test_min_notional_guard():
     # risk_amount = 10 × 0.001 = 0.01; qty_by_risk = 0.01 / (2×2) = 0.0025; notional = 0.0025 × 1000 = 2.5 < 500
     result = engine.evaluate(_db_mock(), "BTCUSDC", 1000.0, 2.0, account)
     assert result.is_allowed is False
-    # Qty jest bump'owane do min_buy_notional/price=0.5, ale required_cash=500 > available=10 → insufficient_cash
+    # Po zmianie sizingu qty nie jest sztucznie bumpowane — wejście kończy się qty_too_small.
     assert result.reason_code in ("qty_too_small", "insufficient_cash")
+
+
+def test_does_not_bump_qty_above_risk_limits():
+    cfg = _default_cfg(
+        risk_per_trade_pct=0.2,
+        min_buy_notional=500.0,
+        min_order_notional=10.0,
+        max_exposure_per_symbol_pct=100.0,
+    )
+    engine = _make_engine(cfg)
+    account = _default_account(equity=1000.0, available_cash=1000.0)
+    result = engine.evaluate(_db_mock(), "BTCUSDC", 100.0, 2.0, account)
+    assert result.is_allowed is False
+    assert result.reason_code == "qty_too_small"
+    assert result.details.get("notional_by_limits", 0.0) < cfg.min_buy_notional
 
 
 # ── 10. CooldownTracker unit tests ────────────────────────────────────────────

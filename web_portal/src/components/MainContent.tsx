@@ -19,10 +19,47 @@ type FetchCacheEntry = {
   fetchedAt: number
 }
 
-const FETCH_TIMEOUT_MS = 12000
+const FETCH_TIMEOUT_MS = 20000
 const SHARED_FETCH_CACHE_MS = 1500
+const MAX_CONCURRENT_FETCHES = 4
 const sharedFetchCache = new Map<string, FetchCacheEntry>()
 const inflightFetches = new Map<string, Promise<unknown>>()
+const pendingFetchQueue: Array<() => void> = []
+let activeFetchCount = 0
+
+function runFetchQueued<T>(task: () => Promise<T>): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const startTask = () => {
+      activeFetchCount += 1
+      task()
+        .then(resolve)
+        .catch(reject)
+        .finally(() => {
+          activeFetchCount = Math.max(0, activeFetchCount - 1)
+          const next = pendingFetchQueue.shift()
+          if (next) next()
+        })
+    }
+
+    if (activeFetchCount < MAX_CONCURRENT_FETCHES) {
+      startTask()
+      return
+    }
+
+    pendingFetchQueue.push(startTask)
+  })
+}
+
+function computeRefreshDelay(path: string, refreshMs: number, failureCount: number) {
+  if (refreshMs <= 0) return 0
+  const multiplier = failureCount <= 0 ? 1 : Math.min(failureCount + 1, 4)
+  let hash = 0
+  for (let i = 0; i < path.length; i += 1) {
+    hash = (hash + path.charCodeAt(i)) % 997
+  }
+  const jitterMs = Math.min(900, hash)
+  return Math.min(refreshMs * multiplier + jitterMs, 60000)
+}
 
 function normalizeFetchUrl(path: string) {
   const base = getApiBase()
@@ -47,7 +84,7 @@ async function fetchJsonShared<T>(path: string, cacheTtlMs: number): Promise<T> 
   const separator = cacheKey.includes('?') ? '&' : '?'
   const requestUrl = `${cacheKey}${separator}_ts=${now}`
 
-  const requestPromise = (async () => {
+  const requestPromise = runFetchQueued(async () => {
     try {
       const res = await fetch(requestUrl, {
         cache: 'no-store',
@@ -71,7 +108,7 @@ async function fetchJsonShared<T>(path: string, cacheTtlMs: number): Promise<T> 
       clearTimeout(timeoutId)
       inflightFetches.delete(cacheKey)
     }
-  })()
+  })
 
   inflightFetches.set(cacheKey, requestPromise)
   return requestPromise
@@ -87,6 +124,7 @@ function useFetch<T>(path: string, refreshMs: number = 0) {
   const [error, setError] = useState<string | null>(null)
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null)
   const requestSeq = React.useRef(0)
+  const failureCount = React.useRef(0)
 
   useEffect(() => {
     let cancelled = false
@@ -103,7 +141,7 @@ function useFetch<T>(path: string, refreshMs: number = 0) {
         : SHARED_FETCH_CACHE_MS
     const scheduleNext = () => {
       if (!cancelled && refreshMs > 0) {
-        timer = setTimeout(fetchData, refreshMs)
+        timer = setTimeout(fetchData, computeRefreshDelay(path, refreshMs, failureCount.current))
       }
     }
     const fetchData = async () => {
@@ -111,12 +149,14 @@ function useFetch<T>(path: string, refreshMs: number = 0) {
       try {
         const json = await fetchJsonShared<T>(path, cacheTtlMs)
         if (!cancelled && currentSeq === requestSeq.current) {
+          failureCount.current = 0
           setData(json)
           setLastUpdated(new Date())
           setError(null)
         }
       } catch (err: any) {
         if (!cancelled && currentSeq === requestSeq.current) {
+          failureCount.current += 1
           const msg = err?.message || 'Błąd połączenia'
           setError(msg.startsWith('HTTP') ? `Błąd serwera (${msg})` : `Brak połączenia: ${msg}`)
           console.error('[useFetch]', path, err)
@@ -2011,7 +2051,10 @@ function CommandCenterView({ mode, onSymbolClick }: { mode: 'demo' | 'live'; onS
   const { data: analysis, loading: analLoading } = useFetch<any>(`/api/positions/analysis?mode=${mode}`, 30000)
   // Supplemental: szczegółowy status oczekiwania per-symbol (dodatkowe dane diagnostyczne)
   const { data: waitStatus } = useFetch<any>(`/api/signals/wait-status`, 30000)
-  const { data: allowedData } = useFetch<any>(`/api/market/allowed-symbols?quotes=EUR,USDC,USDT`, 120000)
+  const { data: allowedData } = useFetch<any>(
+    `/api/market/allowed-symbols?quotes=${mode === 'live' ? 'USDC' : 'EUR,USDC,USDT'}`,
+    120000,
+  )
   const { data: finalDecisions } = useFetch<any>(`/api/signals/final-decisions?mode=${mode}`, 25000)
   const { data: goalsSummary } = useFetch<any>(`/api/positions/goals-summary?mode=${mode}`, 60000)
   const [expRefreshKey, setExpRefreshKey] = useState(0)
@@ -3564,18 +3607,24 @@ function DashboardV2View({ tradingMode, onSymbolClick }: { tradingMode: 'live' |
   const { data: summary } = useFetch<any>(`/api/portfolio/wealth?mode=${mode}`, 15000)
   const { data: economics } = useFetch<any>(`/api/account/analytics/overview?mode=${mode}`, 30000)
   const { data: control } = useFetch<any>(`/api/control/state`, 15000)
-  const [selectedSymbol, setSelectedSymbol] = useState<string>('BTCEUR')
+  const quoteCcy = mode === 'live' ? 'USDC' : 'EUR'
+  const [selectedSymbol, setSelectedSymbol] = useState<string>(() => (mode === 'live' ? 'BTCUSDC' : 'BTCEUR'))
 
   useEffect(() => {
     const wl = control?.data?.watchlist
     if (!Array.isArray(wl) || !wl.length) return
-    if (!selectedSymbol) {
-      setSelectedSymbol(String(wl[0]))
+    const preferred =
+      wl.find((symbol: any) => String(symbol || '').toUpperCase().endsWith(quoteCcy)) ||
+      wl[0]
+    if (typeof preferred === 'string') {
+      const current = String(selectedSymbol || '').toUpperCase()
+      if (!current || !current.endsWith(quoteCcy)) {
+        setSelectedSymbol(String(preferred))
+      }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [control?.data?.watchlist])
+  }, [control?.data?.watchlist, quoteCcy])
 
-  const quoteCcy = 'EUR'
   const equity = toNum(summary?.total_equity)
   const cash = toNum(summary?.free_cash ?? summary?.balance)
   const positionsValue = toNum(summary?.positions_value)
@@ -3714,6 +3763,8 @@ function DashboardV2View({ tradingMode, onSymbolClick }: { tradingMode: 'live' |
 function ClassicDashboardView({ tradingMode }: { tradingMode: 'live' | 'demo' }) {
   const mode = tradingMode === 'live' ? 'live' : 'demo'
   const { data: openaiStatus } = useFetch<any>(`/api/account/openai-status`, 60000)
+  const wlfiSymbol = mode === 'live' ? 'WLFI/USDC' : 'WLFI/EUR'
+  const btcSymbol = mode === 'live' ? 'BTC/USDC' : 'BTC/EUR'
   return (
     <div className="flex-1 overflow-auto">
       <div className="p-6 max-w-[1680px] mx-auto">
@@ -3728,15 +3779,15 @@ function ClassicDashboardView({ tradingMode }: { tradingMode: 'live' | 'demo' })
           </div>
         </div>
 
-        <ActionBanner />
+        <ActionBanner tradingMode={tradingMode} />
         <KpiStrip tradingMode={tradingMode} />
 
         <div className="grid grid-cols-12 gap-4">
           <div className="col-span-12 lg:col-span-6">
-            <TradingView symbol="WLFI/EUR" allowSymbolSelect={false} titleOverride="WLFI/EUR" refreshMs={60000} />
+            <TradingView symbol={wlfiSymbol} allowSymbolSelect={false} titleOverride={wlfiSymbol} refreshMs={60000} />
           </div>
           <div className="col-span-12 lg:col-span-6">
-            <TradingView symbol="BTC/EUR" allowSymbolSelect={false} titleOverride="BTC/EUR" refreshMs={60000} />
+            <TradingView symbol={btcSymbol} allowSymbolSelect={false} titleOverride={btcSymbol} refreshMs={60000} />
           </div>
 
           <div className="col-span-12">
@@ -3788,9 +3839,13 @@ function OpenAIStatusPill({ status }: { status: any }) {
   )
 }
 
-function ActionBanner() {
+function ActionBanner({ tradingMode }: { tradingMode: 'live' | 'demo' }) {
   const { data } = useFetch<any>(`/api/market/ranges`, 60000)
-  const focus = new Set(['WLFIEUR', 'BTCEUR'])
+  const focus = new Set(
+    tradingMode === 'live'
+      ? ['WLFIUSDC', 'BTCUSDC']
+      : ['WLFIEUR', 'BTCEUR']
+  )
   const items = (data?.data || []).filter((r: any) => focus.has(r.symbol)).map((r: any) => {
     let action = 'CZEKAJ'
     if (r.buy_action && String(r.buy_action).includes('KUP')) action = 'KUP'

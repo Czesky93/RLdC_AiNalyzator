@@ -7676,6 +7676,49 @@ def test_runtime_compatibility_aliases(client):
         assert body.get("success") is True
 
 
+def test_runtime_config_exposes_effective_control_plane_values(client):
+    """GET /api/account/runtime-config — musi zawierać efektywne wartości control-plane."""
+    db = SessionLocal()
+    try:
+        apply_runtime_updates(
+            db,
+            updates={
+                "quote_currency_mode": "USDC",
+                "primary_quote": "USDC",
+                "allowed_quotes": ["USDC"],
+                "min_order_notional": 60,
+                "min_buy_eur": 60,
+                "optimal_pairs_rebalance_enabled": True,
+                "optimal_pairs_refresh_hours": 8,
+                "optimal_pairs_top_n": 10,
+                "optimal_pairs_scan_limit": 400,
+                "watchlist": ["BTCUSDC", "ETHUSDC"],
+            },
+            actor="test",
+            active_position_count=0,
+        )
+    finally:
+        db.close()
+
+    resp = client.get("/api/account/runtime-config")
+    assert resp.status_code == 200, f"Oczekiwano 200, got {resp.status_code}: {resp.text}"
+    body = resp.json()
+    assert body.get("success") is True
+    data = body.get("data", {})
+
+    assert data.get("quote_currency_mode") == "USDC"
+    assert data.get("primary_quote") == "USDC"
+    assert data.get("allowed_quotes") == ["USDC"]
+    assert float(data.get("min_order_notional")) == 60.0
+    assert float(data.get("min_buy_eur")) == 60.0
+    assert data.get("optimal_pairs_rebalance_enabled") is True
+    assert int(data.get("optimal_pairs_refresh_hours")) == 8
+    assert int(data.get("optimal_pairs_top_n")) == 10
+    assert int(data.get("optimal_pairs_scan_limit")) == 400
+    assert data.get("watchlist") == ["BTCUSDC", "ETHUSDC"]
+    assert data.get("watchlist_source") == "override"
+
+
 def test_live_overlay_compatibility_aliases(client):
     """Legacy endpointy overlay/live muszą zwracać JSON zamiast 404."""
     for path in (

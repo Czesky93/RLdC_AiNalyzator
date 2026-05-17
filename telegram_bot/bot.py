@@ -253,6 +253,10 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ai = (ai_payload or {}).get("data") or {}
 
         collector = runtime.get("collector") or {}
+        market_health = runtime.get("market_health") or collector.get("market_health") or {}
+        mh_mode = str(market_health.get("mode") or "NORMAL").upper()
+        mh_issues = market_health.get("issues") or []
+        mh_issues_txt = ", ".join(mh_issues[:3]) if mh_issues else "brak"
         last_decision = runtime.get("last_decision") or {}
         last_order = runtime.get("last_order") or {}
         market_data = runtime.get("market_data") or {}
@@ -276,6 +280,8 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"Last signal: {last_decision.get('symbol', 'brak')} {last_decision.get('reason_code', '')}\n"
             f"Last order: {last_order.get('symbol', 'brak')} {last_order.get('side', '')} {last_order.get('status', '')}\n"
             f"Last market update age: {market_data.get('last_tick_age_s', 'brak')}s\n"
+            f"Market health: {mh_mode} (entry: {'TAK' if market_health.get('allow_new_entries', True) else 'NIE'})\n"
+            f"Health issues: {mh_issues_txt}\n"
             f"Last reconcile: {collector.get('last_binance_sync_ts', 'brak')}\n"
             f"Last error: {(runtime.get('last_error') or {}).get('message', 'brak')}\n"
             f"Governance/freeze: blocker_count={int(full.get('incidents_open') or 0)}"

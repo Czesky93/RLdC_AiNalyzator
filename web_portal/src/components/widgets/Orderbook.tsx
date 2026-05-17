@@ -8,16 +8,17 @@ type Orderbook = {
   asks: [number, number][]
 }
 
-export default function Orderbook() {
+export default function Orderbook({ mode = 'live' }: { mode?: 'live' | 'demo' }) {
   const [data, setData] = useState<Orderbook | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  const symbol = mode === 'live' ? 'BTCUSDC' : 'BTCEUR'
 
   useEffect(() => {
     const fetchOrderbook = async () => {
       try {
         const base = getApiBase()
-        const res = await fetch(`${base}/api/market/orderbook/BTCEUR?limit=10`)
+        const res = await fetch(`${base}/api/market/orderbook/${symbol}?limit=10`)
         if (!res.ok) {
           throw new Error('Błąd pobierania orderbook')
         }
@@ -30,11 +31,11 @@ export default function Orderbook() {
       }
     }
     fetchOrderbook()
-  }, [])
+  }, [symbol])
 
   return (
     <div className="bg-rldc-dark-card rounded-lg p-6 border border-rldc-dark-border neon-card">
-      <h2 className="text-lg font-semibold text-slate-200 mb-4">Orderbook BTC/EUR</h2>
+      <h2 className="text-lg font-semibold text-slate-200 mb-4">Orderbook {mode === 'live' ? 'BTC/USDC' : 'BTC/EUR'}</h2>
 
       {loading && <div className="text-sm text-slate-400">Ładowanie orderbook...</div>}
       {error && <div className="text-sm text-rldc-red-primary">{error}</div>}

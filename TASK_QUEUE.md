@@ -1,5 +1,30 @@
 # TASK_QUEUE — RLdC Trading Bot
 
+| T-139 | **Observe-only diagnostics + spread/slippage caps + risk sizing clamp**: `TradeConfig` dostał jawne limity `max_spread_bps/max_slippage_bps`; `signal_engine` zwraca pełne metryki przy `observe_only` i stosuje priorytet blokady market quality po score; `risk_engine` nie podbija już qty do `min_buy_notional` ponad limit ryzyka od stop-loss. Dodane regresje dla slippage gate i sizing clamp. | `backend/trading/trade_config.py`, `backend/trading/signal_engine.py`, `backend/trading/risk_engine.py`, `tests/test_trading_signal_engine.py`, `tests/test_trading_risk_engine.py` | Zysk/ryzyko: wejścia agresywne, ale z pełną diagnostyką i bez sztucznego zwiększania pozycji ponad risk budget. | DONE |
+| T-138 | **QuoteVolume observe-only gate + orderbook depth**: `signal_engine` przestał robić wczesny hard skip na samym volume ratio; teraz ocenia `quoteVolume`, dynamiczny próg trade, depth order booka i zapisuje pełne `observe_only` details dla niskiej płynności. `TradeConfig` dostał nowe progi płynności, a testy regresji pokrywają low `quoteVolume` i shallow order book. | `backend/trading/signal_engine.py`, `backend/trading/trade_config.py`, `tests/test_trading_signal_engine.py` | Jakość diagnostyki: pełniejszy obraz market quality przed wejściem. Ryzyko: mniej błędnych decyzji opartych tylko o jeden filtr. | DONE |
+| T-141 | **Overlay 8099 recovery + wykres fallback + usunięcie lewego paska**: adapter mapuje pary bez świec EUR na dostępny symbol bazowy (`chart_symbol`, np. `AAVEEUR -> AAVEUSDC`), przywrócono stabilny runtime `rldc-overlay.service`, a `index.html` został uproszczony przez usunięcie lewego panelu opcji i doprecyzowanie opisów wykresu. | `live_overlay/serve_live_overlay.py`, `live_overlay/index.html`, runtime `rldc-overlay.service` | Stabilność: overlay nie pada i pokazuje wykresy. UX: prostszy, czytelniejszy widok bez lewego paska. | DONE |
+
+## DONE (zamkniete w sesji 49 — T-133 LIVE SOURCE-OF-TRUTH + REQUEST-STORM GUARD)
+
+| ID | Zadanie | Plik/Modul | Wplyw | Status |
+|----|---------|------------|-------|--------|
+| T-133 | **Safe live-state na kanonicznym Binance spot**: `/api/rldc/safe/live-state` przestal opierac sie na lokalnej tabeli `Position`; korzysta z `_get_live_spot_positions()` i fallbackuje do DB tylko awaryjnie. Dodatkowo payload niesie `source/has_entry_price/state`, co poprawia prawde danych w overlay. | `backend/app.py`, `backend/routers/positions.py` | Spójnosc: manual/live holdings widoczne z jednego zrodla prawdy. Ryzyko: mniej falszywych stanów pozycji. | DONE |
+| T-133b | **Request-storm guard w web_portal**: dodano kolejke fetch, limit równoleglych requestów i backoff odswiezania po timeoutach, bez zmian wygladu strony. | `web_portal/src/components/MainContent.tsx` | Stabilnosc: mniejsze ryzyko samonapedzajacego przeciążenia backendu przez UI. | DONE |
+
+## CRITICAL
+
+| ID | Zadanie | Plik/Moduł | Wpływ | Status |
+|----|---------|------------|-------|--------|
+| T-134 | **Odchudzić `/api/positions?mode=live` do stabilnego SLA**: timeouty >20s blokują overlay i portal. Wymagane: snapshot cache + limit kosztownych wywołań Binance/history na request. | `backend/routers/positions.py`, `backend/portfolio_reconcile.py` | Zysk/ryzyko: bez tego system traci ciągłość obserwacji i zwiększa ryzyko błędnych decyzji operatora. | OPEN |
+| T-135 | **Odchudzić `/api/positions/analysis?mode=live`**: przenieść ciężką analizę do cache/job, endpoint ma zwracać gotowy snapshot zamiast pełnych obliczeń per request. | `backend/routers/positions.py`, `backend/analysis.py` | Stabilność: usuwa timeouty 3000/8099 i poprawia responsywność WWW. | OPEN |
+| T-136 | **Overlay resiliency na timeout backendu**: `/overlay/api/live-state` ma degradować się do ostatniego poprawnego snapshotu z reason_code zamiast timeout. | `live_overlay/serve_live_overlay.py` | Stabilność: overlay pozostaje operacyjny mimo chwilowych lagów backendu. | OPEN |
+
+## DONE (zamkniete w sesji 48 — T-132 MARKET HEALTH GATE + TELEMETRIA)
+
+| ID | Zadanie | Plik/Modul | Wplyw | Status |
+|----|---------|------------|-------|--------|
+| T-132 | **Market health gate LIVE + ekspozycja do web_portal/overlay/telegram**: collector ocenia teraz zdrowie runtime (`NO_TRADE` / `REDUCE_ONLY` / `NORMAL`) na podstawie świeżości danych, ws_running i błędów execution; LIVE BUY pipeline zapisuje reason_code `market_health_no_trade` / `market_health_reduce_only`; runtime-activity i trading-status zwracają pola `market_health`, `allow_new_entries`, `no_trade_mode`, `reduce_only_mode`; Telegram `/status` pokazuje health mode i issues; overlay adapter wystawia `trading_guard`. Dodatkowo `TradeConfig` dostał regresję aliasu `min_symbol_net_expectancy -> min_net_edge_pct` i testy helperów kosztowych. | `backend/collector.py`, `backend/trading/trade_config.py`, `backend/routers/account.py`, `telegram_bot/bot.py`, `live_overlay/serve_live_overlay.py`, `tests/test_trading_collector_live_path.py` | Zysk: brak nowych wejść przy złej jakości danych i podwyższonym ryzyku runtime. Ryzyko: mniejsze false-entry przy degradacji LIVE. Spójność: ten sam stan gate widoczny w API/overlay/Telegram. | DONE |
+
 ## DONE (zamkniete w sesji 42 — T-121 RUNTIME PATH SYNC + TELEGRAM MODE SYNC)
 
 | ID | Zadanie | Plik/Modul | Wplyw | Status |
@@ -110,6 +135,7 @@
 
 | ID | Zadanie | Plik/Moduł | Wpływ | Status |
 |----|---------|------------|-------|--------|
+| T-140 | **Stabilizacja smoke testów intermitentnych** — wyeliminować niestabilność `test_market_summary` i `test_acceptance_live_positions_analysis_restores_entry_baseline` przez odseparowanie od runtime/network side effects i ujednolicenie danych wejściowych pozycji live w testach. | `tests/test_smoke.py`, `backend/routers/market.py`, `backend/routers/positions.py`, `backend/routers/portfolio.py` | Stabilność: deterministyczne CI i wiarygodne gate'y regresji. | OPEN |
 | T-116 | **Trailing stop w execution cycle** — po osiągnięciu `trailing_activation_price` włącz trailing stop: przesuwaj SL do `current - atr * stop_mult`; update w każdym cyklu LONG_OPEN; wywoływać z collector cyklu. | `backend/trading/execution_engine.py`, `backend/collector.py` | Zysk: lock-in zysku, mniej strat z przebitych TP. | OPEN |
 | T-117 | **Partial take profit** — po osiągnięciu TP1: sell 50% pozycji, przesuń SL na break-even; po TP2: sell resztę. Wymaga queue_sell(partial=True) i aktualizacji position.quantity. | `backend/trading/execution_engine.py` | Zysk: realizacja częściowych profitów, ochrona kapitału. | OPEN |
 

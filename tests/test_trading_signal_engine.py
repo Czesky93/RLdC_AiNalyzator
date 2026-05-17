@@ -250,6 +250,12 @@ class TestEvaluateEntrySignal:
             "bidPrice": str(100.0 * (1 - spread_pct / 100 / 2)),
             "askPrice": str(100.0 * (1 + spread_pct / 100 / 2)),
         }
+        mock_bc.get_orderbook.return_value = {
+            "symbol": "BTCUSDC",
+            "bids": [[99.95, 10.0], [99.90, 10.0], [99.85, 10.0]],
+            "asks": [[100.05, 10.0], [100.10, 10.0], [100.15, 10.0]],
+            "timestamp": 1,
+        }
 
         with patch("backend.analysis.get_live_context", side_effect=_mock_get_live_context):
             db = MagicMock()
@@ -270,6 +276,62 @@ class TestEvaluateEntrySignal:
         result = self._call(cfg, ctx_entry=ctx)
         assert result.is_valid is False
         assert result.reason_code == "insufficient_klines"
+
+    def test_low_quote_volume_marks_observe_only(self):
+        cfg = _default_cfg(require_volume_confirmation=False)
+        ctx = _make_good_ctx()
+        ctx["volume_24h_quote"] = 42_000.0
+        ctx["trade_count"] = 650.0
+        ctx["volume_ratio"] = 1.7
+        result = self._call(cfg, ctx_entry=ctx)
+        assert result.is_valid is False
+        assert result.reason_code == "volume_below_trade_threshold"
+        assert result.details["market_mode"] == "observe_only"
+        assert result.details["quote_volume_24h"] == pytest.approx(42_000.0)
+        assert "spread_bps" in result.details
+        assert "score" in result.details
+        assert "min_score" in result.details
+        assert result.score > 0.0
+
+    def test_spread_guard_uses_max_slippage_bps(self):
+        cfg = _default_cfg(max_allowed_spread_pct=5.0, max_slippage_bps=20.0)
+        ctx = _make_good_ctx()
+        # spread 0.25% = 25 bps (poniżej max_allowed_spread_pct, ale powyżej max_slippage_bps)
+        result = self._call(cfg, ctx_entry=ctx, spread_pct=0.25)
+        assert result.is_valid is False
+        assert result.reason_code == "spread_too_wide"
+        assert result.details.get("max_slippage_bps") == pytest.approx(20.0)
+
+    def test_shallow_orderbook_blocks_buy(self):
+        cfg = _default_cfg(min_depth_to_order_ratio=25.0)
+        ctx = _make_good_ctx()
+
+        mock_bc = MagicMock()
+        mock_bc.get_book_ticker.return_value = {
+            "bidPrice": "99.99",
+            "askPrice": "100.01",
+        }
+        mock_bc.get_orderbook.return_value = {
+            "symbol": "BTCUSDC",
+            "bids": [[99.95, 10.0], [99.90, 10.0], [99.85, 10.0]],
+            "asks": [[100.05, 10.0], [100.10, 10.0], [100.15, 10.0]],
+            "timestamp": 1,
+        }
+        mock_bc.get_orderbook.return_value = {
+            "symbol": "BTCUSDC",
+            "bids": [[99.95, 1.0]],
+            "asks": [[100.05, 1.0]],
+            "timestamp": 1,
+        }
+
+        with patch("backend.analysis.get_live_context") as mock_ctx:
+            mock_ctx.return_value = ctx
+            db = MagicMock()
+            result = evaluate_entry_signal(db, "BTCUSDC", cfg, binance_client=mock_bc)
+
+        assert result.is_valid is False
+        assert result.reason_code == "orderbook_depth_too_low"
+        assert result.details["market_mode"] == "observe_only"
 
     def test_missing_klines_count_uses_context_fallback(self):
         cfg = _default_cfg()
@@ -293,6 +355,12 @@ class TestEvaluateEntrySignal:
 
         mock_bc = MagicMock()
         mock_bc.get_book_ticker.return_value = {"bidPrice": "99.95", "askPrice": "100.05"}
+        mock_bc.get_orderbook.return_value = {
+            "symbol": "BTCUSDC",
+            "bids": [[99.95, 10.0], [99.90, 10.0], [99.85, 10.0]],
+            "asks": [[100.05, 10.0], [100.10, 10.0], [100.15, 10.0]],
+            "timestamp": 1,
+        }
 
         with patch("backend.analysis.get_live_context", side_effect=_mock_get_live_context):
             result = evaluate_entry_signal(MagicMock(), "BTCUSDC", cfg, binance_client=mock_bc)
@@ -326,6 +394,12 @@ class TestEvaluateEntrySignal:
             "bidPrice": "99.60",   # spread = (100.40 - 99.60) / 99.60 × 100 ≈ 0.80%
             "askPrice": "100.40",
         }
+        mock_bc.get_orderbook.return_value = {
+            "symbol": "BTCUSDC",
+            "bids": [[99.60, 10.0]],
+            "asks": [[100.40, 10.0]],
+            "timestamp": 1,
+        }
 
         with patch("backend.analysis.get_live_context") as mock_ctx:
             mock_ctx.return_value = ctx
@@ -343,6 +417,12 @@ class TestEvaluateEntrySignal:
         mock_bc.get_book_ticker.return_value = {
             "bidPrice": "99.99",
             "askPrice": "100.01",
+        }
+        mock_bc.get_orderbook.return_value = {
+            "symbol": "BTCUSDC",
+            "bids": [[99.99, 10.0]],
+            "asks": [[100.01, 10.0]],
+            "timestamp": 1,
         }
 
         with patch("backend.analysis.get_live_context") as mock_ctx:
@@ -523,6 +603,12 @@ class TestEvaluateEntrySignal:
             db = MagicMock()
             mock_bc = MagicMock()
             mock_bc.get_book_ticker.return_value = {"bidPrice": "99.99", "askPrice": "100.01"}
+            mock_bc.get_orderbook.return_value = {
+                "symbol": "BTCUSDC",
+                "bids": [[99.99, 10.0]],
+                "asks": [[100.01, 10.0]],
+                "timestamp": 1,
+            }
             result = evaluate_entry_signal(
                 db, "BTCUSDC", cfg,
                 binance_client=mock_bc,

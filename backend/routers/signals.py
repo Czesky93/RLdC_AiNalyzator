@@ -4197,22 +4197,37 @@ def get_symbol_decision_view(
         recommended_action_label = "KUP"
         primary_cta = "BUY"
         allowed_actions = ["BUY", "WATCH"]
+        plain_explanation = (
+            "Bot widzi okazję do kupna. To nadal nie jest obietnica zysku."
+        )
+    elif final_signal == "BUY" and has_position:
+        recommended_action_label = "TRZYMAJ"
+        primary_cta = "NONE"
+        allowed_actions = ["SELL", "WATCH"]
+        plain_explanation = (
+            "Bot widzi siłę kupujących, ale ta pozycja jest już kupiona. "
+            "Teraz pilnuje wyniku zamiast ogłaszać nowe wejście."
+        )
     elif final_signal == "SELL" and has_position:
         recommended_action_label = "SPRZEDAJ"
         primary_cta = "SELL"
         allowed_actions = ["SELL", "PARTIAL_SELL"]
+        plain_explanation = "Bot widzi powód do wyjścia z tej pozycji."
     elif final_signal == "HOLD" and has_position:
         recommended_action_label = "TRZYMAJ"
         primary_cta = "NONE"
         allowed_actions = ["SELL", "WATCH"]
+        plain_explanation = "Bot nie widzi powodu do zamknięcia pozycji teraz."
     elif final_signal in ("WAIT", "NO_TRADE"):
         recommended_action_label = "CZEKAJ"
         primary_cta = "NONE"
         allowed_actions = ["WATCH"]
+        plain_explanation = "Bot czeka. Warunki nie są teraz dość dobre."
     else:
         recommended_action_label = "OBSERWUJ"
         primary_cta = "NONE"
         allowed_actions = ["WATCH"]
+        plain_explanation = "Bot obserwuje sytuację i nie wysyła zlecenia."
 
     # ── 9. Position data ─────────────────────────────────────────────────────
     position_data: Optional[dict] = None
@@ -4271,6 +4286,9 @@ def get_symbol_decision_view(
             primary_cta = "NONE"
             recommended_action_label = "CZEKAJ"
             allowed_actions = ["WATCH"]
+            plain_explanation = (
+                "Bot wykrył niespójne dane, więc bezpiecznie czeka."
+            )
             warnings_list.append(
                 "Niespójne dane analizy — wyświetlano bezpieczny fallback"
             )
@@ -4297,6 +4315,8 @@ def get_symbol_decision_view(
         "target_evaluation_available": target_evaluation_available,
         "final_signal": final_signal,
         "final_signal_reason": final_signal_reason,
+        "plain_explanation": plain_explanation,
+        "plain_reason": plain_explanation,
         "final_confidence": final_confidence,
         "has_position": has_position,
         "position": position_data,

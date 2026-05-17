@@ -14,6 +14,7 @@ Frontend NIE składa tego z wielu niezależnych endpointów.
 """
 
 import logging
+import threading
 from typing import Optional
 
 from fastapi import APIRouter, Depends, Query
@@ -23,6 +24,7 @@ from backend.database import get_db
 
 logger = logging.getLogger("dashboard_router")
 router = APIRouter()
+_market_scan_request_lock = threading.Lock()
 
 
 @router.get("/market-scan")
@@ -48,7 +50,12 @@ def get_dashboard_market_scan(
     try:
         from backend.market_scanner import run_market_scan
 
-        snapshot = run_market_scan(db, mode=mode, force=force)
+        if force:
+            snapshot = run_market_scan(db, mode=mode, force=True)
+        else:
+            # Chroni backend przed równoległym uruchamianiem ciężkich skanów.
+            with _market_scan_request_lock:
+                snapshot = run_market_scan(db, mode=mode, force=False)
         return {"success": True, "data": snapshot}
     except Exception as exc:
         logger.error("dashboard_market_scan_error: %s", str(exc), exc_info=True)

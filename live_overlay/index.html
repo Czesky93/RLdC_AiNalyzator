@@ -33,60 +33,10 @@
     .app {
       width: 100vw;
       height: 100vh;
-      display: flex;
       background:
         radial-gradient(circle at 10% 0%, rgba(0, 199, 129, .12), transparent 25%),
         radial-gradient(circle at 85% 25%, rgba(255, 157, 34, .10), transparent 25%),
         var(--bg);
-    }
-
-    .side {
-      width: 82px;
-      min-width: 82px;
-      background: linear-gradient(180deg, var(--card), #101620);
-      border-right: 1px solid var(--border);
-      display: flex;
-      flex-direction: column;
-      align-items: stretch;
-      padding-top: 8px;
-      gap: 2px;
-    }
-
-    .nav {
-      width: 100%;
-      padding: 10px 0;
-      text-align: center;
-      font-size: 18px;
-      color: var(--txt);
-      border: 0;
-      background: transparent;
-      cursor: pointer;
-      transition: .18s ease;
-    }
-
-    .nav:hover { background: rgba(80, 167, 255, .08); }
-    .nav.active {
-      background: rgba(0, 199, 129, .13);
-      border-left: 3px solid var(--green);
-    }
-
-    .nav span {
-      display: block;
-      margin-top: 3px;
-      font-size: 10px;
-      color: var(--muted);
-    }
-
-    .spacer { flex: 1; }
-
-    .ver {
-      width: 100%;
-      padding: 8px 2px;
-      border-top: 1px solid var(--border);
-      text-align: center;
-      color: var(--muted);
-      font-size: 10px;
-      line-height: 1.35;
     }
 
     .main {
@@ -552,7 +502,7 @@
 
     .apiErr {
       position: fixed;
-      left: 100px;
+      left: 18px;
       right: 18px;
       bottom: 47px;
       display: none;
@@ -572,7 +522,7 @@
       right: 18px;
       top: 68px;
       bottom: 58px;
-      width: min(520px, calc(100vw - 130px));
+      width: min(520px, calc(100vw - 36px));
       border: 1px solid var(--border);
       border-radius: 12px;
       background: linear-gradient(180deg, rgba(15, 20, 30, .98), rgba(10, 14, 22, .99));
@@ -703,27 +653,12 @@
       .bottom { grid-template-columns: repeat(2, 1fr); height: 210px; }
       .pair { min-width: 150px; }
       .warning { min-height: 56px; }
-      .drawer { width: min(480px, calc(100vw - 120px)); }
+      .drawer { width: min(480px, calc(100vw - 36px)); }
     }
   </style>
 </head>
 <body>
   <div class="app">
-    <aside class="side">
-      <button class="nav active" data-view="live">🔥<span>LIVE</span></button>
-      <button class="nav" data-view="favorites">❤️<span>Ulub.</span></button>
-      <button class="nav" data-view="history">📈<span>Historia</span></button>
-      <button class="nav" data-view="analysis">🔍<span>Analizy</span></button>
-      <button class="nav" data-view="settings">⚙️<span>Ustaw.</span></button>
-      <button class="nav" data-view="stream">🎥<span>Stream</span></button>
-      <div class="spacer"></div>
-      <div class="ver">
-        <div>RLdC AI</div>
-        <div>BOT SYNC</div>
-        <div id="clock">--:--<br>--.--.----</div>
-      </div>
-    </aside>
-
     <main class="main">
       <header class="top">
         <div class="brand">
@@ -732,6 +667,7 @@
         </div>
         <div class="headline" id="headline">Rynek → decyzja → pozycja → wyjaśnienie</div>
         <div class="topRight">
+          <div id="clock" class="muted">--:--</div>
           <div id="focusMeta">Brak focusu</div>
           <div class="badge" id="apiStatus">ŁADOWANIE</div>
         </div>
@@ -861,7 +797,9 @@
   <div class="apiErr" id="apiErr"></div>
 
   <script>
-    const OVERLAY_API = '/overlay/api/live-state';
+    // Strona na :8099 czyta własny adapter. Adapter dopiero odpytuje backend :8000.
+    const BACKEND_URL = window.location.origin;
+    const OVERLAY_API = `${window.location.origin}/overlay/api/live-state`;
     const refreshMs = 3000;
     const rotateMs = 6500;
     const TF_LIST = ['1m', '5m', '15m', '1h', '4h', '1d'];
@@ -869,9 +807,8 @@
 
     const appState = {
       nav: 'live',
-      selectedTf: '15m',
+      selectedTf: '1m',
       focusSymbol: null,
-      focusPinned: false,
       focusIndex: 0,
       lastRotate: 0,
       overlay: null,
@@ -889,7 +826,9 @@
 
     function clock() {
       const d = new Date();
-      $('clock').innerHTML = d.toLocaleTimeString('pl-PL', { hour: '2-digit', minute: '2-digit' }) + '<br>' + d.toLocaleDateString('pl-PL');
+      const node = $('clock');
+      if (!node) return;
+      node.textContent = d.toLocaleTimeString('pl-PL', { hour: '2-digit', minute: '2-digit' }) + ' ' + d.toLocaleDateString('pl-PL');
     }
 
     function n(v) {
@@ -933,8 +872,30 @@
       if (['buy', 'kup', 'kupno', 'entry', 'enter'].includes(a)) return ['KUP', 'buy'];
       if (['sell', 'sprzedaj', 'sprzedaż', 'exit', 'close', 'blokada'].includes(a)) return ['SPRZEDAJ', 'sell'];
       if (['hold', 'trzymaj'].includes(a)) return ['TRZYMAJ', ''];
-      if (['skip', 'blocked', 'block', 'zablokowane'].includes(a)) return ['BLOKADA', 'sell'];
+      if (['watch', 'observe', 'obserwuj', 'none'].includes(a)) return ['OBSERWUJ', ''];
+      if (['wait', 'czekaj', 'no_trade'].includes(a)) return ['CZEKAJ', ''];
+      if (['skip', 'blocked', 'block', 'zablokowane', 'brak danych'].includes(a)) return ['BLOKADA', 'sell'];
       return ['CZEKAJ', ''];
+    }
+
+    function simpleTrendLabel(value) {
+      const trend = String(value || '').toUpperCase();
+      if (trend.includes('WZROST')) return 'cena ma teraz przewagę w górę';
+      if (trend.includes('SPAD')) return 'cena ma teraz przewagę w dół';
+      if (trend.includes('BOCZ')) return 'cena idzie bardziej bokiem';
+      return 'bot nie ma jeszcze pewnej oceny kierunku';
+    }
+
+    function queueLabel(value) {
+      const state = String(value || '').toUpperCase();
+      if (state.includes('IN_POSITION')) return 'pozycja już jest otwarta';
+      if (state.includes('ENTRY_READY')) return 'prawie gotowe do wejścia';
+      if (state.includes('WATCH')) return 'bot obserwuje';
+      if (state.includes('SETUP')) return 'układa się okazja';
+      if (state.includes('BLOCK')) return 'wejście zablokowane';
+      if (state.includes('FULL_TRADING_POSITION')) return 'pełna pozycja do pilnowania';
+      if (state.includes('ORPHAN')) return 'pozycja znaleziona, ale bez pełnej historii';
+      return String(value || 'bot obserwuje').toLowerCase();
     }
 
     function saveFavorites() {
@@ -950,10 +911,21 @@
     }
 
     async function apiJson(path) {
-      const sep = path.includes('?') ? '&' : '?';
-      const res = await fetch(path + sep + '_=' + Date.now(), { cache: 'no-store' });
-      if (!res.ok) throw new Error('HTTP ' + res.status);
-      return await res.json();
+      // Prepend backend URL if path is relative
+      const fullPath = path.startsWith('http') ? path : BACKEND_URL + path;
+      const sep = fullPath.includes('?') ? '&' : '?';
+      try {
+        const res = await fetch(fullPath + sep + '_=' + Date.now(), { 
+          cache: 'no-store',
+          mode: 'cors',
+          credentials: 'include'
+        });
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        return await res.json();
+      } catch (e) {
+        console.warn('API error on ' + fullPath + ':', e.message);
+        throw e;
+      }
     }
 
     function getRows() {
@@ -967,17 +939,21 @@
     function getFocusRow() {
       const rows = getRows();
       if (!rows.length) return null;
-      if (appState.focusPinned && appState.focusSymbol) {
+      if (appState.focusSymbol) {
         const existing = getRow(appState.focusSymbol);
         if (existing) return existing;
       }
-      return focusRowByRotation(rows) || rows[0];
+      const urgent = rows.find((row) => ['buy', 'sell', 'kup', 'sprzedaj', 'entry', 'exit'].includes(String(row.action || '').toLowerCase()));
+      return urgent || rows[0];
     }
 
-    function setFocus(symbol, pinned = true) {
+    function dataSymbol(row) {
+      return row?.chart_symbol || row?.analysis_symbol || row?.symbol || '';
+    }
+
+    function setFocus(symbol) {
       if (!symbol) return;
       appState.focusSymbol = symbol;
-      appState.focusPinned = pinned;
       renderTicker();
       renderFocus();
       renderDrawer();
@@ -996,16 +972,15 @@
 
     function focusRowByRotation(rows) {
       if (!rows.length) return null;
-      const explicit = appState.focusPinned ? getRow(appState.focusSymbol) : null;
+      const explicit = getRow(appState.focusSymbol);
       if (explicit) return explicit;
-      const urgentRows = rows.filter((row) => ['buy', 'sell', 'kup', 'sprzedaj', 'entry', 'exit'].includes(String(row.action || '').toLowerCase()));
-      const regularRows = rows.filter((row) => !urgentRows.includes(row));
-      const orderedRows = urgentRows.length ? [...urgentRows, ...regularRows] : rows;
+      const urgent = rows.find((row) => ['buy', 'sell', 'kup', 'sprzedaj', 'entry', 'exit'].includes(String(row.action || '').toLowerCase()));
+      if (urgent) return urgent;
       if (Date.now() - appState.lastRotate > rotateMs) {
-        appState.focusIndex = (appState.focusIndex + 1) % orderedRows.length;
+        appState.focusIndex = (appState.focusIndex + 1) % rows.length;
         appState.lastRotate = Date.now();
       }
-      return orderedRows[appState.focusIndex % orderedRows.length];
+      return rows[appState.focusIndex % rows.length];
     }
 
     function getSourceHealthText(st) {
@@ -1027,6 +1002,21 @@
       return lines.join('\n');
     }
 
+    function miniSparkline(data, color) {
+      const vals = Array.isArray(data) ? data.map(Number).filter(Number.isFinite) : [];
+      if (vals.length < 3) return '';
+      const w = 130; const h = 18;
+      const min = Math.min(...vals); const max = Math.max(...vals);
+      const range = max - min || 1;
+      const pts = vals.map((v, i) => {
+        const x = (i / (vals.length - 1)) * w;
+        const y = h - ((v - min) / range) * (h - 2) - 1;
+        return `${x.toFixed(1)},${y.toFixed(1)}`;
+      }).join(' ');
+      const fill = color === 'up' ? '#00c781' : color === 'down' ? '#ff334b' : '#ffd966';
+      return `<svg width="${w}" height="${h}" viewBox="0 0 ${w} ${h}" style="display:block;width:100%;height:${h}px;overflow:visible"><polyline points="${pts}" fill="none" stroke="${fill}" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round" opacity=".85"/></svg>`;
+    }
+
     function renderTicker() {
       const rows = getRows();
       const focus = getFocusRow();
@@ -1041,6 +1031,9 @@
         const label = action(row.action)[0];
         const isFocus = focus && focus.symbol === row.symbol ? ' focus' : '';
         const isFav = appState.favorites.has(row.symbol) ? ' on' : '';
+        // Mini sparkline z danych history z bota (bez dodatkowego fetcha)
+        const histData = Array.isArray(row.history) && row.history.length >= 3 ? row.history.slice(-50) : [];
+        const spark = miniSparkline(histData, color);
         return `
           <div class="pair${isFocus}" data-symbol="${escapeHtml(row.symbol)}">
             <div class="dot ${color}">${icon}</div>
@@ -1048,7 +1041,8 @@
               <div class="pname">${sym(row.symbol)}</div>
               <div class="pprice">${price(row.price)} ${row.quote || ''}</div>
               <div class="pline ${color}">${pct(change)} | ${label}</div>
-              <div class="pline muted">ENTRY: ${price(row.entry)} | TP: ${price(row.target)}</div>
+              <div class="pline muted">Kupno: ${price(row.entry)} | Cel: ${price(row.target)}</div>
+              ${spark ? `<div style="grid-column:1/-1;margin-top:3px;opacity:.8;">${spark}</div>` : ''}
             </div>
             <button class="favBtn${isFav}" data-fav="${escapeHtml(row.symbol)}" title="Ulubione">★</button>
           </div>
@@ -1083,9 +1077,10 @@
 
     function renderFocus() {
       const row = getFocusRow();
-      const decisionData = appState.cache.decision.get(row?.symbol || '');
+      const requestSymbol = dataSymbol(row);
+      const decisionData = appState.cache.decision.get(requestSymbol) || appState.cache.decision.get(row?.symbol || '');
       const decision = decisionData?.data || {};
-      const forecast = appState.cache.forecast.get(row?.symbol || '');
+      const forecast = appState.cache.forecast.get(requestSymbol) || appState.cache.forecast.get(row?.symbol || '');
 
       if (!row) {
         $('symbol').textContent = 'BRAK DANYCH Z BOTA';
@@ -1105,24 +1100,27 @@
         return;
       }
 
-      const [decisionLabel, pillClass] = action(decision.final_signal || row.action);
+      const publicAction = decision.recommended_action_label || decision.public_action || decision.primary_cta || row.action;
+      const rawSignal = decision.final_signal || row.action;
+      const [decisionLabel, pillClass] = action(publicAction);
       $('symbol').textContent = sym(row.symbol);
-      $('focusMeta').textContent = `${sym(row.symbol)} | TF ${appState.selectedTf}`;
+      $('focusMeta').textContent = `${sym(row.symbol)} | wykres ${sym(requestSymbol || row.symbol)} | TF ${appState.selectedTf}`;
       $('pinSymbol').className = 'pin' + (appState.favorites.has(row.symbol) ? ' on' : '');
       $('pinSymbol').textContent = appState.favorites.has(row.symbol) ? '★' : '☆';
-      $('priceInfo').innerHTML = `Aktualna cena: <span class="${cls(row.change_pct)}">${price(row.price)} ${row.quote || ''}</span> | Wynik: <span class="${cls(row.pnl_pct)}">${pct(row.pnl_pct)}</span> | Sygnał: <span class="wait">${decisionLabel}</span>`;
+      $('priceInfo').innerHTML = `Cena teraz: <span class="${cls(row.change_pct)}">${price(row.price)} ${row.quote || ''}</span> | Wynik pozycji: <span class="${cls(row.pnl_pct)}">${pct(row.pnl_pct)}</span> | Bot mówi: <span class="wait">${decisionLabel}</span>`;
       $('decision').textContent = decisionLabel;
       $('decision').className = 'pill ' + pillClass;
 
       let conf = decision.final_confidence ?? row.confidence ?? row.overall_decision_confidence ?? row.direction_confidence;
       if (n(conf) !== null && Number(conf) <= 1) conf = Number(conf) * 100;
-      $('trend').textContent = (decision.market_context?.trend || row.trend || 'Brak potwierdzenia') + (n(conf) !== null ? ` | confidence: ${pct(conf)}` : '');
-      $('invest').textContent = decision.final_signal_reason
-        ? `${decision.final_signal_reason}. Blockery: ${(decision.blockers || []).join(', ') || 'brak'}.`
-        : (n(row.edge) !== null ? `Opłacalność po kosztach / score: ${fmt(row.edge, 2)}. Ryzyko: ${row.risk_score || 'brak oceny'}.` : 'Bot nie zwrócił jeszcze jednoznacznej oceny opłacalności po kosztach.');
-      $('explain').textContent = decision.explanation?.short || row.reason || row.plan || 'Bot nie zwrócił jeszcze prostego wyjaśnienia dla tej pary.';
-      $('whale').textContent = row.whale || row.whale_state || row.anomaly || 'Brak potwierdzonej anomalii / danych whale z bota.';
-      $('capital').textContent = 'Minimalna sensowna kwota: ' + (row.min_capital ? money(row.min_capital, row.capital_ccy || '€') : '--');
+      $('trend').textContent = `${simpleTrendLabel(decision.indicators?.trend || decision.market_context?.trend || row.trend)}${n(conf) !== null ? ` | pewność bota: ${pct(conf)}` : ''}`;
+      const blockers = Array.isArray(decision.blockers) ? decision.blockers : [];
+      $('invest').textContent = decision.plain_reason || decision.plain_explanation || decision.final_signal_reason
+        ? `${decision.plain_reason || decision.plain_explanation || decision.final_signal_reason}${blockers.length ? `. Co go blokuje: ${blockers.join(', ')}.` : ''}`
+        : (n(row.edge) !== null ? `Po odjęciu kosztów bot ocenia tę okazję na ${fmt(row.edge, 2)}. Poziom ryzyka: ${row.risk_score || 'brak oceny'}.` : 'Bot nie podał jeszcze, czy to wejście ma sens po kosztach.');
+      $('explain').textContent = decision.explanation?.plain || decision.plain_explanation || row.plain_summary || row.reason || row.plan || 'Bot nie zwrócił jeszcze prostego wyjaśnienia dla tej pary.';
+      $('whale').textContent = row.whale || row.whale_state || row.anomaly || 'Brak mocnego sygnału, że duzi gracze teraz pchają cenę.';
+      $('capital').textContent = 'Kwota, od której taki ruch zaczyna mieć sens: ' + (row.min_capital ? money(row.min_capital, row.capital_ccy || '€') : '--');
       $('entry').textContent = price(row.entry ?? decision.cta?.entry_price);
       $('tp').textContent = price(row.target ?? decision.cta?.take_profit);
       $('sl').textContent = price(row.stop ?? decision.cta?.stop_loss);
@@ -1131,22 +1129,33 @@
 
       const chips = [
         `TF ${appState.selectedTf}`,
-        decision.data_quality ? `DATA ${String(decision.data_quality).toUpperCase()}` : null,
-        decision.ai_available === true ? 'AI/SYGNAŁ OK' : null,
-        forecast?.forecast_1h?.direction ? `1H ${forecast.forecast_1h.direction}` : null,
-        forecast?.forecast_4h?.direction ? `4H ${forecast.forecast_4h.direction}` : null,
-        forecast?.forecast_24h?.direction ? `24H ${forecast.forecast_24h.direction}` : null,
+        decision.data_quality ? `Jakość danych: ${String(decision.data_quality).toUpperCase()}` : null,
+        decision.ai_available === true ? 'Bot ma świeży sygnał' : null,
+        rawSignal && rawSignal !== publicAction ? `Surowy sygnał: ${rawSignal}` : null,
+        // RSI ze wskaźników decyzji lub z row
+        n(decision.indicators?.rsi ?? row.rsi) !== null ? `RSI: ${fmt(decision.indicators?.rsi ?? row.rsi, 1)}` : null,
+        // EMA cross signal
+        decision.indicators?.ema_cross ? `EMA: ${String(decision.indicators.ema_cross).toUpperCase()}` : null,
+        // Bollinger
+        decision.indicators?.boll_position ? `BOLL: ${String(decision.indicators.boll_position).toUpperCase()}` : null,
+        // MACD
+        decision.indicators?.macd_signal ? `MACD: ${String(decision.indicators.macd_signal).toUpperCase()}` : null,
+        // ATR / volatility
+        n(decision.indicators?.atr ?? row.atr) !== null ? `ATR: ${fmt(decision.indicators?.atr ?? row.atr, 4)}` : null,
+        forecast?.forecast_1h?.direction ? `Za 1h: ${String(forecast.forecast_1h.direction).toLowerCase()}` : null,
+        forecast?.forecast_4h?.direction ? `Za 4h: ${String(forecast.forecast_4h.direction).toLowerCase()}` : null,
+        forecast?.forecast_24h?.direction ? `Za 24h: ${String(forecast.forecast_24h.direction).toLowerCase()}` : null,
+        // Stale data indicator
+        appState.overlay?.stale ? '⚠ dane z cache' : null,
       ].filter(Boolean);
       $('chips').innerHTML = chips.map((chip) => `<div>${escapeHtml(chip)}</div>`).join('');
 
-      const klineData = appState.cache.klines.get(`${row.symbol}:${appState.selectedTf}`);
-      const history = Array.isArray(klineData) && klineData.length >= 2
+      const klineCached = appState.cache.klines.get(`${requestSymbol || row.symbol}:${appState.selectedTf}`);
+      const klineData = Array.isArray(klineCached?.data) ? klineCached.data : (Array.isArray(klineCached) ? klineCached : []);
+      const history = klineData.length >= 2
         ? klineData
         : (Array.isArray(row.history) ? row.history : []);
       const forecastPath = buildForecastPath(row, forecast);
-      if ((!history || history.length < 2) && row.chart_tf && row.chart_tf !== appState.selectedTf) {
-        $('chartNote').textContent = `Brak pełnych świec ${appState.selectedTf}. Pokazuję ostatnie dane ${row.chart_tf} z backendu.`;
-      }
       draw(history, forecastPath);
     }
 
@@ -1168,7 +1177,7 @@
       $('queue').innerHTML = queue.length
         ? queue.map((row) => `
             <div class="row">
-              <span>${sym(row.symbol)} — ${escapeHtml(row.queue_state || row.action || 'watch')}</span>
+              <span>${sym(row.symbol)} — ${escapeHtml(queueLabel(row.queue_state || row.action || 'watch'))}</span>
               <b class="${cls(row.opportunity_score ?? row.pnl_pct ?? row.change_pct)}">${n(row.opportunity_score ?? row.pnl_pct ?? row.change_pct) !== null ? fmt(row.opportunity_score ?? row.pnl_pct ?? row.change_pct, 2) : '--'}</b>
             </div>
           `).join('')
@@ -1211,8 +1220,8 @@
         ctx.fillText('BRAK ŚWIEŻEJ HISTORII CEN Z BOTA', w / 2, h / 2 - 10);
         ctx.fillStyle = 'rgba(168,177,196,.95)';
         ctx.font = '13px Arial';
-        ctx.fillText('Kliknij inny TF lub poczekaj na dane świec z backendu.', w / 2, h / 2 + 16);
-        $('chartNote').textContent = 'Brak historii cen dla wybranego timeframe w odpowiedzi API.';
+        ctx.fillText('Brak świec dla tej pary. Overlay używa dostępnego symbolu wykresowego.', w / 2, h / 2 + 16);
+        $('chartNote').textContent = 'Brak świec dla wybranego symbolu i TF. Spróbuj innego TF lub pary.';
         return;
       }
 
@@ -1267,7 +1276,7 @@
       ctx.font = '12px Arial';
       ctx.textAlign = 'left';
       ctx.fillText(`min ${price(min)}  max ${price(max)}`, 12, h - 12);
-      $('chartNote').textContent = `Zielona: świece ${appState.selectedTf} | żółta: średnia | niebieska: forecast z backendu`;
+      $('chartNote').textContent = `Zielona: cena ${appState.selectedTf} | żółta: średnia | niebieska: przewidywanie bota`;
     }
 
     function statusBadge(st) {
@@ -1301,9 +1310,7 @@
       const rows = Array.isArray(overlay.active_pairs) ? overlay.active_pairs : [];
       if (appState.focusIndex >= Math.max(1, rows.length)) appState.focusIndex = 0;
       const focus = focusRowByRotation(rows);
-      if (focus?.symbol && (!appState.focusPinned || !appState.focusSymbol || !getRow(appState.focusSymbol))) {
-        appState.focusSymbol = focus.symbol;
-      }
+      if (!appState.focusSymbol && focus?.symbol) appState.focusSymbol = focus.symbol;
       overlay.fetched_at_local = new Date().toLocaleTimeString('pl-PL');
       appState.overlay = overlay;
       statusBadge(overlay);
@@ -1313,21 +1320,46 @@
       renderBottom();
       renderDrawer();
       if (appState.focusSymbol) prefetchFocusData(appState.focusSymbol);
-      rows.slice(0, 3).forEach((row) => {
-        if (row?.symbol && row.symbol !== appState.focusSymbol) prefetchFocusData(row.symbol);
+      // Prefetch klines dla pozostałych par w tle (bez blokowania render)
+      prefetchAllTickerKlines(rows);
+    }
+
+    function prefetchAllTickerKlines(rows) {
+      if (!Array.isArray(rows) || !rows.length) return;
+      const tf = appState.selectedTf;
+      rows.slice(0, 6).forEach((row) => {
+        const sym_ = row.chart_symbol || row.analysis_symbol || row.symbol;
+        if (!sym_) return;
+        const key = `${sym_}:${tf}`;
+        const cached = appState.cache.klines.get(key);
+        const age = cached ? Date.now() - (cached._ts || 0) : Infinity;
+        const ttl = (Array.isArray(cached?.data) && cached.data.length >= 2) ? 30000 : 8000;
+        if (age >= ttl) {
+          // Fetch w tle, bez await
+          ensureKlines(sym_, tf).catch(() => {});
+        }
       });
     }
 
     async function ensureKlines(symbol, tf) {
       const key = `${symbol}:${tf}`;
-      if (appState.cache.klines.has(key)) return appState.cache.klines.get(key);
+      const FRESH_TTL = 30000;  // 30s dla danych z wartościami
+      const EMPTY_TTL = 8000;   // 8s retry po pustym wyniku
+      const cached = appState.cache.klines.get(key);
+      if (cached !== undefined) {
+        const age = Date.now() - (cached._ts || 0);
+        const ttl = (Array.isArray(cached.data) && cached.data.length >= 2) ? FRESH_TTL : EMPTY_TTL;
+        if (age < ttl) return Array.isArray(cached.data) ? cached.data : [];
+      }
+      // Unieważnij stary wpis przed fetchem
+      appState.cache.klines.delete(key);
       try {
         const payload = await apiJson(`/api/market/kline?symbol=${encodeURIComponent(symbol)}&tf=${encodeURIComponent(tf)}&limit=120`);
         const data = Array.isArray(payload.data) ? payload.data.map((row) => n(row.close)).filter((value) => value !== null) : [];
-        appState.cache.klines.set(key, data);
+        appState.cache.klines.set(key, { data, _ts: Date.now() });
         return data;
       } catch {
-        appState.cache.klines.set(key, []);
+        appState.cache.klines.set(key, { data: [], _ts: Date.now() });
         return [];
       }
     }
@@ -1398,10 +1430,12 @@
 
     async function prefetchFocusData(symbol) {
       if (!symbol) return;
+      const row = getRow(symbol) || { symbol };
+      const requestSymbol = dataSymbol(row) || symbol;
       await Promise.all([
-        ensureKlines(symbol, appState.selectedTf),
-        ensureForecast(symbol),
-        ensureDecision(symbol),
+        ensureKlines(requestSymbol, appState.selectedTf),
+        ensureForecast(requestSymbol),
+        ensureDecision(requestSymbol),
       ]);
       if (getRow(symbol)) renderFocus();
       if (appState.nav === 'analysis') renderDrawer();
@@ -1462,8 +1496,9 @@
 
     function renderAnalysisPanel() {
       const row = getFocusRow();
-      const decision = appState.cache.decision.get(row?.symbol || '')?.data || {};
-      const forecast = appState.cache.forecast.get(row?.symbol || '');
+      const requestSymbol = dataSymbol(row);
+      const decision = (appState.cache.decision.get(requestSymbol) || appState.cache.decision.get(row?.symbol || ''))?.data || {};
+      const forecast = appState.cache.forecast.get(requestSymbol) || appState.cache.forecast.get(row?.symbol || '');
       const blockers = Array.isArray(decision.blockers) ? decision.blockers : [];
       const horizons = decision.horizons || {};
       return `
@@ -1471,14 +1506,14 @@
           <h5>Kanoniczna decyzja — ${row ? sym(row.symbol) : 'brak focusu'}</h5>
           ${row ? `
             <div class="grid2">
-              <div class="kv"><span>Final signal</span><b>${decision.final_signal || row.action || '--'}</b></div>
-              <div class="kv"><span>Jakość danych</span><b>${decision.data_quality || '--'}</b></div>
-              <div class="kv"><span>Aktualna cena</span><b>${price(decision.market_context?.current_price ?? row.price)}</b></div>
-              <div class="kv"><span>Wiek danych</span><b>${decision.market_context?.data_age_s ?? '--'} s</b></div>
+              <div class="kv"><span>Co mówi bot</span><b>${decision.recommended_action_label || row.action || '--'}</b></div>
+              <div class="kv"><span>Stan danych</span><b>${decision.data_quality || '--'}</b></div>
+              <div class="kv"><span>Cena teraz</span><b>${price(decision.market_context?.current_price ?? decision.current_price ?? row.price)}</b></div>
+              <div class="kv"><span>Wiek danych</span><b>${decision.market_context?.data_age_s ?? decision.data_age_seconds ?? '--'} s</b></div>
             </div>
-            <div class="narr">${escapeHtml(decision.explanation?.short || decision.final_signal_reason || row.reason || 'Brak wyjaśnienia.')}</div>
+            <div class="narr">${escapeHtml(decision.explanation?.plain || decision.plain_explanation || row.plain_summary || decision.final_signal_reason || row.reason || 'Brak prostego wyjaśnienia.')}</div>
             <div style="margin-top:8px;">
-              ${(blockers.length ? blockers : ['Brak aktywnych blockerów dla focusu.']).map((item) => `<span class="tag">${escapeHtml(item)}</span>`).join('')}
+              ${(blockers.length ? blockers : ['Brak aktywnych blokad dla tej pary.']).map((item) => `<span class="tag">${escapeHtml(item)}</span>`).join('')}
             </div>
           ` : '<div class="empty">Wybierz parę z tickeru.</div>'}
         </div>
@@ -1489,7 +1524,7 @@
               <div class="kv"><span>1h</span><b>${forecast?.forecast_1h?.direction || horizons['1h']?.direction || '--'} ${forecast?.forecast_1h?.projected_pct ? `(${pct(forecast.forecast_1h.projected_pct)})` : ''}</b></div>
               <div class="kv"><span>4h</span><b>${forecast?.forecast_4h?.direction || horizons['4h']?.direction || '--'} ${forecast?.forecast_4h?.projected_pct ? `(${pct(forecast.forecast_4h.projected_pct)})` : ''}</b></div>
               <div class="kv"><span>24h</span><b>${forecast?.forecast_24h?.direction || horizons['24h']?.direction || '--'} ${forecast?.forecast_24h?.projected_pct ? `(${pct(forecast.forecast_24h.projected_pct)})` : ''}</b></div>
-              <div class="kv"><span>Trend</span><b>${decision.market_context?.trend || row?.trend || '--'}</b></div>
+              <div class="kv"><span>Trend</span><b>${decision.indicators?.trend || decision.market_context?.trend || row?.trend || '--'}</b></div>
             </div>
           ` : '<div class="empty">Brak focusu dla analizy.</div>'}
         </div>
@@ -1526,14 +1561,13 @@
       const tunnel = data?.tunnel?.data || {};
       const ip = data?.ip?.data || {};
       const system = data?.system?.data || {};
-      const overlayUrl = tunnel.overlay_url || `${window.location.origin}/index.html`;
+      const overlayUrl = `${window.location.origin}/index.html`;
       return `
         <div class="panelCard">
           <h5>Źródła streamu / publiczny dostęp</h5>
           ${data ? `
             <div class="kv"><span>Overlay URL</span><b>${escapeHtml(overlayUrl)}</b></div>
             <div class="kv"><span>Tunel aktywny</span><b>${tunnel.active_url || tunnel.frontend_url || 'brak'}</b></div>
-            <div class="kv"><span>Overlay tunnel</span><b>${tunnel.overlay_url || 'brak osobnego URL'}</b></div>
             <div class="kv"><span>Backend live execution</span><b>${system.live_execution_ok ? 'TAK' : 'NIE'}</b></div>
             <div class="kv"><span>Local IP</span><b>${ip.local?.ip || ip.local_ip || 'brak'}</b></div>
             <div class="kv"><span>Public egress IP</span><b>${ip.public?.ip || ip.public_ip || 'brak'}</b></div>
@@ -1564,7 +1598,9 @@
 
       if (appState.nav === 'history') await ensureHistory();
       if (appState.nav === 'analysis' && appState.focusSymbol) {
-        await Promise.all([ensureDecision(appState.focusSymbol), ensureForecast(appState.focusSymbol)]);
+        const row = getRow(appState.focusSymbol) || { symbol: appState.focusSymbol };
+        const requestSymbol = dataSymbol(row) || appState.focusSymbol;
+        await Promise.all([ensureDecision(requestSymbol), ensureForecast(requestSymbol)]);
       }
       if (appState.nav === 'settings') await ensureSettings();
       if (appState.nav === 'stream') await ensureStream();
@@ -1599,15 +1635,23 @@
             button.classList.toggle('on', button.dataset.tf === tf);
           });
           if (appState.focusSymbol) {
-            await ensureKlines(appState.focusSymbol, tf);
+            const row = getRow(appState.focusSymbol) || { symbol: appState.focusSymbol };
+            const sym_ = dataSymbol(row) || appState.focusSymbol;
+            // Wymuś odświeżenie klines dla nowego TF
+            appState.cache.klines.delete(`${sym_}:${tf}`);
+            await ensureKlines(sym_, tf);
             renderFocus();
           }
         });
       });
       window.addEventListener('resize', () => {
         const row = getFocusRow();
-        const history = appState.cache.klines.get(`${row?.symbol}:${appState.selectedTf}`) || row?.history || [];
-        const forecast = buildForecastPath(row, appState.cache.forecast.get(row?.symbol || ''));
+        const requestSymbol = dataSymbol(row);
+        const _kc = appState.cache.klines.get(`${requestSymbol || row?.symbol}:${appState.selectedTf}`);
+        const history = (Array.isArray(_kc?.data) ? _kc.data : (Array.isArray(_kc) ? _kc : [])).length >= 2
+          ? (Array.isArray(_kc?.data) ? _kc.data : _kc)
+          : (row?.history || []);
+        const forecast = buildForecastPath(row, appState.cache.forecast.get(requestSymbol || row?.symbol || ''));
         draw(history, forecast);
       });
     }

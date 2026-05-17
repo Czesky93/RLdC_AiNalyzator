@@ -17,7 +17,7 @@ from typing import Any, Dict, List, Optional
 import requests
 import websockets
 from dotenv import load_dotenv
-from sqlalchemy import desc, text
+from sqlalchemy import desc, or_, text
 from sqlalchemy.orm import Session
 
 from backend.accounting import compute_demo_account_state, get_demo_quote_ccy
@@ -84,6 +84,7 @@ from backend.runtime_settings import (
     effective_bool,
     get_symbol_tier_or_default,
     get_runtime_config,
+    upsert_overrides,
     watchlist_override,
 )
 from backend.system_logger import log_exception, log_to_db
@@ -165,6 +166,8 @@ class DataCollector:
             os.getenv("WATCHLIST_REFRESH_SECONDS", "900")
         )
         self.last_watchlist_refresh_ts: Optional[datetime] = None
+        self.last_optimal_pairs_refresh_ts: Optional[datetime] = None
+        self._usdc_policy_bootstrapped: bool = False
         self.last_no_watchlist_log_ts: Optional[datetime] = None
         self.interval = int(os.getenv("COLLECTION_INTERVAL_SECONDS", 60))
         self.kline_timeframes = os.getenv("KLINE_TIMEFRAMES", "1m,1h").split(",")
@@ -221,6 +224,13 @@ class DataCollector:
         self._binance_rejection_cooldown_s = int(
             os.getenv("BINANCE_REJECTION_COOLDOWN_SECONDS", "600")  # 10 minut
         )
+        self._last_market_health_state: Dict[str, Any] = {
+            "mode": "UNKNOWN",
+            "allow_new_entries": True,
+            "issues": [],
+            "updated_at": utc_now_naive().isoformat(),
+        }
+        self._last_market_health_alert_ts: Optional[datetime] = None
 
         # Nowy pipeline tradingowy (T-114): signal_engine + risk_engine + state_manager
         self._risk_engine = None          # lazy RiskEngine instance
@@ -290,6 +300,130 @@ class DataCollector:
             self._state_manager.cfg = cfg
         return self._state_manager
 
+    def _evaluate_live_market_health(
+        self,
+        db: Session,
+        candidate_symbols: Optional[List[str]] = None,
+    ) -> Dict[str, Any]:
+        """Ocena zdrowia środowiska LIVE: NO_TRADE / REDUCE_ONLY / NORMAL."""
+        from backend.trading.trade_config import get_trade_config
+
+        cfg = get_trade_config(db)
+        now = utc_now_naive()
+        mode = "NORMAL"
+        issues: List[str] = []
+
+        if not bool(cfg.execution_enabled):
+            mode = "NO_TRADE"
+            issues.append("execution_disabled")
+        if not bool(cfg.allow_live_trading):
+            mode = "NO_TRADE"
+            issues.append("allow_live_trading_disabled")
+
+        if bool(cfg.require_ws_for_live) and not bool(self.ws_running):
+            mode = "NO_TRADE"
+            issues.append("websocket_disconnected")
+
+        last_md = (
+            db.query(MarketData)
+            .order_by(MarketData.timestamp.desc())
+            .first()
+        )
+        if last_md is None or last_md.timestamp is None:
+            mode = "NO_TRADE"
+            issues.append("market_data_missing")
+            data_age_s = None
+        else:
+            data_age_s = max(0, int((now - last_md.timestamp).total_seconds()))
+            if data_age_s > int(cfg.market_data_max_age_sec):
+                if bool(cfg.market_health_reduce_only_on_stale_data):
+                    if mode != "NO_TRADE":
+                        mode = "REDUCE_ONLY"
+                else:
+                    mode = "NO_TRADE"
+                issues.append("market_data_stale")
+
+        err_since = now - timedelta(minutes=max(1, int(cfg.market_health_error_window_min)))
+        recent_errors = (
+            db.query(SystemLog)
+            .filter(SystemLog.level.in_(["ERROR", "CRITICAL"]))
+            .filter(SystemLog.timestamp >= err_since)
+            .filter(
+                SystemLog.module.in_(
+                    [
+                        "collector",
+                        "live_trading",
+                        "orders",
+                        "positions",
+                        "binance_client",
+                    ]
+                )
+            )
+            .count()
+        )
+
+        if recent_errors >= int(cfg.market_health_no_trade_error_count):
+            mode = "NO_TRADE"
+            issues.append("error_rate_critical")
+        elif recent_errors >= int(cfg.market_health_reduce_only_error_count):
+            if mode != "NO_TRADE":
+                mode = "REDUCE_ONLY"
+            issues.append("error_rate_elevated")
+
+        allow_new_entries = mode == "NORMAL"
+        health = {
+            "mode": mode,
+            "allow_new_entries": allow_new_entries,
+            "no_trade": mode == "NO_TRADE",
+            "reduce_only": mode == "REDUCE_ONLY",
+            "issues": sorted(set(issues)),
+            "recent_errors": int(recent_errors),
+            "error_window_min": int(cfg.market_health_error_window_min),
+            "market_data_age_s": data_age_s,
+            "market_data_max_age_s": int(cfg.market_data_max_age_sec),
+            "ws_running": bool(self.ws_running),
+            "watchlist_size": len(candidate_symbols or self.watchlist or []),
+            "updated_at": now.isoformat(),
+        }
+
+        self._last_market_health_state = health
+        return health
+
+    def _maybe_alert_market_health(self, health: Dict[str, Any]):
+        """Wysyłaj alert tylko przy degradacji i z cooldownem."""
+        mode = str(health.get("mode") or "NORMAL").upper()
+        if mode == "NORMAL":
+            return
+
+        now = utc_now_naive()
+        cooldown_sec = 600
+        try:
+            cooldown_sec = int(
+                (health.get("market_health_alert_cooldown_sec") or 600)
+            )
+        except Exception:
+            cooldown_sec = 600
+
+        if self._last_market_health_alert_ts is not None:
+            elapsed = (now - self._last_market_health_alert_ts).total_seconds()
+            if elapsed < max(30, cooldown_sec):
+                return
+
+        issues = ", ".join(health.get("issues") or ["unknown"])
+        msg = (
+            "🩺 [LIVE] MARKET HEALTH GATE\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            f"Tryb: {mode}\n"
+            f"Nowe wejścia: {'TAK' if health.get('allow_new_entries') else 'NIE'}\n"
+            f"Powody: {issues}\n"
+            f"Błędy {health.get('error_window_min')}m: {health.get('recent_errors')}\n"
+            f"Wiek danych: {health.get('market_data_age_s')}s / max {health.get('market_data_max_age_s')}s\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            "W trybie REDUCE_ONLY bot monitoruje/wychodzi z pozycji, ale nie otwiera nowych."
+        )
+        self._send_telegram_alert("LIVE MARKET HEALTH", msg, force_send=True)
+        self._last_market_health_alert_ts = now
+
     def _live_entry_new_pipeline(
         self,
         db: Session,
@@ -313,6 +447,27 @@ class DataCollector:
         _has_active_pending = tc["_has_active_pending"]
         _pending_in_cooldown = tc["_pending_in_cooldown"]
         min_order_notional = float(tc.get("min_order_notional", 25.0))
+
+        live_market_health = tc.get("live_market_health") or {}
+        health_mode = str(live_market_health.get("mode") or "NORMAL").upper()
+        if health_mode in {"NO_TRADE", "REDUCE_ONLY"}:
+            reason_code = (
+                "market_health_no_trade"
+                if health_mode == "NO_TRADE"
+                else "market_health_reduce_only"
+            )
+            self._trace_decision(
+                db,
+                symbol=symbol,
+                action="SKIP",
+                reason_code=reason_code,
+                runtime_ctx=runtime_ctx,
+                mode=mode,
+                details={
+                    "market_health": live_market_health,
+                },
+            )
+            return 0
 
         # 1. Guard: aktywny pending lub cooldown → skip
         if _has_active_pending(symbol):
@@ -1000,6 +1155,245 @@ class DataCollector:
         else:
             self.watchlist = new_list
 
+        return True
+
+    def _enforce_usdc_top10_policy(self, db: Session) -> bool:
+        """Wymuś politykę runtime: USDC only + min wejścia 60 + pełny scan USDC."""
+        cfg = get_runtime_config(db)
+        updates: dict[str, str] = {}
+
+        if str(cfg.get("quote_currency_mode") or "").upper() != "USDC":
+            updates["quote_currency_mode"] = "USDC"
+        if str(cfg.get("primary_quote") or "").upper() != "USDC":
+            updates["primary_quote"] = "USDC"
+
+        allowed_quotes = [str(q).upper() for q in (cfg.get("allowed_quotes") or [])]
+        if allowed_quotes != ["USDC"]:
+            updates["allowed_quotes"] = "USDC"
+
+        min_order_notional = float(cfg.get("min_order_notional", 25.0) or 25.0)
+        if min_order_notional < 60.0:
+            updates["min_order_notional"] = "60"
+
+        min_buy_eur = float(cfg.get("min_buy_eur", 60.0) or 60.0)
+        if min_buy_eur < 60.0:
+            updates["min_buy_eur"] = "60"
+
+        if not bool(cfg.get("enable_dynamic_universe", True)):
+            updates["enable_dynamic_universe"] = "true"
+
+        max_scan = int(cfg.get("max_symbol_scan_per_cycle", 100) or 100)
+        if max_scan < 400:
+            updates["max_symbol_scan_per_cycle"] = "400"
+
+        if updates:
+            upsert_overrides(db, updates)
+            logger.info("🎯 Wymuszono politykę USDC/TOP10: %s", updates)
+            log_to_db(
+                "INFO",
+                "collector",
+                f"policy_enforced_usdc_top10 updates={updates}",
+                db=db,
+            )
+            return True
+        return False
+
+    def _refresh_optimal_pairs_if_due(self, db: Session, force: bool = False) -> bool:
+        """3x dziennie: skan pełnego universe USDC i aktualizacja top-N watchlisty."""
+        cfg = get_runtime_config(db)
+        enabled = bool(cfg.get("optimal_pairs_rebalance_enabled", True))
+        if not enabled:
+            return False
+
+        refresh_hours = int(cfg.get("optimal_pairs_refresh_hours", 8) or 8)
+        top_n = max(1, int(cfg.get("optimal_pairs_top_n", 10) or 10))
+        signal_max_age_minutes = int(
+            cfg.get("optimal_pairs_signal_max_age_minutes", 120) or 120
+        )
+        scan_limit = max(50, int(cfg.get("optimal_pairs_scan_limit", 400) or 400))
+
+        now = utc_now_naive()
+        if not force and self.last_optimal_pairs_refresh_ts is not None:
+            elapsed = (now - self.last_optimal_pairs_refresh_ts).total_seconds()
+            if elapsed < refresh_hours * 3600:
+                return False
+
+        self.last_optimal_pairs_refresh_ts = now
+
+        try:
+            from backend.routers.signals import _load_signals_from_db_or_live, _score_opportunity
+            from backend.symbol_universe import get_symbol_registry
+
+            registry = get_symbol_registry(
+                binance_client=self.binance,
+                allowed_quotes=["USDC"],
+                user_watchlist=[],
+            )
+            usdc_universe = [
+                s
+                for s in (registry.get("quote_filtered_universe") or [])
+                if str(s).upper().endswith("USDC")
+            ]
+            if not usdc_universe:
+                log_to_db(
+                    "WARNING",
+                    "collector",
+                    "optimal_pairs_refresh_skip: empty_usdc_universe",
+                    db=db,
+                )
+                return False
+
+            scan_symbols = usdc_universe[:scan_limit]
+            raw_signals = _load_signals_from_db_or_live(
+                db,
+                scan_symbols,
+                max_age_minutes=signal_max_age_minutes,
+            )
+
+            scored: list[dict[str, Any]] = []
+            for sig in raw_signals:
+                try:
+                    scored.append(_score_opportunity(sig, db))
+                except Exception:
+                    scored.append(sig)
+
+            ranked = sorted(
+                scored,
+                key=lambda row: (
+                    str(row.get("signal_type") or "HOLD").upper() == "HOLD",
+                    -float(row.get("score", 0) or 0),
+                    -float(row.get("confidence", 0) or 0),
+                ),
+            )
+
+            top_symbols: list[str] = []
+            for row in ranked:
+                sym = str(row.get("symbol") or "").strip().upper()
+                if not sym or not sym.endswith("USDC"):
+                    continue
+                if sym in top_symbols:
+                    continue
+                top_symbols.append(sym)
+                if len(top_symbols) >= top_n:
+                    break
+
+            if len(top_symbols) < top_n:
+                for sym in scan_symbols:
+                    s = str(sym).strip().upper()
+                    if s.endswith("USDC") and s not in top_symbols:
+                        top_symbols.append(s)
+                    if len(top_symbols) >= top_n:
+                        break
+
+            # Nigdy nie gub aktywnych pozycji przez rebalans top-N.
+            # Open symbols są dopinane do watchlisty nawet gdy wypadają z rankingu.
+            for sym in self._get_open_position_symbols(db):
+                if sym not in top_symbols:
+                    top_symbols.append(sym)
+
+            if not top_symbols:
+                return False
+
+            if top_symbols != self.watchlist:
+                old = ", ".join(self.watchlist) if self.watchlist else "(pusto)"
+                new = ", ".join(top_symbols)
+                self.watchlist = top_symbols
+                upsert_overrides(db, {"watchlist": ",".join(top_symbols)})
+                logger.info("🧭 Rebalans TOP%d (USDC): %s -> %s", top_n, old, new)
+                log_to_db(
+                    "INFO",
+                    "collector",
+                    f"optimal_pairs_rebalance top_n={top_n} old={old} new={new}",
+                    db=db,
+                )
+
+                if self.ws_running:
+                    self.stop_ws()
+                    if effective_bool(db, "ws_enabled", "WS_ENABLED", True):
+                        self.start_ws()
+                return True
+
+            return False
+        except Exception as exc:
+            log_exception("collector", "Błąd odświeżania optymalnych par", exc, db=db)
+            return False
+
+    def _get_open_position_symbols(self, db: Session) -> List[str]:
+        """Zwróć symbole aktywnych pozycji, które muszą pozostać monitorowane."""
+        try:
+            cfg = get_runtime_config(db)
+            modes: List[str] = []
+            trading_mode = str(cfg.get("trading_mode") or "demo").strip().lower()
+            if trading_mode in {"demo", "live"}:
+                modes.append(trading_mode)
+            if bool(cfg.get("allow_live_trading", False)) and "live" not in modes:
+                modes.append("live")
+            if bool(cfg.get("demo_trading_enabled", False)) and "demo" not in modes:
+                modes.append("demo")
+            if not modes:
+                modes = ["demo"]
+
+            rows = (
+                db.query(Position.symbol)
+                .filter(
+                    Position.mode.in_(modes),
+                    Position.quantity > 0,
+                    or_(
+                        Position.exit_reason_code.is_(None),
+                        Position.exit_reason_code == "pending_confirmed_execution",
+                    ),
+                )
+                .all()
+            )
+            symbols: List[str] = []
+            for row in rows:
+                sym = str(getattr(row, "symbol", "") or "").strip().upper()
+                if sym and sym not in symbols:
+                    symbols.append(sym)
+            return symbols
+        except Exception as exc:
+            log_exception(
+                "collector",
+                "Błąd odczytu otwartych pozycji do watchlisty",
+                exc,
+                db=db,
+            )
+            return []
+
+    def _ensure_open_positions_in_watchlist(self, db: Session, ws_enabled: bool) -> bool:
+        """Dopnij symbole otwartych pozycji do watchlisty i utrzymaj je po restartach."""
+        open_symbols = self._get_open_position_symbols(db)
+        if not open_symbols:
+            return False
+
+        current = list(self.watchlist or [])
+        merged = list(dict.fromkeys(current + open_symbols))
+        if merged == current:
+            return False
+
+        old = ", ".join(current) if current else "(pusto)"
+        new = ", ".join(merged)
+        logger.info("🛡️ Ochrona open positions: %s -> %s", old, new)
+        log_to_db(
+            "INFO",
+            "collector",
+            f"open_positions_watchlist_guard old={old} new={new}",
+            db=db,
+        )
+        self.watchlist = merged
+
+        # Jeśli watchlista jest sterowana override'em, utrwal również open symbols.
+        try:
+            wl_override = watchlist_override(db)
+            if wl_override is not None:
+                upsert_overrides(db, {"watchlist": ",".join(merged)})
+        except Exception:
+            pass
+
+        if self.ws_running:
+            self.stop_ws()
+            if ws_enabled and self.watchlist:
+                self.start_ws()
         return True
 
     def reset_demo_state(self):
@@ -5058,6 +5452,37 @@ class DataCollector:
             return None
 
         entries_created = 0  # Licznik nowych pending orders w tej pętli (dla LIVE pipeline)
+        live_market_health = None
+        if _current_mode == "live":
+            try:
+                live_market_health = self._evaluate_live_market_health(
+                    db,
+                    candidate_symbols=candidate_symbols,
+                )
+                try:
+                    from backend.trading.trade_config import get_trade_config as _gtc
+
+                    live_market_health["market_health_alert_cooldown_sec"] = int(
+                        _gtc(db).market_health_alert_cooldown_sec
+                    )
+                except Exception:
+                    live_market_health["market_health_alert_cooldown_sec"] = 600
+                self._maybe_alert_market_health(live_market_health)
+            except Exception as exc:
+                log_exception(
+                    "screen_candidates",
+                    "Błąd evaluate_live_market_health — fallback NORMAL",
+                    exc,
+                    db=db,
+                )
+                live_market_health = {
+                    "mode": "NORMAL",
+                    "allow_new_entries": True,
+                    "issues": ["market_health_eval_failed"],
+                    "updated_at": utc_now_naive().isoformat(),
+                }
+            runtime_ctx["live_market_health"] = dict(live_market_health)
+
         for symbol in candidate_symbols:
             if not symbol:
                 continue
@@ -5123,6 +5548,8 @@ class DataCollector:
             # ── LIVE: nowy pipeline (signal_engine + risk_engine) — T-114 ────────
             # DEMO: stary pipeline (kod poniżej). Dla LIVE pomijamy cały stary screening.
             if _current_mode == "live":
+                if isinstance(live_market_health, dict):
+                    tc["live_market_health"] = live_market_health
                 entries_created += self._live_entry_new_pipeline(
                     db, symbol, tc, runtime_ctx
                 )
@@ -6638,6 +7065,12 @@ class DataCollector:
 
             ws_enabled = effective_bool(db, "ws_enabled", "WS_ENABLED", True)
 
+            if not self._usdc_policy_bootstrapped:
+                try:
+                    self._enforce_usdc_top10_policy(db)
+                finally:
+                    self._usdc_policy_bootstrapped = True
+
             # Control Plane: watchlist override z DB (jeśli ustawiona) ma pierwszeństwo.
             wl_override = None
             try:
@@ -6666,6 +7099,13 @@ class DataCollector:
             else:
                 # Aktualizuj watchlist z portfela tylko co N sekund (lub częściej jeśli pusta).
                 self._refresh_watchlist_if_due(db, force=(not self.watchlist))
+
+            # 3x dziennie: pełny skan USDC i rebalans do TOP-N symboli.
+            self._refresh_optimal_pairs_if_due(db, force=(not self.watchlist))
+
+            # Twarda gwarancja: aktywne pozycje zawsze pozostają w monitoringu.
+            self._ensure_open_positions_in_watchlist(db, ws_enabled=ws_enabled)
+
             if not self.watchlist:
                 self._log_no_watchlist(db)
                 return

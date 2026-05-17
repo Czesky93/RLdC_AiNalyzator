@@ -162,8 +162,11 @@ async def lifespan(app: FastAPI):
         except Exception as exc:
             logger.warning("Status cache warmup error: %s", exc)
 
-    status_cache_thread = threading.Thread(target=_status_cache_warmup, daemon=True)
-    status_cache_thread.start()
+    # Ten warmup potrafi uruchamiać kosztowne ścieżki API w pętli i podbijać obciążenie.
+    # Domyślnie wyłączony; można włączyć przez ENABLE_STATUS_CACHE_WARMUP=true.
+    if os.getenv("ENABLE_STATUS_CACHE_WARMUP", "false").lower() == "true":
+        status_cache_thread = threading.Thread(target=_status_cache_warmup, daemon=True)
+        status_cache_thread.start()
 
     print("✅ API gotowe do użycia")
     yield
@@ -333,6 +336,7 @@ async def live_state_for_overlay():
     from backend.database import SessionLocal
     from backend.runtime_settings import build_runtime_state
     from backend.database import Position, PendingOrder
+    from backend.routers.positions import _get_live_spot_positions
     import json as _json
 
     db = SessionLocal()
@@ -340,27 +344,53 @@ async def live_state_for_overlay():
         cfg = build_runtime_state(db)
         trading_mode = str(cfg.get("trading_mode") or "demo").lower()
 
-        # Pozycje otwarte
-        positions_q = (
-            db.query(Position)
-            .filter(Position.mode == trading_mode, Position.quantity > 0)
-            .all()
-        )
         positions_list = []
-        for p in positions_q:
-            entry = float(p.entry_price or 0)
-            current = float(p.current_price or p.entry_price or 0)
-            pnl_pct = ((current - entry) / entry * 100) if entry > 0 else 0
-            positions_list.append({
-                "symbol": p.symbol,
-                "qty": float(p.quantity or 0),
-                "entry_price": entry,
-                "current_price": current,
-                "pnl_pct": round(pnl_pct, 3),
-                "planned_tp": float(p.planned_tp or 0),
-                "planned_sl": float(p.planned_sl or 0),
-                "state": p.exit_reason_code or "IN_POSITION",
-            })
+        if trading_mode == "live":
+            try:
+                spot_positions = _get_live_spot_positions(db)
+            except Exception:
+                spot_positions = []
+
+            for p in spot_positions:
+                positions_list.append(
+                    {
+                        "symbol": p.get("symbol"),
+                        "qty": float(p.get("quantity") or 0),
+                        "entry_price": float(p.get("entry_price") or 0),
+                        "current_price": float(
+                            p.get("current_price") or p.get("entry_price") or 0
+                        ),
+                        "pnl_pct": round(float(p.get("pnl_percent") or 0), 3),
+                        "planned_tp": 0.0,
+                        "planned_sl": 0.0,
+                        "state": str(p.get("classification") or p.get("source") or "IN_POSITION"),
+                        "source": p.get("source") or "binance_spot",
+                        "has_entry_price": p.get("entry_price") is not None,
+                    }
+                )
+
+        if not positions_list:
+            positions_q = (
+                db.query(Position)
+                .filter(Position.mode == trading_mode, Position.quantity > 0)
+                .all()
+            )
+            for p in positions_q:
+                entry = float(p.entry_price or 0)
+                current = float(p.current_price or p.entry_price or 0)
+                pnl_pct = ((current - entry) / entry * 100) if entry > 0 else 0
+                positions_list.append({
+                    "symbol": p.symbol,
+                    "qty": float(p.quantity or 0),
+                    "entry_price": entry,
+                    "current_price": current,
+                    "pnl_pct": round(pnl_pct, 3),
+                    "planned_tp": float(p.planned_tp or 0),
+                    "planned_sl": float(p.planned_sl or 0),
+                    "state": p.exit_reason_code or "IN_POSITION",
+                    "source": "local_position",
+                    "has_entry_price": entry > 0,
+                })
 
         # Pending orders (oczekujące)
         pending_q = (

@@ -1,5 +1,117 @@
 # PROJECT_AUDIT_MASTER.md — RLdC Trading BOT
 
+## AKTUALIZACJA: SESJA T-141 OVERLAY 8099 RECOVERY + CHART SYMBOL FALLBACK (17-05-2026)
+
+### STATUS
+- Potwierdzony objaw operatorski: overlay 8099 okresowo wpadał w `ERR_EMPTY_RESPONSE/ERR_CONNECTION_REFUSED`, a przy działającym API pokazywał puste wykresy dla par EUR bez świec (`AAVEEUR`, `BTCEUR`).
+- Root cause danych wykresu: adapter próbował trzymać się symbolu źródłowego, mimo że świeczki były dostępne tylko dla odpowiadających par USDC.
+
+### ZMIANY W KODZIE / RUNTIME
+1. `live_overlay/serve_live_overlay.py`
+	- dodano resolver symbolu wykresowego (`_resolve_chart_symbol`) z cache TTL i walidacją klines w SQLite;
+	- `enrich_row` ustawia `chart_symbol` na parę z realnie dostępną historią świec (np. `AAVEEUR -> AAVEUSDC`), dzięki czemu wykres renderuje się zamiast pustego stanu.
+2. `live_overlay/index.html`
+	- usunięto lewy pasek opcji (pionowe menu LIVE/Ulub./Historia/Analizy/Ustaw./Stream);
+	- poprawiono opisy statusu wykresu i przeniesiono zegar do topbara.
+3. Runtime
+	- po kolizji procesów wykonano przywrócenie `rldc-overlay.service` (`reset-failed` + restart), port 8099 wrócił do pracy.
+
+### WERYFIKACJA
+- `GET http://127.0.0.1:8099/overlay/api/live-state` -> `ok=true`.
+- Dla `AAVEEUR` adapter zwraca teraz `chart_symbol=AAVEUSDC` oraz `history_len=120`.
+- Snapshot przeglądarki 8099: brak lewego paska, status `POŁĄCZONO`, focus pokazuje symbol wykresowy (np. `BTC/USDC`).
+
+### WNIOSEK
+- Overlay 8099 został przywrócony operacyjnie i przestał udawać brak danych wykresowych dla par EUR; UI jest prostszy i mniej podatny na mylące stany.
+
+## AKTUALIZACJA: SESJA T-139 OBSERVE-ONLY DIAGNOSTYKA + SPREAD/SLIPPAGE + RISK SIZING (17-05-2026)
+
+### STATUS
+- Wejścia agresywne były już częściowo przebudowane (`quoteVolume`, depth), ale brakowało jawnego kontraktu limitów spread/slippage oraz kompletnej diagnostyki `observe_only` przy odrzuceniu market quality.
+- `risk_engine` podbijał `qty` do `min_buy_notional`, co mogło naruszać zasadę „size from stop-loss risk budget”.
+
+### ZMIANY W KODZIE / DOKUMENTACH
+1. `backend/trading/trade_config.py`
+	- dodano jawne pola `max_spread_bps` i `max_slippage_bps` (DB/.env/default).
+2. `backend/trading/signal_engine.py`
+	- spread gate oparty o `max_spread_bps` (fallback do `%`);
+	- `observe_only` zawiera pełny zestaw metryk (`quote_volume_24h`, `effective_min_quote_volume_trade`, `spread_bps`, `score`, `min_score`, `confidence`, `min_confidence`, depth).
+	- blokada market-quality ma priorytet po policzeniu score (ANALYZE+SCORE bez wejścia).
+3. `backend/trading/risk_engine.py`
+	- usunięto podbijanie qty do `min_buy_notional`; zbyt mały sizing kończy się `qty_too_small`.
+4. `tests/test_trading_signal_engine.py`, `tests/test_trading_risk_engine.py`
+	- dodano regresje dla `max_slippage_bps`, kompletu metryk `observe_only` i braku podbijania qty.
+
+### WERYFIKACJA
+- `pytest tests/test_trading_signal_engine.py tests/test_trading_risk_engine.py -q` -> **68 passed**.
+- `pytest tests/test_smoke.py -q` -> niestabilne lokalnie (intermitentne: `test_market_summary`, `test_acceptance_live_positions_analysis_restores_entry_baseline`), pojedynczy test akceptacyjny przechodzi osobno.
+
+### WNIOSEK
+- Pipeline jest bliżej modelu: `COLLECT -> ANALYZE -> SCORE -> ENTRY`, gdzie niska płynność daje `observe_only` z pełną diagnozą zamiast ślepego odrzucenia bez kontekstu.
+- Sizing respektuje risk budget liczony od odległości stop-loss i nie zwiększa pozycji ponad limit ryzyka.
+
+## AKTUALIZACJA: SESJA T-133 LIVE SOURCE-OF-TRUTH + FRONTEND REQUEST-STORM GUARD (17-05-2026)
+
+### STATUS
+- Potwierdzony rozjazd źródła prawdy: `/api/rldc/safe/live-state` budował pozycje z lokalnej tabeli `Position`, co nie gwarantowało pełnej zgodności z aktualnym stanem Binance spot i manualnymi holdingami.
+- Potwierdzony drugi bloker: frontend 3000 odpalał równolegle wiele cyklicznych `useFetch` i wzmacniał przeciążenie backendu (timeouty 12s na wielu endpointach).
+- Po wdrożeniu poprawek i walidacji: `safe/live-state` odpowiada szybko (`~1.16s`, HTTP 200), ale `/api/positions?mode=live`, `/api/positions/analysis?mode=live` i `/overlay/api/live-state` nadal timeoutują przy 20s.
+
+### ZMIANY W KODZIE / DOKUMENTACH
+1. `backend/app.py`
+	- `/api/rldc/safe/live-state` używa teraz kanonicznego źródła LIVE: `backend.routers.positions._get_live_spot_positions()`.
+	- Dodano bezpieczny fallback do lokalnej tabeli `Position` tylko gdy snapshot spot nie jest dostępny.
+	- Payload pozycji zawiera metadane źródła (`source`, `has_entry_price`, `state`), co poprawia prawdomówność overlay.
+2. `web_portal/src/components/MainContent.tsx`
+	- Dodano globalny limit równoległych fetchy (`MAX_CONCURRENT_FETCHES=4`) i kolejkę requestów.
+	- Dodano adaptacyjny backoff harmonogramu odświeżania po błędach (`computeRefreshDelay`), aby ograniczyć lawinę timeoutów.
+	- Zachowano dotychczasowy wygląd UI (bez zmian layoutu/styli).
+3. `backend/routers/positions.py`
+	- Przywrócono kompatybilność testową `_analyze_spot_position(..., settings=None)` z fallbackiem do pustej konfiguracji.
+
+### WERYFIKACJA
+- Testy: `DISABLE_COLLECTOR=true .venv/bin/pytest tests/test_smoke.py -q` -> **227 passed, 0 failed**.
+- Runtime pomiar (curl `--max-time 20`):
+	- `/api/rldc/safe/live-state` -> HTTP 200, `TIME=1.164977`
+	- `/api/positions?mode=live` -> timeout (`CURL_RC=28`)
+	- `/api/positions/analysis?mode=live` -> timeout (`CURL_RC=28`)
+	- `/overlay/api/live-state` -> timeout (`CURL_RC=28`)
+
+### WNIOSEK
+- Naprawiono krytyczny kontrakt źródła prawdy dla snapshotu live (manual/live holdings nie są już zależne od stale `Position`).
+- Główny bloker produkcyjny pozostaje wydajnościowy: ciężkie endpointy pozycyjne i overlay nadal przekraczają próg operacyjny.
+- Następny krok musi iść w kierunku twardego cache/snapshot dla `/api/positions*` i odciążenia ścieżki request-response.
+
+## AKTUALIZACJA: SESJA T-132 MARKET HEALTH GATE + TELEMETRIA (17-05-2026)
+
+### STATUS
+- Krytyczny brak architektoniczny: LIVE miał gate sygnał/ryzyko/koszt na poziomie symbolu, ale nie miał twardej bramki globalnego zdrowia runtime (stale market data, websocket down, skok błędów execution).
+- UI/Telegram/overlay nie miały wspólnego kontraktu dla stanów `NO_TRADE` i `REDUCE_ONLY`, co utrudniało operacyjne GO/NO-GO.
+
+### ZMIANY W KODZIE / DOKUMENTACH
+1. `backend/collector.py`
+	- dodano `_evaluate_live_market_health()` i `_maybe_alert_market_health()`;
+	- `_live_entry_new_pipeline()` blokuje nowe BUY dla `NO_TRADE/REDUCE_ONLY` i zapisuje reason_code (`market_health_no_trade`, `market_health_reduce_only`);
+	- collector publikuje snapshot market health do runtime (`_last_market_health_state`).
+2. `backend/trading/trade_config.py`
+	- dodano progi market health (age danych, okno błędów, progi redukcji/no-trade, cooldown alertów);
+	- podniesiono `min_net_edge_pct` do `0.60`;
+	- dodano zgodność z runtime control-plane: alias `min_symbol_net_expectancy -> min_net_edge_pct`.
+3. `backend/routers/account.py`
+	- `/runtime-activity` i `/trading-status` zwracają `market_health`, `allow_new_entries`, `reduce_only_mode`, `no_trade_mode`.
+4. `telegram_bot/bot.py`
+	- `/status` pokazuje bieżący `Market health` i aktywne issue.
+5. `live_overlay/serve_live_overlay.py`
+	- adapter wystawia `summary.market_health_mode` i blok `trading_guard`.
+6. `tests/test_trading_collector_live_path.py`
+	- regresje dla skipów market health oraz helperów TradeConfig.
+
+### WERYFIKACJA
+- Testy jednostkowe dla nowej logiki collector/trade_config przeszły lokalnie po wdrożeniu.
+
+### WNIOSEK
+- Wejścia LIVE są teraz blokowane deterministycznie przy degradacji runtime, a prawdziwy stan gate jest widoczny spójnie w backend API, overlay i Telegramie.
+
 ## AKTUALIZACJA: SESJA T-131 RUNTIME UI + OVERLAY + QUICKTUNNEL FIX (17-05-2026)
 
 ### STATUS

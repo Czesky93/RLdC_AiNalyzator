@@ -73,13 +73,24 @@ class TradeConfig:
     taker_fee_pct: float = 0.100            # %
     slippage_bps: float = 5.0               # basis points
     spread_buffer_bps: float = 3.0          # basis points
+    max_spread_bps: float = 60.0            # twardy limit spreadu (bps)
+    max_slippage_bps: float = 50.0          # guard poślizgu (bps)
     min_spread_pct_to_allow_entry: float = 0.0   # jeśli 0 → nie blokuj po spread
     max_allowed_spread_pct: float = 0.30    # spread > 0.3% = zbyt szeroki, blokuj
 
     # ── Min edge / expected value gate ────────────────────────────────
-    min_net_edge_pct: float = 0.30          # min expected move netto po kosztach (%)
+    min_net_edge_pct: float = 0.60          # min expected move netto po kosztach (%)
     min_expected_rr: float = 1.8            # min risk:reward ratio
     min_edge_multiplier: float = 2.5        # koszt × multiplier = minimalny edge
+
+    # ── Market health gate (LIVE) ─────────────────────────────────────
+    market_data_max_age_sec: int = 240
+    require_ws_for_live: bool = True
+    market_health_error_window_min: int = 15
+    market_health_reduce_only_error_count: int = 6
+    market_health_no_trade_error_count: int = 15
+    market_health_reduce_only_on_stale_data: bool = True
+    market_health_alert_cooldown_sec: int = 600
 
     # ── Position sizing ────────────────────────────────────────────────
     risk_per_trade_pct: float = 0.5         # % equity na trade
@@ -107,6 +118,10 @@ class TradeConfig:
     require_volume_confirmation: bool = True
     volume_ratio_min: float = 1.2           # wolumen / średni_wolumen
     min_liquidity_score: float = 0.40       # 0.0–1.0
+    min_quote_volume_trade: float = 75000.0 # minimalny 24h quoteVolume do realnego trade
+    use_dynamic_volume_threshold: bool = True
+    min_depth_to_order_ratio: float = 8.0   # minimalna głębokość ask vs min buy notional
+    orderbook_depth_bps: float = 20.0       # ile bps wokół mid liczyć depth
     require_htf_trend_agreement: bool = True  # 1h musi potwierdzać 4h
     htf_timeframe: str = "4h"
     entry_timeframe: str = "1h"
@@ -168,8 +183,17 @@ def get_trade_config(db: Optional[Session] = None) -> TradeConfig:
     Wszystkie klucze DB są prefiksowane 'trade_' (np. 'trade_max_open_positions').
     """
 
+    _COMPAT_DB_ALIASES = {
+        # Runtime control-plane: min_symbol_net_expectancy (% netto po kosztach)
+        "min_net_edge_pct": "min_symbol_net_expectancy",
+    }
+
     def _get(key: str, env_key: str, default: Any, cast=None) -> Any:
         db_v = _db_get(db, f"trade_{key}")
+        if db_v is None:
+            alias = _COMPAT_DB_ALIASES.get(key)
+            if alias:
+                db_v = _db_get(db, alias)
         env_v = os.getenv(env_key)
         val = _merge(db_v, env_v, default)
         if cast and val is not None:
@@ -198,10 +222,19 @@ def get_trade_config(db: Optional[Session] = None) -> TradeConfig:
         taker_fee_pct=_get("taker_fee_pct", "TAKER_FEE_PCT", 0.100, float),
         slippage_bps=_get("slippage_bps", "SLIPPAGE_BPS", 5.0, float),
         spread_buffer_bps=_get("spread_buffer_bps", "SPREAD_BUFFER_BPS", 3.0, float),
+        max_spread_bps=_get("max_spread_bps", "MAX_SPREAD_BPS", 60.0, float),
+        max_slippage_bps=_get("max_slippage_bps", "MAX_SLIPPAGE_BPS", 50.0, float),
         max_allowed_spread_pct=_get("max_allowed_spread_pct", "MAX_ALLOWED_SPREAD_PCT", 0.30, float),
-        min_net_edge_pct=_get("min_net_edge_pct", "MIN_NET_EDGE_PCT", 0.30, float),
+        min_net_edge_pct=_get("min_net_edge_pct", "MIN_NET_EDGE_PCT", 0.60, float),
         min_expected_rr=_get("min_expected_rr", "MIN_EXPECTED_RR", 1.8, float),
         min_edge_multiplier=_get("min_edge_multiplier", "MIN_EDGE_MULTIPLIER", 2.5, float),
+        market_data_max_age_sec=_get("market_data_max_age_sec", "MARKET_DATA_MAX_AGE_SEC", 240, int),
+        require_ws_for_live=_get("require_ws_for_live", "REQUIRE_WS_FOR_LIVE", True, lambda v: str(v).lower() not in ("0", "false", "no", "off")),
+        market_health_error_window_min=_get("market_health_error_window_min", "MARKET_HEALTH_ERROR_WINDOW_MIN", 15, int),
+        market_health_reduce_only_error_count=_get("market_health_reduce_only_error_count", "MARKET_HEALTH_REDUCE_ONLY_ERROR_COUNT", 6, int),
+        market_health_no_trade_error_count=_get("market_health_no_trade_error_count", "MARKET_HEALTH_NO_TRADE_ERROR_COUNT", 15, int),
+        market_health_reduce_only_on_stale_data=_get("market_health_reduce_only_on_stale_data", "MARKET_HEALTH_REDUCE_ONLY_ON_STALE_DATA", True, lambda v: str(v).lower() not in ("0", "false", "no", "off")),
+        market_health_alert_cooldown_sec=_get("market_health_alert_cooldown_sec", "MARKET_HEALTH_ALERT_COOLDOWN_SEC", 600, int),
 
         # Position sizing
         risk_per_trade_pct=_get("risk_per_trade_pct", "RISK_PER_TRADE_PCT", 0.5, float),
@@ -219,6 +252,7 @@ def get_trade_config(db: Optional[Session] = None) -> TradeConfig:
         max_weekly_drawdown_pct=_get("max_weekly_drawdown_pct", "MAX_WEEKLY_DRAWDOWN_PCT", 7.0, float),
         max_losing_streak=_get("max_losing_streak", "MAX_LOSING_STREAK", 3, int),
         cooldown_after_loss_streak_min=_get("cooldown_after_loss_streak_min", "COOLDOWN_AFTER_LOSS_STREAK_MIN", 60, int),
+        cooldown_after_single_loss_min=_get("cooldown_after_single_loss_min", "COOLDOWN_AFTER_SINGLE_LOSS_MIN", 0, int),
         max_total_exposure_pct=_get("max_total_exposure_pct", "MAX_TOTAL_EXPOSURE_PCT", 80.0, float),
         max_exposure_per_symbol_pct=_get("max_exposure_per_symbol_pct", "MAX_EXPOSURE_PER_SYMBOL_PCT", 10.0, float),
 
@@ -228,6 +262,10 @@ def get_trade_config(db: Optional[Session] = None) -> TradeConfig:
         require_volume_confirmation=_get("require_volume_confirmation", "REQUIRE_VOLUME_CONFIRMATION", True, lambda v: str(v).lower() not in ("0","false","no","off")),
         volume_ratio_min=_get("volume_ratio_min", "VOLUME_RATIO_MIN", 1.2, float),
         min_liquidity_score=_get("min_liquidity_score", "MIN_LIQUIDITY_SCORE", 0.40, float),
+        min_quote_volume_trade=_get("min_quote_volume_trade", "MIN_QUOTE_VOLUME_TRADE", 75000.0, float),
+        use_dynamic_volume_threshold=_get("use_dynamic_volume_threshold", "USE_DYNAMIC_VOLUME_THRESHOLD", True, lambda v: str(v).lower() not in ("0","false","no","off")),
+        min_depth_to_order_ratio=_get("min_depth_to_order_ratio", "MIN_DEPTH_TO_ORDER_RATIO", 8.0, float),
+        orderbook_depth_bps=_get("orderbook_depth_bps", "ORDERBOOK_DEPTH_BPS", 20.0, float),
         require_htf_trend_agreement=_get("require_htf_trend_agreement", "REQUIRE_HTF_TREND_AGREEMENT", True, lambda v: str(v).lower() not in ("0","false","no","off")),
         htf_timeframe=_get("htf_timeframe", "HTF_TIMEFRAME", "4h", str),
         entry_timeframe=_get("entry_timeframe", "ENTRY_TIMEFRAME", "1h", str),

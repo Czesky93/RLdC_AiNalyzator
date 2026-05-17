@@ -1,5 +1,98 @@
 # CHANGELOG_LIVE
 
+## 2026-05-17 — T-141: overlay 8099 recovery + chart symbol fallback + uproszczenie UI
+
+### Root cause
+- Overlay 8099 pokazywał puste wykresy dla par EUR, bo backend nie miał świec `kline` dla `*EUR` (np. `AAVEEUR`), mimo dostępnych świec dla odpowiadających par USDC.
+- W praktyce runtime miał dodatkowo niestabilność procesu 8099 (`ERR_EMPTY_RESPONSE`/`ERR_CONNECTION_REFUSED`) po kolizji starego procesu i restartu usługi.
+
+### Modyfikacje
+- `live_overlay/serve_live_overlay.py`:
+   - dodano resolver symbolu wykresowego na podstawie realnej dostępności klines w SQLite (`_resolve_chart_symbol`),
+   - adapter potrafi przełączyć wykres z pary źródłowej EUR na dostępny symbol bazowy (np. `AAVEEUR -> AAVEUSDC`),
+   - dodano cache resolvera, aby nie przeciążać zapytań do SQLite.
+- `live_overlay/index.html`:
+   - usunięto lewy pasek opcji (nawigacja pionowa),
+   - uproszczono layout i poprawiono opisy komunikatów wykresu/braku świec,
+   - zegar przeniesiono do górnego paska.
+- Operacyjnie: `rldc-overlay.service` po awarii został przywrócony (`reset-failed` + restart).
+
+### Wynik
+- `GET /overlay/api/live-state` zwraca stabilnie `ok=true`.
+- Pary EUR dostają dane wykresowe przez `chart_symbol` z dostępnych klines (`history_len > 0`).
+- Overlay 8099 działa bez lewego panelu i pokazuje czytelny status połączenia oraz symbol wykresowy.
+
+## 2026-05-17 — T-139: observe-only diagnostics hardening + spread/slippage caps + strict risk sizing
+
+### Root cause
+- Część diagnostyki wejść nadal była niejednoznaczna: przy słabej płynności brakowało pełnego kontekstu `score/min_score/spread_bps`, a limity spread/slippage opierały się częściowo o niejawny fallback.
+- `risk_engine` sztucznie podbijał `qty` do `min_buy_notional`, co mogło łamać zasadę sizingu od ryzyka i odległości stop-loss.
+
+### Modyfikacje
+- `backend/trading/trade_config.py`: dodano jawne pola konfiguracji `max_spread_bps` i `max_slippage_bps` (DB/.env/default).
+- `backend/trading/signal_engine.py`:
+  - spread gate używa teraz bezpośrednio `max_spread_bps` (z fallbackiem do `max_allowed_spread_pct`),
+  - odrzucenia płynnościowe `observe_only` zawierają pełne metryki diagnostyczne,
+  - blokady market-quality mają priorytet po obliczeniu score (symbol jest analizowany i oceniony, ale nie jest tradowalny).
+- `backend/trading/risk_engine.py`: usunięto podbijanie `qty` do `min_buy_notional`; dla zbyt małego sizingu zwracane jest `qty_too_small`.
+- Testy:
+  - `tests/test_trading_signal_engine.py`: dodano regresję `max_slippage_bps` i komplet metryk `observe_only`.
+  - `tests/test_trading_risk_engine.py`: dodano regresję braku podbijania qty ponad limit ryzyka.
+
+### Wynik
+- `pytest tests/test_trading_signal_engine.py tests/test_trading_risk_engine.py -q` -> **68 passed**.
+- `pytest tests/test_smoke.py -q` pozostaje niestabilny (intermitentne fail w `test_market_summary` i `test_acceptance_live_positions_analysis_restores_entry_baseline`), niepowiązany bezpośrednio ze zmienionymi modułami.
+
+## 2026-05-17 — T-138: quoteVolume observe-only gate + orderbook depth
+
+### Root cause
+- `signal_engine` nadal traktował niski wolumen zbyt wcześnie jako twardy skip, a logika nie odróżniała dobrze `quoteVolume` od prostego `volume` w diagnostyce decyzji.
+- Brakowało jawnego modułu depth-check na order booku dla wejść BUY, więc sam spread i RSI nie dawały pełnej oceny kosztu wejścia.
+
+### Modyfikacje
+- `backend/trading/signal_engine.py`: dodano gate na `quoteVolume` z dynamicznym progiem trade, gate na `orderbook_depth_too_low` oraz finalne `observe_only` details zamiast pierwszego, krótkiego skipa.
+- `backend/trading/trade_config.py`: dodano progi `min_quote_volume_trade`, `use_dynamic_volume_threshold`, `min_depth_to_order_ratio`, `orderbook_depth_bps` i `max_slippage_bps`.
+- `tests/test_trading_signal_engine.py`: regresje dla niskiego `quoteVolume`, shallow order booka i poprawnego użycia orderbooka w mockach.
+
+### Wynik
+- Sygnał daje teraz pełniejszą diagnostykę market quality: `quote_volume_24h`, `effective_min_quote_volume_trade`, `orderbook_quote_depth`, `depth_to_order_ratio`, `spread_bps`.
+- Walidacja: `pytest tests/test_trading_signal_engine.py -q` -> **43 passed**.
+
+## 2026-05-17 — T-133: live-state truth source + frontend fetch throttling
+
+### Root cause
+- `/api/rldc/safe/live-state` budowal pozycje na lokalnym `Position`, co nie gwarantowalo spójności z aktualnym Binance spot (szczególnie dla ręcznych holdingów).
+- `web_portal` odpalał wiele cyklicznych requestów równolegle i przy degradacji backendu sam wzmacniał timeouty.
+
+### Modyfikacje
+- `backend/app.py`: `/api/rldc/safe/live-state` korzysta teraz z kanonicznego `_get_live_spot_positions()`; fallback do `Position` zostaje tylko awaryjnie.
+- `backend/app.py`: payload pozycji rozszerzono o `source`, `has_entry_price` i bardziej prawdziwe `state`.
+- `web_portal/src/components/MainContent.tsx`: dodano kolejkę fetch (`MAX_CONCURRENT_FETCHES=4`) i adaptacyjny backoff harmonogramu odświeżania po błędach.
+- `backend/routers/positions.py`: `_analyze_spot_position` ma kompatybilny parametr `settings=None` (bez regresji testowych).
+
+### Wynik
+- Testy: `DISABLE_COLLECTOR=true .venv/bin/pytest tests/test_smoke.py -q` -> **227 passed**.
+- Runtime: `/api/rldc/safe/live-state` odpowiada ~1.16s (HTTP 200), ale `/api/positions`, `/api/positions/analysis` i `/overlay/api/live-state` nadal timeoutują przy 20s.
+- Wniosek: naprawiono źródło prawdy, ale krytyczny dług wydajnościowy endpointów pozycyjnych pozostaje otwarty.
+
+## 2026-05-17 — T-132: market health gate LIVE + API/overlay/Telegram telemetry
+
+### Root cause
+- LIVE pipeline umiał oceniać edge/koszt/ryzyko per symbol, ale nie miał twardej bramki globalnego zdrowia runtime (stare dane, rozłączony WS, skok błędów execution).
+- Operator nie widział jednolitego stanu `NO_TRADE`/`REDUCE_ONLY` w runtime-activity, trading-status, overlay i Telegramie.
+
+### Modyfikacje
+- `backend/collector.py`: dodano `_evaluate_live_market_health()` i `_maybe_alert_market_health()`; LIVE BUY ma twardy skip z `reason_code` `market_health_no_trade` albo `market_health_reduce_only`.
+- `backend/trading/trade_config.py`: dodano progi market health oraz fallback aliasu `min_symbol_net_expectancy -> min_net_edge_pct`; default `min_net_edge_pct` podniesiony do `0.60`.
+- `backend/routers/account.py`: `runtime-activity` i `trading-status` zwracają `market_health` + flagi `allow_new_entries`, `no_trade_mode`, `reduce_only_mode`.
+- `telegram_bot/bot.py`: `/status` pokazuje `Market health` i listę issue.
+- `live_overlay/serve_live_overlay.py`: adapter wystawia `summary.market_health_mode` i blok `trading_guard`.
+- `tests/test_trading_collector_live_path.py`: regresje dla market health skip i helperów TradeConfig.
+
+### Wynik
+- Bot nie otwiera nowych pozycji LIVE podczas degradacji runtime i loguje prawdziwy powód blokady.
+- Web/API/overlay/Telegram pokazują ten sam stan gate bez rozjazdów operatorskich.
+
 ## 2026-05-17 — T-131: runtime UI truthfulness + overlay charts + separate overlay tunnel
 
 ### Root cause
