@@ -17,6 +17,10 @@ from sqlalchemy.orm import Session
 
 from backend.binance_client import BinanceClient
 from backend.database import MarketData, RuntimeSetting, utc_now_naive
+from backend.trading.grid_state_store import (
+    load_active_grid_plans,
+    save_active_grid_plans,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -138,18 +142,33 @@ def select_top_usdc_pairs(
         if not eligible:
             return []
 
-        # Ekstrahuj cechy do scoringu
+        # Ekstrahuj cechy do scoringu i zastosuj twarde floor/cap filtry.
         ranges_24h = []
         abs_changes = []
         atrs_pct = []
         volumes = []
         trades = []
         spreads_bps = []
+        filtered = []
 
         for p in eligible:
             high = float(p.get("high_price", 0) or 0)
             low = float(p.get("low_price", 0) or 0)
             last = float(p.get("last_price", 0) or 0)
+            vol = float(p.get("quote_volume", 0) or 0)
+            trade_cnt = int(p.get("count", 0) or 0)
+            spread = float(p.get("spread_bps", 0) or 0)
+
+            if last <= 0:
+                continue
+            if vol < float(min_quote_volume_abs):
+                continue
+            if trade_cnt < int(min_trade_count_abs):
+                continue
+            if spread > float(max_spread_bps_cap):
+                continue
+
+            filtered.append(p)
 
             if last > 0 and high > low:
                 r = (high - low) / low * 100
@@ -160,14 +179,16 @@ def select_top_usdc_pairs(
             pct_change = abs(float(p.get("price_change_percent", 0) or 0))
             abs_changes.append(pct_change)
 
-            vol = float(p.get("quote_volume", 0) or 0)
             volumes.append(vol)
 
-            trade_cnt = int(p.get("count", 0) or 0)
             trades.append(trade_cnt)
 
-            spread = float(p.get("spread_bps", 0) or 0)
             spreads_bps.append(spread)
+
+        eligible = filtered
+        if not eligible:
+            logger.warning("⚠️ select_top_usdc_pairs: brak par po filtrach płynności/spread")
+            return []
 
         # Z-score normalizacja
         z_ranges = zscore(ranges_24h)
@@ -314,7 +335,17 @@ def build_grid_plan(
             sell_levels.append(sell_level)
 
         # Inwestycja i hardstop
-        invest_pct = float(config.get("dynamic_grid_invest_pct", 0.1) or 0.1)
+        invest_pct = float(
+            config.get(
+                "dynamic_grid_base_invest_pct",
+                config.get("dynamic_grid_invest_pct", 0.1),
+            )
+            or 0.1
+        )
+        max_symbol_exposure = float(
+            config.get("dynamic_grid_max_symbol_exposure_pct", invest_pct) or invest_pct
+        )
+        invest_pct = clip(invest_pct, 0.0, max_symbol_exposure)
         invest_quote = equity * invest_pct
         estimated_notional_per_level = invest_quote / max(grid_count, 1)
 
@@ -408,23 +439,16 @@ def persist_grid_plan(
     symbol: str,
     plan: GridPlan,
 ) -> bool:
-    """Utrwal plan gridu w RuntimeSetting."""
+    """Utrwal plan gridu w zbiorczym active_grid_plans RuntimeSetting."""
     try:
-        key = f"grid_plan#{symbol}"
-        plan_json = json.dumps(plan.to_dict())
-
-        setting = db.query(RuntimeSetting).filter(RuntimeSetting.key == key).first()
-        if setting:
-            setting.value = plan_json
-            setting.updated_at = utc_now_naive()
-        else:
-            setting = RuntimeSetting(key=key, value=plan_json)
-            db.add(setting)
-
+        plans = load_active_grid_plans(db)
+        plans[str(symbol or plan.symbol).strip().upper()] = plan.to_dict()
+        save_active_grid_plans(db, plans)
         db.commit()
-        logger.info(f"✅ persist_grid_plan {symbol}: persisted to DB")
+        logger.info(f"✅ persist_grid_plan {symbol}: persisted to active_grid_plans")
         return True
     except Exception as e:
+        db.rollback()
         logger.error(f"❌ persist_grid_plan {symbol}: {e}")
         return False
 
@@ -432,7 +456,15 @@ def persist_grid_plan(
 def load_grid_plan(db: Session, symbol: str) -> Optional[GridPlan]:
     """Załaduj plan gridu z RuntimeSetting."""
     try:
-        key = f"grid_plan#{symbol}"
+        symbol_norm = str(symbol or "").strip().upper()
+        plans = load_active_grid_plans(db)
+        if symbol_norm in plans:
+            plan = GridPlan.from_dict(plans[symbol_norm])
+            logger.info(f"✅ load_grid_plan {symbol}: loaded from active_grid_plans")
+            return plan
+
+        # Backward-compatible read only for old local state. New writes use active_grid_plans.
+        key = f"grid_plan#{symbol_norm}"
         setting = db.query(RuntimeSetting).filter(RuntimeSetting.key == key).first()
         if not setting:
             return None

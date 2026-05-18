@@ -28,7 +28,10 @@ _TRUE = {"1", "true", "yes", "y", "on"}
 _FALSE = {"0", "false", "no", "n", "off"}
 _LIVE_GUARD_KEYS = {
     "trading_mode",
+    "trading_system",
     "allow_live_trading",
+    "dynamic_grid_enabled",
+    "dynamic_grid_reduce_only",
     "risk_per_trade",
     "max_open_positions",
     "max_daily_drawdown",
@@ -111,6 +114,15 @@ def _parse_mode(raw: Any) -> str:
     return value
 
 
+def _parse_trading_system(raw: Any) -> str:
+    value = str(raw or "legacy").strip().lower()
+    if value not in {"legacy", "dynamic_grid"}:
+        raise RuntimeSettingsError(
+            "trading_system must be one of: legacy, dynamic_grid"
+        )
+    return value
+
+
 def _parse_aggressiveness(raw: Any) -> str:
     value = str(raw or "balanced").strip().lower()
     if value not in {"safe", "balanced", "aggressive"}:
@@ -153,6 +165,10 @@ AGGRESSIVENESS_PROFILES = {
 def _parse_text(raw: Any) -> str:
     value = str(raw or "").strip()
     return value
+
+
+def _parse_upper_text(raw: Any) -> str:
+    return str(raw or "").strip().upper()
 
 
 def parse_watchlist(raw: Any) -> list[str]:
@@ -265,6 +281,14 @@ _SETTINGS: Dict[str, SettingSpec] = {
         default="demo",
         env_var="TRADING_MODE",
     ),
+    "trading_system": SettingSpec(
+        key="trading_system",
+        section="mode",
+        parser=_parse_trading_system,
+        serializer=_serialize_text,
+        default="legacy",
+        env_var="TRADING_SYSTEM",
+    ),
     "allow_live_trading": SettingSpec(
         key="allow_live_trading",
         section="mode",
@@ -322,6 +346,84 @@ _SETTINGS: Dict[str, SettingSpec] = {
         default=["default"],
         env_var="ENABLED_STRATEGIES",
         clearable=True,
+    ),
+    "dynamic_grid_enabled": SettingSpec(
+        key="dynamic_grid_enabled",
+        section="dynamic_grid",
+        parser=_parse_required_bool,
+        serializer=_serialize_bool,
+        default=False,
+        env_var="DYNAMIC_GRID_ENABLED",
+    ),
+    "dynamic_grid_quote_asset": SettingSpec(
+        key="dynamic_grid_quote_asset",
+        section="dynamic_grid",
+        parser=_parse_upper_text,
+        serializer=_serialize_text,
+        default="USDC",
+        env_var="DYNAMIC_GRID_QUOTE_ASSET",
+    ),
+    "dynamic_grid_top_n": SettingSpec(
+        key="dynamic_grid_top_n",
+        section="dynamic_grid",
+        parser=_parse_positive_int,
+        serializer=_serialize_int,
+        default=10,
+        env_var="DYNAMIC_GRID_TOP_N",
+        validators=(_validate_positive("dynamic_grid_top_n"),),
+    ),
+    "dynamic_grid_refresh_seconds": SettingSpec(
+        key="dynamic_grid_refresh_seconds",
+        section="dynamic_grid",
+        parser=_parse_positive_int,
+        serializer=_serialize_int,
+        default=300,
+        env_var="DYNAMIC_GRID_REFRESH_SECONDS",
+        validators=(_validate_positive("dynamic_grid_refresh_seconds"),),
+    ),
+    "dynamic_grid_max_spread_bps": SettingSpec(
+        key="dynamic_grid_max_spread_bps",
+        section="dynamic_grid",
+        parser=_parse_positive_float,
+        serializer=_serialize_float,
+        default=12.0,
+        env_var="DYNAMIC_GRID_MAX_SPREAD_BPS",
+        validators=(_validate_positive("dynamic_grid_max_spread_bps"),),
+    ),
+    "dynamic_grid_min_quote_volume": SettingSpec(
+        key="dynamic_grid_min_quote_volume",
+        section="dynamic_grid",
+        parser=_parse_positive_float,
+        serializer=_serialize_float,
+        default=3000000.0,
+        env_var="DYNAMIC_GRID_MIN_QUOTE_VOLUME",
+        validators=(_validate_positive("dynamic_grid_min_quote_volume"),),
+    ),
+    "dynamic_grid_base_invest_pct": SettingSpec(
+        key="dynamic_grid_base_invest_pct",
+        section="dynamic_grid",
+        parser=_parse_positive_float,
+        serializer=_serialize_float,
+        default=0.05,
+        env_var="DYNAMIC_GRID_BASE_INVEST_PCT",
+        validators=(_validate_probability("dynamic_grid_base_invest_pct"),),
+    ),
+    "dynamic_grid_max_symbol_exposure_pct": SettingSpec(
+        key="dynamic_grid_max_symbol_exposure_pct",
+        section="dynamic_grid",
+        parser=_parse_positive_float,
+        serializer=_serialize_float,
+        default=0.10,
+        env_var="DYNAMIC_GRID_MAX_SYMBOL_EXPOSURE_PCT",
+        validators=(_validate_probability("dynamic_grid_max_symbol_exposure_pct"),),
+    ),
+    "dynamic_grid_reduce_only": SettingSpec(
+        key="dynamic_grid_reduce_only",
+        section="dynamic_grid",
+        parser=_parse_required_bool,
+        serializer=_serialize_bool,
+        default=False,
+        env_var="DYNAMIC_GRID_REDUCE_ONLY",
     ),
     "max_open_positions": SettingSpec(
         key="max_open_positions",
@@ -1367,7 +1469,9 @@ def build_runtime_state(
         }
     return {
         "trading_mode": effective["trading_mode"],
+        "trading_system": effective["trading_system"],
         "allow_live_trading": effective["allow_live_trading"],
+        "dynamic_grid_enabled": effective["dynamic_grid_enabled"],
         "demo_trading_enabled": effective["demo_trading_enabled"],
         "execution_enabled": effective["execution_enabled"],
         "enable_auto_execute": effective["enable_auto_execute"],

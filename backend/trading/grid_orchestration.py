@@ -6,12 +6,12 @@ Zgadnie z grid.md: place BUY orders na buy_levels, manage SL/TP na sell_levels.
 from __future__ import annotations
 
 import logging
-from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
 from sqlalchemy.orm import Session
 
 from backend.database import Position, PendingOrder, utc_now_naive
+from backend.trading.pending_order_factory import create_pending_order_from_grid
 
 logger = logging.getLogger(__name__)
 
@@ -53,15 +53,22 @@ def orchestrate_grid_entries(
         if invest_per_level <= 0 or available_cash < invest_per_level:
             return (0, ["insufficient_cash"])
         
-        # Zbierz już istniejące pending i open orders dla tego symbolu na buy_levels
+        mode = str(config.get("mode") or grid_plan.get("mode") or "demo").lower()
+
+        # Zbierz już istniejące pending BUY dla tego symbolu na buy_levels
         existing_buy_orders = db.query(PendingOrder).filter(
             PendingOrder.symbol == symbol,
-            PendingOrder.order_type == "BUY",
-            PendingOrder.status.in_(["PENDING", "CONFIRMED"]),
+            PendingOrder.side == "BUY",
+            PendingOrder.mode == mode,
+            PendingOrder.status.in_(
+                ["PENDING_CREATED", "PENDING_CONFIRMED", "PENDING", "CONFIRMED"]
+            ),
         ).all()
         
-        # Ekstrahuj cenę entry z istniejących orderów (czy jest już order na tym level)
-        existing_buy_prices = {float(o.entry_price or 0) for o in existing_buy_orders if o.entry_price}
+        # Ekstrahuj cenę z istniejących orderów (czy jest już order na tym level)
+        existing_buy_prices = {
+            float(o.price or 0) for o in existing_buy_orders if o.price
+        }
         
         # Zbierz existing open positions
         existing_positions = [p for p in open_positions if p.symbol == symbol]
@@ -71,7 +78,8 @@ def orchestrate_grid_entries(
         
         for buy_level in sorted(buy_levels):
             # Skip jeśli już mamy order na tym poziomie
-            if any(abs(price - buy_level) < 0.01 for price in existing_buy_prices):
+            level_tolerance = max(abs(float(buy_level)) * 1e-6, 1e-8)
+            if any(abs(price - buy_level) <= level_tolerance for price in existing_buy_prices):
                 continue
             
             # Skip jeśli cena nie dotarła do buy_level (czekaj aż cena spadnie)
@@ -92,23 +100,28 @@ def orchestrate_grid_entries(
                 reasons.append(f"qty_too_small_for_level_{buy_level}")
                 continue
             
-            # Utwórz pending BUY order
+            # Utwórz pending BUY order zgodny z modelem DB.
             try:
-                from backend.database import PendingOrder as PO
-                
-                pending = PO(
+                pending = create_pending_order_from_grid(
                     symbol=symbol,
-                    order_type="BUY",
-                    entry_price=buy_level,
+                    side="BUY",
                     quantity=qty,
-                    status="PENDING",
-                    reason_code="grid_buy_level",
-                    reason_pl=f"Grid BUY level {buy_level}",
-                    created_at=utc_now_naive(),
+                    price=buy_level,
+                    mode=mode,
+                    reason=f"grid_buy_level level={buy_level:.8f}",
+                    plan_payload={
+                        "symbol": symbol,
+                        "level_price": buy_level,
+                        "current_price": current_price,
+                        "invest_per_level": invest_per_level,
+                        "grid_count": grid_plan.get("grid_count"),
+                    },
                 )
                 db.add(pending)
                 db.flush()
                 db.commit()
+                available_cash -= invest_per_level
+                existing_buy_prices.add(float(buy_level))
                 
                 orders_placed += 1
                 reasons.append(f"placed_buy_level_{buy_level:.8f}")

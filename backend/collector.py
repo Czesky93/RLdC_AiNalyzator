@@ -243,6 +243,19 @@ class DataCollector:
         logger.info(f"   Interval: {self.interval}s")
         logger.info(f"   Timeframes: {', '.join(self.kline_timeframes)}")
 
+    @staticmethod
+    def _is_dynamic_grid_selected(config: Optional[dict]) -> bool:
+        """Return True when dynamic_grid is selected as the entry system."""
+        cfg = config or {}
+        trading_system = str(cfg.get("trading_system") or "legacy").strip().lower()
+        return trading_system == "dynamic_grid"
+
+    @classmethod
+    def _is_dynamic_grid_runtime(cls, config: Optional[dict]) -> bool:
+        """Return True when the dynamic_grid module should actively build/trade."""
+        cfg = config or {}
+        return cls._is_dynamic_grid_selected(cfg) and bool(cfg.get("dynamic_grid_enabled"))
+
     def _load_persisted_symbol_params(self):
         """Wczytaj symbol_params zapisane przez _learn_from_history z poprzedniej sesji."""
         try:
@@ -966,7 +979,13 @@ class DataCollector:
 
         return sorted(resolved) if resolved else []
 
-    def _load_dynamic_grid_watchlist(self, top_n: int = 10) -> List[str]:
+    def _load_dynamic_grid_watchlist(
+        self,
+        top_n: int = 10,
+        *,
+        min_quote_volume: Optional[float] = None,
+        max_spread_bps: Optional[float] = None,
+    ) -> List[str]:
         """
         Wczytaj top-N par USDC używając dynamic_grid selectora (grid.md algorytm).
         Zwraca listę symboli już rozwiązanych (np. "BTCUSDC", "ETHUSDC").
@@ -980,9 +999,9 @@ class DataCollector:
             top_pairs = select_top_usdc_pairs(
                 client=self.binance,
                 top_n=top_n,
-                min_quote_volume_abs=100000,
+                min_quote_volume_abs=float(min_quote_volume or 100000),
                 min_trade_count_abs=100,
-                max_spread_bps_cap=50.0,
+                max_spread_bps_cap=float(max_spread_bps or 50.0),
             )
             
             if not top_pairs:
@@ -1016,40 +1035,49 @@ class DataCollector:
         Returns: Liczba pomyślnie zbudowanych planów
         """
         try:
-            from backend.trading.dynamic_grid import build_grid_plan, get_grid_context, load_grid_plan
-            from backend.analysis import get_grid_context as analysis_get_grid_context
+            from backend.trading.dynamic_grid import build_grid_plan
+            from backend.trading.grid_context import get_grid_context
+            from backend.trading.grid_state_store import save_active_grid_plans
             from backend.trading.risk_engine import build_account_state
             
-            enable_dynamic_grid = effective_bool(
-                db, "enable_dynamic_grid", "ENABLE_DYNAMIC_GRID", False
-            )
+            config = get_runtime_config(db)
+            enable_dynamic_grid = self._is_dynamic_grid_runtime(config)
             
             if not enable_dynamic_grid or not self.watchlist:
                 return 0
             
             # Pobierz dostępny kapitał dla sizingu
             try:
-                account = build_account_state(db, mode="live")
-                equity = float(account.get("equity", 1000) or 1000)
+                mode = str(config.get("trading_mode") or "demo").lower()
+                account = build_account_state(
+                    db,
+                    mode=mode,
+                    binance_client=self.binance if mode == "live" else None,
+                )
+                equity = float(getattr(account, "equity", 0.0) or 0.0)
+                if equity <= 0:
+                    equity = float(getattr(account, "initial_balance", 0.0) or 1000.0)
             except:
                 equity = 1000.0
             
             # Runtime config dla gridu
             grid_config = {
-                "dynamic_grid_invest_pct": float(
-                    os.getenv("DYNAMIC_GRID_INVEST_PCT", "0.1") or 0.1
+                "dynamic_grid_base_invest_pct": float(
+                    config.get("dynamic_grid_base_invest_pct", 0.1) or 0.1
                 ),
-                "dynamic_grid_hardstop_pad_pct": float(
-                    os.getenv("DYNAMIC_GRID_HARDSTOP_PAD_PCT", "0.03") or 0.03
+                "dynamic_grid_max_symbol_exposure_pct": float(
+                    config.get("dynamic_grid_max_symbol_exposure_pct", 0.1) or 0.1
                 ),
             }
             
             built_count = 0
+            active_plans: dict[str, dict[str, Any]] = {}
+            top_n = int(config.get("dynamic_grid_top_n", 10) or 10)
             
-            for symbol in self.watchlist[:10]:  # Ogranicź do 10 symboli aby nie overload API
+            for symbol in self.watchlist[:top_n]:
                 try:
                     # Pobierz multi-timeframe context
-                    grid_ctx = analysis_get_grid_context(db, symbol)
+                    grid_ctx = get_grid_context(db, symbol)
                     if not grid_ctx:
                         logger.debug(f"⚠️ {symbol}: Brak wystarczających danych (< 60 barów) do gridu")
                         continue
@@ -1064,9 +1092,7 @@ class DataCollector:
                     )
                     
                     if plan:
-                        # Utrwal plan w RuntimeSetting
-                        from backend.trading.dynamic_grid import persist_grid_plan
-                        persist_grid_plan(db, symbol, plan)
+                        active_plans[symbol] = plan.to_dict()
                         built_count += 1
                         logger.info(
                             f"✅ Grid plan built for {symbol}: "
@@ -1081,6 +1107,8 @@ class DataCollector:
                     continue
             
             if built_count > 0:
+                save_active_grid_plans(db, active_plans)
+                db.commit()
                 logger.info(f"📊 Built {built_count}/{len(self.watchlist)} dynamic grid plans")
             
             return built_count
@@ -1099,38 +1127,41 @@ class DataCollector:
                 orchestrate_grid_entries,
                 orchestrate_grid_exits,
             )
-            from backend.trading.dynamic_grid import load_grid_plan
+            from backend.trading.grid_state_store import load_active_grid_plans
+            from backend.trading.risk_engine import build_account_state
 
-            # Pobierz aktywne grid plany z RuntimeSetting
-            active_grids = db.query(RuntimeSetting).filter(
-                RuntimeSetting.key == "active_grid_plans"
-            ).first()
-
-            if not active_grids:
+            runtime_config = get_runtime_config(db)
+            if not self._is_dynamic_grid_runtime(runtime_config):
                 return 0
 
-            try:
-                grid_plans_dict = json.loads(active_grids.value) if active_grids.value else {}
-            except json.JSONDecodeError:
-                logger.error("❌ Failed to parse active_grid_plans from RuntimeSetting")
-                return 0
+            grid_plans_dict = load_active_grid_plans(db)
 
             if not grid_plans_dict:
                 return 0
 
             # Pobierz balans i equity
-            positions = db.query(Position).filter(Position.status == "OPEN").all()
-            balance_result = self.client.get_balances()
-            if not balance_result or balance_result.get("code") != "OK":
-                logger.warning("⚠️ Failed to get balance for grid orchestration")
-                return 0
-
-            balance = float(balance_result.get("data", {}).get("totalBalance", 0))
-            equity = balance if balance > 0 else 10000.0
+            mode = str(runtime_config.get("trading_mode") or "demo").lower()
+            positions = (
+                db.query(Position)
+                .filter(Position.mode == mode, Position.exit_reason_code.is_(None))
+                .all()
+            )
+            account = build_account_state(
+                db,
+                mode=mode,
+                binance_client=self.binance if mode == "live" else None,
+            )
+            equity = float(getattr(account, "equity", 0.0) or 0.0)
+            available_cash = float(getattr(account, "available_cash", 0.0) or 0.0)
+            if equity <= 0:
+                equity = float(getattr(account, "initial_balance", 0.0) or 10000.0)
+            if available_cash <= 0:
+                available_cash = equity
 
             config = {
                 "min_qty": float(os.getenv("MIN_QTY", 0.001)),
                 "min_notional": float(os.getenv("MIN_BUY_NOTIONAL_DEMO", 10.0)),
+                "mode": mode,
             }
 
             orders_placed = 0
@@ -1150,7 +1181,7 @@ class DataCollector:
                         grid_plan,
                         current_price,
                         equity,
-                        balance,
+                        available_cash,
                         config,
                         positions,
                     )
@@ -1317,25 +1348,36 @@ class DataCollector:
 
     def _refresh_watchlist_if_due(self, db: Session, force: bool = False) -> bool:
         now = utc_now_naive()
+        try:
+            runtime_config = get_runtime_config(db)
+        except Exception:
+            runtime_config = {}
+        refresh_seconds = float(self.watchlist_refresh_seconds)
+        if self._is_dynamic_grid_runtime(runtime_config):
+            refresh_seconds = float(
+                runtime_config.get("dynamic_grid_refresh_seconds") or refresh_seconds
+            )
         if not force and self.last_watchlist_refresh_ts:
-            if (now - self.last_watchlist_refresh_ts).total_seconds() < float(
-                self.watchlist_refresh_seconds
-            ):
+            if (now - self.last_watchlist_refresh_ts).total_seconds() < refresh_seconds:
                 return False
 
         self.last_watchlist_refresh_ts = now
         try:
-            # Sprawdź czy dynamic_grid jest włączony w runtime
-            enable_dynamic_grid = effective_bool(
-                db, "enable_dynamic_grid", "ENABLE_DYNAMIC_GRID", False
-            )
-            
-            if enable_dynamic_grid:
+            if self._is_dynamic_grid_runtime(runtime_config):
                 # Użyj dynamicznego selectora top-N USDC par
                 dynamic_top_n = int(
-                    os.getenv("DYNAMIC_GRID_TOP_N", "10") or 10
+                    runtime_config.get("dynamic_grid_top_n", 10) or 10
                 )
-                new_list = self._load_dynamic_grid_watchlist(top_n=dynamic_top_n)
+                new_list = self._load_dynamic_grid_watchlist(
+                    top_n=dynamic_top_n,
+                    min_quote_volume=float(
+                        runtime_config.get("dynamic_grid_min_quote_volume", 100000)
+                        or 100000
+                    ),
+                    max_spread_bps=float(
+                        runtime_config.get("dynamic_grid_max_spread_bps", 50.0) or 50.0
+                    ),
+                )
             else:
                 # Fallback na portfolio-based watchlist
                 new_list = self._load_watchlist(allow_env_fallback=not bool(self.watchlist))
@@ -4004,7 +4046,16 @@ class DataCollector:
                 return
 
         # 2) Nowe wejścia — screening + gating
-        entries = self._screen_entry_candidates(db, tc)
+        if self._is_dynamic_grid_selected(config):
+            entries = 0
+            log_to_db(
+                "INFO",
+                "dynamic_grid",
+                f"[{mode}] legacy entry screening skipped because trading_system=dynamic_grid",
+                db=db,
+            )
+        else:
+            entries = self._screen_entry_candidates(db, tc)
 
         # 2b) Telegram status alert — co 30 min: statystyki pracy bota zamiast "bezczynność"
         if entries == 0:
