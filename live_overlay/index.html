@@ -291,57 +291,121 @@
       color: var(--muted);
     }
 
-    .tf {
-      margin: 7px 0;
+    .chartGrid {
+      flex: 1;
+      min-height: 360px;
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      grid-template-rows: 1fr;
+      gap: 10px;
+      margin-top: 8px;
+    }
+
+    .miniChart {
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: #161c26;
       display: flex;
+      flex-direction: column;
+      min-height: 320px;
+      overflow: hidden;
+      transition: border-color .2s ease, box-shadow .2s ease;
+      cursor: default;
+    }
+
+    .miniChart.active {
+      border-color: rgba(80, 167, 255, .55);
+      box-shadow: 0 0 0 1px rgba(80, 167, 255, .25) inset;
+    }
+
+    .miniHead {
+      height: 38px;
+      display: flex;
+      align-items: center;
       gap: 6px;
+      padding: 0 8px;
+      font-size: 11px;
+      border-bottom: 1px solid rgba(255, 255, 255, .07);
+      background: rgba(255, 255, 255, .03);
+      flex-shrink: 0;
+    }
+
+    .miniTf {
+      font-weight: 900;
+      color: var(--txt);
+      letter-spacing: .04em;
+    }
+
+    .miniPrice {
+      color: var(--muted);
+      font-weight: 700;
+      white-space: nowrap;
+      margin-left: auto;
+    }
+
+    .miniTfBtns {
+      display: flex;
+      gap: 3px;
       flex-wrap: wrap;
     }
 
-    .tf button {
-      font-size: 12px;
-      background: #222a39;
-      border-radius: 5px;
-      padding: 3px 7px;
+    .tfSelBtn {
+      font-size: 10px;
+      background: rgba(255, 255, 255, .04);
+      border: 1px solid rgba(255, 255, 255, .1);
+      border-radius: 4px;
+      padding: 2px 5px;
       color: var(--muted);
-      border: 1px solid transparent;
       cursor: pointer;
+      line-height: 1.2;
     }
 
-    .tf button.on {
-      color: var(--green);
+    .tfSelBtn.on {
+      background: rgba(80, 167, 255, .18);
+      border-color: rgba(80, 167, 255, .5);
+      color: #d9ebff;
       font-weight: 900;
-      border-color: rgba(0, 199, 129, .45);
     }
 
-    .chartBox {
-      flex: 1;
+    .tfSelBtn:hover { border-color: rgba(255, 255, 255, .28); }
+
+    .miniCanvasWrap {
       position: relative;
-      min-height: 190px;
-      background: #161c26;
-      border: 1px solid var(--border);
-      border-radius: 7px;
-      overflow: hidden;
+      flex: 1;
+      min-height: 270px;
     }
 
-    .chartBox canvas {
+    .miniCanvasWrap canvas {
       width: 100%;
       height: 100%;
       display: block;
     }
 
-    .chartNote {
+    .miniForecast {
       position: absolute;
-      right: 8px;
-      top: 8px;
-      max-width: 60%;
-      padding: 5px 8px;
+      right: 6px;
+      top: 6px;
+      max-width: 80%;
+      padding: 3px 6px;
+      border-radius: 5px;
+      background: rgba(0, 0, 0, .58);
+      border: 1px solid rgba(80, 167, 255, .42);
+      color: #d9ebff;
+      font-size: 10px;
+      font-weight: 800;
+      text-align: right;
+      line-height: 1.2;
+    }
+
+    .chartNote {
+      margin-top: 8px;
+      padding: 6px 8px;
       border-radius: 6px;
-      background: rgba(0, 0, 0, .52);
+      background: rgba(0, 0, 0, .40);
       border: 1px solid rgba(255, 255, 255, .12);
       font-size: 11px;
       color: var(--muted);
-      text-align: right;
+      text-align: left;
     }
 
     .levels, .inds {
@@ -654,6 +718,93 @@
       .pair { min-width: 150px; }
       .warning { min-height: 56px; }
       .drawer { width: min(480px, calc(100vw - 36px)); }
+      .chartGrid { grid-template-columns: repeat(2, minmax(0, 1fr)); grid-template-rows: none; min-height: 280px; }
+      .miniChart { min-height: 260px; }
+    }
+
+    @media (max-width: 900px) {
+      html, body {
+        height: auto;
+        overflow: auto;
+      }
+
+      .app {
+        width: 100%;
+        min-height: 100vh;
+        height: auto;
+      }
+
+      .main {
+        min-height: 100vh;
+      }
+
+      .top {
+        height: auto;
+        flex-wrap: wrap;
+        gap: 8px;
+        padding: 10px 12px;
+      }
+
+      .headline {
+        order: 3;
+        width: 100%;
+        text-align: left;
+      }
+
+      .warning {
+        min-height: 50px;
+        font-size: clamp(14px, 3.6vw, 18px);
+        padding: 8px 10px;
+      }
+
+      .ticker {
+        height: auto;
+        overflow-x: auto;
+        overflow-y: hidden;
+      }
+
+      .pair {
+        min-width: 220px;
+      }
+
+      .content {
+        flex-direction: column;
+        padding: 10px 10px 8px;
+      }
+
+      .chartCard {
+        min-height: 0;
+      }
+
+      .chartGrid {
+        grid-template-columns: 1fr;
+        grid-template-rows: none;
+        gap: 8px;
+      }
+
+      .miniChart {
+        min-height: 280px;
+      }
+
+      .ai {
+        width: 100%;
+        min-width: 0;
+      }
+
+      .bottom {
+        height: auto;
+        grid-template-columns: 1fr;
+        padding: 0 10px 10px;
+      }
+
+      .card {
+        max-height: 240px;
+      }
+
+      .footer {
+        height: auto;
+        min-height: 36px;
+      }
     }
   </style>
 </head>
@@ -692,19 +843,8 @@
             <div class="priceInfo" id="priceInfo">Oczekuję na dane z backendu RLdC...</div>
           </div>
 
-          <div class="tf" id="timeframes">
-            <button class="on" data-tf="1m">1m</button>
-            <button data-tf="5m">5m</button>
-            <button data-tf="15m">15m</button>
-            <button data-tf="1h">1h</button>
-            <button data-tf="4h">4h</button>
-            <button data-tf="1d">1d</button>
-          </div>
-
-          <div class="chartBox">
-            <canvas id="chart"></canvas>
-            <div class="chartNote" id="chartNote">Wykres używa tylko danych zwróconych przez bota.</div>
-          </div>
+          <div class="chartGrid" id="chartGrid"></div>
+          <div class="chartNote" id="chartNote">6 wykresów świecowych: 1m, 5m, 15m, 1h, 4h, 1d. Kliknij panel, aby ustawić główny horyzont analizy.</div>
 
           <div class="levels">
             <div class="lvl">ENTRY: <b id="entry">--</b></div>
@@ -807,15 +947,19 @@
 
     const appState = {
       nav: 'live',
-      selectedTf: '1m',
+      selectedTf: '15m',
+      activeTfs: ['15m', '4h', '1d'],
       focusSymbol: null,
       focusIndex: 0,
       lastRotate: 0,
+      manualFocusUntil: 0,
       overlay: null,
       cache: {
         klines: new Map(),
         forecast: new Map(),
         decision: new Map(),
+        ranges: new Map(),
+        orderbook: new Map(),
         history: null,
         runtime: null,
         settings: null,
@@ -951,9 +1095,10 @@
       return row?.chart_symbol || row?.analysis_symbol || row?.symbol || '';
     }
 
-    function setFocus(symbol) {
+    function setFocus(symbol, manual = true) {
       if (!symbol) return;
       appState.focusSymbol = symbol;
+      if (manual) appState.manualFocusUntil = Date.now() + 45_000;
       renderTicker();
       renderFocus();
       renderDrawer();
@@ -972,15 +1117,16 @@
 
     function focusRowByRotation(rows) {
       if (!rows.length) return null;
-      const explicit = getRow(appState.focusSymbol);
-      if (explicit) return explicit;
+      if (Date.now() < appState.manualFocusUntil) {
+        const explicit = getRow(appState.focusSymbol);
+        if (explicit) return explicit;
+      }
       const urgent = rows.find((row) => ['buy', 'sell', 'kup', 'sprzedaj', 'entry', 'exit'].includes(String(row.action || '').toLowerCase()));
-      if (urgent) return urgent;
       if (Date.now() - appState.lastRotate > rotateMs) {
         appState.focusIndex = (appState.focusIndex + 1) % rows.length;
         appState.lastRotate = Date.now();
       }
-      return rows[appState.focusIndex % rows.length];
+      return rows[appState.focusIndex % rows.length] || urgent || rows[0];
     }
 
     function getSourceHealthText(st) {
@@ -1015,6 +1161,537 @@
       }).join(' ');
       const fill = color === 'up' ? '#00c781' : color === 'down' ? '#ff334b' : '#ffd966';
       return `<svg width="${w}" height="${h}" viewBox="0 0 ${w} ${h}" style="display:block;width:100%;height:${h}px;overflow:visible"><polyline points="${pts}" fill="none" stroke="${fill}" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round" opacity=".85"/></svg>`;
+    }
+
+    function tfMinutes(tf) {
+      if (tf === '1m') return 1;
+      if (tf === '5m') return 5;
+      if (tf === '15m') return 15;
+      if (tf === '1h') return 60;
+      if (tf === '4h') return 240;
+      if (tf === '1d') return 1440;
+      return 1;
+    }
+
+    function prettyTf(tf) {
+      if (tf === '1m') return '1 MIN';
+      if (tf === '5m') return '5 MIN';
+      if (tf === '15m') return '15 MIN';
+      if (tf === '1h') return '1 GODZ';
+      if (tf === '4h') return '4 GODZ';
+      if (tf === '1d') return '1 DZIEŃ';
+      return String(tf || '').toUpperCase();
+    }
+
+    function formatTime(ts, tf) {
+      const d = new Date(ts);
+      if (!Number.isFinite(d.getTime())) return '--:--';
+      if (tf === '1d') return d.toLocaleDateString('pl-PL', { day: '2-digit', month: '2-digit' });
+      if (tf === '4h' || tf === '1h') {
+        return d.toLocaleString('pl-PL', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
+      }
+      return d.toLocaleTimeString('pl-PL', { hour: '2-digit', minute: '2-digit' });
+    }
+
+    function renderChartGridSkeleton() {
+      const grid = $('chartGrid');
+      if (!grid) return;
+      const currentKey = appState.activeTfs.join(',');
+      if (grid.dataset.renderedTfs === currentKey) return;
+      grid.dataset.renderedTfs = currentKey;
+      grid.innerHTML = appState.activeTfs.map((tf) => `
+        <article class="miniChart" data-tf-card="${tf}">
+          <div class="miniHead">
+            <span class="miniTf">${prettyTf(tf)}</span>
+            <div class="miniTfBtns">
+              ${TF_LIST.map((t) => `<button class="tfSelBtn${t === tf ? ' on' : ''}" data-card-tf="${tf}" data-select-tf="${t}">${t}</button>`).join('')}
+            </div>
+            <span class="miniPrice" id="tfPrice-${tf}">--</span>
+          </div>
+          <div class="miniCanvasWrap">
+            <canvas id="chart-${tf}"></canvas>
+          </div>
+        </article>
+      `).join('');
+      grid.querySelectorAll('.tfSelBtn[data-select-tf]').forEach((btn) => {
+        btn.addEventListener('click', async (e) => {
+          e.stopPropagation();
+          const cardTf = btn.dataset.cardTf;
+          const selectTf = btn.dataset.selectTf;
+          if (cardTf === selectTf) return;
+          const idx = appState.activeTfs.indexOf(cardTf);
+          if (idx !== -1) {
+            appState.activeTfs[idx] = selectTf;
+            grid.dataset.renderedTfs = '';
+            if (appState.focusSymbol) {
+              const row = getRow(appState.focusSymbol) || { symbol: appState.focusSymbol };
+              const requestSymbol = dataSymbol(row) || appState.focusSymbol;
+              await ensureKlines(requestSymbol, selectTf);
+            }
+            renderFocus();
+          }
+        });
+      });
+    }
+
+    function normalizeKlineItem(item, index) {
+      if (item && typeof item === 'object' && !Array.isArray(item)) {
+        const timestamp = n(item.timestamp ?? item.open_time ?? item.time);
+        const open = n(item.open);
+        const high = n(item.high);
+        const low = n(item.low);
+        const close = n(item.close);
+        if ([open, high, low, close].every((value) => value !== null)) {
+          return {
+            timestamp: timestamp ?? Date.now() + index * 60_000,
+            open,
+            high,
+            low,
+            close,
+          };
+        }
+      }
+      if (Array.isArray(item) && item.length >= 5) {
+        const timestamp = n(item[0]);
+        const open = n(item[1]);
+        const high = n(item[2]);
+        const low = n(item[3]);
+        const close = n(item[4]);
+        if ([open, high, low, close].every((value) => value !== null)) {
+          return {
+            timestamp: timestamp ?? Date.now() + index * 60_000,
+            open,
+            high,
+            low,
+            close,
+          };
+        }
+      }
+      const close = n(item);
+      if (close !== null) {
+        return {
+          timestamp: Date.now() + index * 60_000,
+          open: close,
+          high: close,
+          low: close,
+          close,
+        };
+      }
+      return null;
+    }
+
+    function computeEmaSeries(candles, period) {
+      const out = [];
+      const alpha = 2 / (period + 1);
+      let prev = null;
+      candles.forEach((candle, index) => {
+        const close = n(candle?.close);
+        if (close === null) {
+          out.push(null);
+          return;
+        }
+        if (prev === null) {
+          if (index >= period - 1) {
+            const seed = candles.slice(0, period).map((item) => n(item?.close)).filter((value) => value !== null);
+            prev = seed.length === period ? seed.reduce((sum, value) => sum + value, 0) / period : close;
+          } else {
+            prev = close;
+          }
+        } else {
+          prev = close * alpha + prev * (1 - alpha);
+        }
+        out.push(prev);
+      });
+      return out;
+    }
+
+    function computeRsiSeries(candles, period = 14) {
+      const closes = candles.map((item) => n(item?.close)).filter((value) => value !== null);
+      if (closes.length < period + 1) return [];
+      const out = Array(candles.length).fill(null);
+      for (let index = period; index < closes.length; index += 1) {
+        let gains = 0;
+        let losses = 0;
+        for (let cursor = index - period + 1; cursor <= index; cursor += 1) {
+          const diff = closes[cursor] - closes[cursor - 1];
+          if (diff > 0) gains += diff;
+          else losses += -diff;
+        }
+        const rs = losses === 0 ? 100 : gains / losses;
+        out[index] = 100 - 100 / (1 + rs);
+      }
+      return out;
+    }
+
+    function orderbookMeta(payload) {
+      const bids = Array.isArray(payload?.bids) ? payload.bids : [];
+      const asks = Array.isArray(payload?.asks) ? payload.asks : [];
+      const bestBid = n(bids[0]?.[0]);
+      const bestAsk = n(asks[0]?.[0]);
+      const bidDepth = bids.slice(0, 10).reduce((sum, item) => sum + (n(item?.[1]) || 0), 0);
+      const askDepth = asks.slice(0, 10).reduce((sum, item) => sum + (n(item?.[1]) || 0), 0);
+      const spreadBps = bestBid !== null && bestAsk !== null && bestBid > 0 && bestAsk > 0
+        ? ((bestAsk - bestBid) / ((bestAsk + bestBid) / 2)) * 10000
+        : null;
+      const imbalance = bidDepth + askDepth > 0 ? (bidDepth - askDepth) / (bidDepth + askDepth) : null;
+      return { bestBid, bestAsk, bidDepth, askDepth, spreadBps, imbalance };
+    }
+
+    function buildTfForecast(tf, row, forecast, lastClose) {
+      const fallbackPrice = n(lastClose) ?? n(row?.price);
+      if (fallbackPrice === null) return null;
+      const now = Date.now();
+      const path = Array.isArray(row?.forecast_path) ? row.forecast_path.map(Number).filter(Number.isFinite) : [];
+      const shortPick = { '1m': 0, '5m': 1, '15m': 2 };
+      if (shortPick[tf] !== undefined && path.length) {
+        const idx = Math.min(shortPick[tf], path.length - 1);
+        const target = n(path[idx]);
+        if (target !== null) {
+          const horizonMin = tfMinutes(tf) * (idx + 1);
+          const pctMove = ((target - fallbackPrice) / fallbackPrice) * 100;
+          return {
+            target,
+            horizonMin,
+            eta: now + horizonMin * 60_000,
+            pctMove,
+          };
+        }
+      }
+
+      let projected = null;
+      let horizonMin = tfMinutes(tf);
+      if (tf === '1h') {
+        projected = n(forecast?.forecast_1h?.projected_price);
+        horizonMin = 60;
+      } else if (tf === '4h') {
+        projected = n(forecast?.forecast_4h?.projected_price);
+        horizonMin = 240;
+      } else if (tf === '1d') {
+        projected = n(forecast?.forecast_24h?.projected_price);
+        horizonMin = 1440;
+      } else if (n(forecast?.forecast_1h?.projected_price) !== null) {
+        const hourTarget = n(forecast?.forecast_1h?.projected_price);
+        const ratio = tfMinutes(tf) / 60;
+        projected = fallbackPrice + ((hourTarget - fallbackPrice) * ratio);
+      }
+
+      if (projected === null) return null;
+      const pctMove = ((projected - fallbackPrice) / fallbackPrice) * 100;
+      return {
+        target: projected,
+        horizonMin,
+        eta: now + horizonMin * 60_000,
+        pctMove,
+      };
+    }
+
+    function drawMiniChart(tf, candles, prediction, meta = {}) {
+      const canvas = $(`chart-${tf}`);
+      if (!canvas) return;
+      // offsetWidth/Height zamiast getBoundingClientRect — daje prawdziwe wymiary po layoutcie
+      const w = canvas.offsetWidth || canvas.parentElement?.offsetWidth || 320;
+      const h = canvas.offsetHeight || canvas.parentElement?.offsetHeight || 290;
+      if (w < 10 || h < 10) {
+        // Jeszcze nie wyrenderowane — retry po layoutcie
+        requestAnimationFrame(() => drawMiniChart(tf, candles, prediction));
+        return;
+      }
+      const ratio = window.devicePixelRatio || 1;
+      canvas.width = Math.round(w * ratio);
+      canvas.height = Math.round(h * ratio);
+      const ctx = canvas.getContext('2d');
+      ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
+
+      const PAD_L = 56;   // oś cen
+      const PAD_R = 58;   // prognoza
+      const PAD_T = 14;
+      const PAD_B = 32;   // oś czasu
+      const plotW = Math.max(20, w - PAD_L - PAD_R);
+      const plotH = Math.max(20, h - PAD_T - PAD_B);
+      const priceH = Math.max(24, plotH * 0.76);
+      const volumeTop = PAD_T + priceH + 8;
+      const volumeH = Math.max(16, plotH - priceH - 8);
+
+      // Tło — dokładnie jak Binance dark
+      ctx.fillStyle = '#181A20';
+      ctx.fillRect(0, 0, w, h);
+
+      const data = Array.isArray(candles) ? candles.filter((c) => c && Number.isFinite(c.close)) : [];
+      if (data.length < 2) {
+        ctx.fillStyle = 'rgba(255,217,102,.8)';
+        ctx.font = 'bold 12px Arial';
+        ctx.textAlign = 'center';
+        ctx.fillText('Brak danych świecowych', w / 2, h / 2);
+        return;
+      }
+
+      const predTarget = (prediction && Number.isFinite(prediction.target)) ? prediction.target : null;
+      const range = meta.range || null;
+      const decision = meta.decision || {};
+      const row = meta.row || {};
+      const orderbook = meta.orderbook || {};
+      let minP = Math.min(...data.map((c) => c.low));
+      let maxP = Math.max(...data.map((c) => c.high));
+      [range?.buy_low, range?.buy_high, range?.sell_low, range?.sell_high, row?.entry, row?.target, row?.stop].forEach((level) => {
+        const num = n(level);
+        if (num !== null) {
+          minP = Math.min(minP, num);
+          maxP = Math.max(maxP, num);
+        }
+      });
+      // Cel prognozy rozszerza skalę tylko jeśli jest w rozsądnym zasięgu (max ±15%)
+      if (predTarget !== null) {
+        const pctDist = Math.abs(predTarget - data[data.length - 1].close) / data[data.length - 1].close;
+        if (pctDist <= 0.15) {
+          minP = Math.min(minP, predTarget);
+          maxP = Math.max(maxP, predTarget);
+        }
+      }
+      if (minP === maxP) { minP *= 0.999; maxP *= 1.001; }
+      const padV = (maxP - minP) * 0.08;
+      minP -= padV; maxP += padV;
+
+      const toY = (v) => PAD_T + (1 - (v - minP) / (maxP - minP)) * priceH;
+      const toX = (i) => PAD_L + ((i + 0.5) / data.length) * plotW;
+
+      // Siatka pozioma (Binance: bardzo delikatna)
+      ctx.strokeStyle = 'rgba(255,255,255,.06)';
+      ctx.lineWidth = 1;
+      for (let i = 1; i <= 4; i++) {
+        const gy = toY(minP + (maxP - minP) * (i / 5));
+        ctx.beginPath(); ctx.moveTo(PAD_L, gy); ctx.lineTo(PAD_L + plotW, gy); ctx.stroke();
+      }
+      // Siatka pionowa
+      const vCols = Math.min(4, Math.floor(data.length / 3));
+      for (let i = 1; i < vCols; i++) {
+        const gx = PAD_L + (i / vCols) * plotW;
+        ctx.beginPath(); ctx.moveTo(gx, PAD_T); ctx.lineTo(gx, PAD_T + plotH); ctx.stroke();
+      }
+
+      // EMA20
+      const ema20 = computeEmaSeries(data, 20);
+      const ema50 = computeEmaSeries(data, 50);
+      const rsiSeries = computeRsiSeries(data, 14);
+      const lastRsi = [...rsiSeries].reverse().find((value) => n(value) !== null);
+      const maxVol = Math.max(...data.map((c) => n(c.volume) || 0), 1);
+
+      if (range?.buy_low !== undefined && range?.buy_high !== undefined) {
+        const y1 = toY(n(range.buy_low) ?? minP);
+        const y2 = toY(n(range.buy_high) ?? minP);
+        ctx.fillStyle = 'rgba(46,189,133,.11)';
+        ctx.fillRect(PAD_L, Math.min(y1, y2), plotW, Math.abs(y2 - y1));
+      }
+      if (range?.sell_low !== undefined && range?.sell_high !== undefined) {
+        const y1 = toY(n(range.sell_low) ?? maxP);
+        const y2 = toY(n(range.sell_high) ?? maxP);
+        ctx.fillStyle = 'rgba(246,70,93,.10)';
+        ctx.fillRect(PAD_L, Math.min(y1, y2), plotW, Math.abs(y2 - y1));
+      }
+
+      const candleW = Math.max(3, Math.min(16, (plotW / data.length) * 0.72));
+
+      data.forEach((c, i) => {
+        const xx = toX(i);
+        const vol = n(c.volume) || 0;
+        const volH = (vol / maxVol) * volumeH;
+        ctx.fillStyle = c.close >= c.open ? 'rgba(46,189,133,.35)' : 'rgba(246,70,93,.35)';
+        ctx.fillRect(xx - Math.max(2, candleW / 2), volumeTop + volumeH - volH, Math.max(3, candleW), volH);
+      });
+
+      function drawLevel(level, color, label, dashed = true) {
+        const val = n(level);
+        if (val === null) return;
+        const y = toY(val);
+        ctx.strokeStyle = color;
+        ctx.lineWidth = 1;
+        ctx.setLineDash(dashed ? [5, 4] : []);
+        ctx.beginPath();
+        ctx.moveTo(PAD_L, y);
+        ctx.lineTo(PAD_L + plotW, y);
+        ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.fillStyle = color;
+        ctx.font = 'bold 9px Arial';
+        ctx.textAlign = 'left';
+        ctx.fillText(`${label} ${price(val)}`, PAD_L + 4, y - 4);
+      }
+
+      // Świece OHLC — kolory i proporcje jak Binance
+      const wickW = Math.max(1, Math.round(candleW * 0.15));
+      data.forEach((c, i) => {
+        const xx = toX(i);
+        const isUp = c.close >= c.open;
+        const bodyCol = isUp ? '#2EBD85' : '#F6465D';
+        // Cień (wick) — cienki, ten sam kolor co korpus
+        ctx.strokeStyle = bodyCol;
+        ctx.lineWidth = wickW;
+        ctx.beginPath(); ctx.moveTo(xx, toY(c.high)); ctx.lineTo(xx, toY(c.low)); ctx.stroke();
+        // Korpus
+        const oY = toY(c.open);
+        const cY = toY(c.close);
+        const bY = Math.min(oY, cY);
+        const bH = Math.max(2, Math.abs(cY - oY));  // min 2px by zawsze było widać
+        ctx.fillStyle = bodyCol;
+        ctx.fillRect(xx - candleW / 2, bY, candleW, bH);
+      });
+
+      // EMA20 — pomarańczowo-żółta jak na Binance
+      ctx.strokeStyle = 'rgba(240,185,11,.9)';
+      ctx.lineWidth = 1.8;
+      ctx.setLineDash([6, 4]);
+      ctx.beginPath();
+      ema20.forEach((v, i) => { if (n(v) === null) return; if (i === 0) ctx.moveTo(toX(i), toY(v)); else ctx.lineTo(toX(i), toY(v)); });
+      ctx.stroke();
+      ctx.setLineDash([]);
+
+      ctx.strokeStyle = 'rgba(124,58,237,.92)';
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ema50.forEach((v, i) => { if (n(v) === null) return; if (i === 0) ctx.moveTo(toX(i), toY(v)); else ctx.lineTo(toX(i), toY(v)); });
+      ctx.stroke();
+
+      drawLevel(range?.buy_target, '#16f2a3', 'BUY TGT');
+      drawLevel(range?.sell_target, '#f59e0b', 'SELL TGT');
+      drawLevel(row?.entry, '#60a5fa', 'ENTRY');
+      drawLevel(row?.target, '#22c55e', 'TP');
+      drawLevel(row?.stop, '#ef4444', 'SL');
+
+      // Cena teraz — pozioma przerywana (Binance style: jaśniejsza)
+      const lastClose = data[data.length - 1].close;
+      const lastX = toX(data.length - 1);
+      ctx.strokeStyle = 'rgba(255,255,255,.35)';
+      ctx.lineWidth = 1;
+      ctx.setLineDash([3, 4]);
+      ctx.beginPath();
+      ctx.moveTo(PAD_L, toY(lastClose)); ctx.lineTo(PAD_L + plotW, toY(lastClose));
+      ctx.stroke();
+      ctx.setLineDash([]);
+
+      // PROGNOZA BOTA — niebieska linia wychodząca poza ostatnią świecę
+      if (predTarget !== null) {
+        const startX = lastX;
+        const startY = toY(lastClose);
+        const endX = PAD_L + plotW + PAD_R - 6;
+        const endY = toY(predTarget);
+        const isUp = predTarget > lastClose;
+
+        // Linia prognozy
+        ctx.strokeStyle = '#50a7ff';
+        ctx.lineWidth = 2.5;
+        ctx.setLineDash([9, 5]);
+        ctx.beginPath();
+        ctx.moveTo(startX, startY);
+        ctx.lineTo(endX, endY);
+        ctx.stroke();
+        ctx.setLineDash([]);
+
+        // Kółko końca prognozy
+        ctx.fillStyle = '#50a7ff';
+        ctx.beginPath();
+        ctx.arc(endX, endY, 4.5, 0, Math.PI * 2);
+        ctx.fill();
+
+        // Cena docelowa
+        const labY = isUp ? endY - 7 : endY + 14;
+        ctx.fillStyle = isUp ? '#7affd3' : '#ffb3bd';
+        ctx.font = 'bold 10px Arial';
+        ctx.textAlign = 'left';
+        ctx.fillText(price(predTarget), endX - 50, labY);
+        // % zmiana
+        const pctChg = ((predTarget - lastClose) / lastClose) * 100;
+        ctx.font = '10px Arial';
+        ctx.fillStyle = isUp ? '#7affd3' : '#ffb3bd';
+        ctx.fillText((pctChg >= 0 ? '+' : '') + pctChg.toFixed(2) + '%', endX - 50, isUp ? labY + 11 : labY - 11);
+      }
+
+      // Oś cen (lewa)
+      ctx.fillStyle = 'rgba(168,177,196,.9)';
+      ctx.font = '10px Arial';
+      ctx.textAlign = 'right';
+      for (let i = 0; i <= 5; i++) {
+        const pv = minP + (maxP - minP) * (i / 5);
+        const py = toY(pv);
+        if (py >= PAD_T && py <= PAD_T + plotH) ctx.fillText(price(pv), PAD_L - 4, py + 3);
+      }
+
+      // Bieżąca cena — podpis na prawej osi
+      ctx.fillStyle = 'rgba(255,255,255,.75)';
+      ctx.textAlign = 'left';
+      ctx.font = 'bold 10px Arial';
+      ctx.fillText(price(lastClose), PAD_L + plotW + 3, toY(lastClose) + 3);
+
+      ctx.fillStyle = 'rgba(168,177,196,.75)';
+      ctx.font = '10px Arial';
+      ctx.textAlign = 'left';
+      ctx.fillText(`VOL ${fmt(maxVol ? data[data.length - 1].volume : null, 2)}`, PAD_L, volumeTop - 2);
+      ctx.fillText(`RSI ${lastRsi !== undefined && lastRsi !== null ? fmt(lastRsi, 1) : '--'}`, PAD_L + 72, volumeTop - 2);
+      ctx.fillText(`SPREAD ${n(orderbook.spreadBps) !== null ? fmt(orderbook.spreadBps, 1) + 'bps' : '--'}`, PAD_L + 140, volumeTop - 2);
+
+      // Oś czasu (dół)
+      ctx.fillStyle = 'rgba(168,177,196,.8)';
+      ctx.font = '10px Arial';
+      ctx.textAlign = 'center';
+      [0, Math.floor(data.length / 2), data.length - 1].forEach((idx) => {
+        if (idx >= 0 && idx < data.length) {
+          ctx.fillText(formatTime(data[idx].timestamp, tf), toX(idx), h - PAD_B + 16);
+        }
+      });
+    }
+
+
+    function drawAllCharts(row, forecast) {
+      renderChartGridSkeleton();
+      const requestSymbol = dataSymbol(row) || row?.symbol || '';
+      const range = appState.cache.ranges.get(requestSymbol) || appState.cache.ranges.get(row?.symbol || '') || null;
+      const decision = (appState.cache.decision.get(requestSymbol) || appState.cache.decision.get(row?.symbol || ''))?.data || {};
+      const orderbook = orderbookMeta(appState.cache.orderbook.get(requestSymbol) || appState.cache.orderbook.get(row?.symbol || '') || {});
+      const fallbackHistory = Array.isArray(row?.history)
+        ? row.history.map((value, index) => {
+            const close = n(value);
+            if (close === null) return null;
+            return {
+              timestamp: Date.now() - (row.history.length - index) * 60_000,
+              open: close,
+              high: close,
+              low: close,
+              close,
+            };
+          }).filter(Boolean)
+        : [];
+
+      appState.activeTfs.forEach((tf) => {
+        const cacheEntry = appState.cache.klines.get(`${requestSymbol}:${tf}`);
+        const rawCandles = Array.isArray(cacheEntry?.data) ? cacheEntry.data : [];
+
+        // Skaluj do EUR jeśli kline jest w innej walucie (np. AAVEUSDC → AAVEEUR)
+        let candles = rawCandles;
+        const rowPrice = n(row?.price);
+        if (rawCandles.length >= 2 && rowPrice !== null && rowPrice > 0 && requestSymbol !== (row?.symbol || '')) {
+          const klineLastClose = rawCandles[rawCandles.length - 1].close;
+          if (klineLastClose > 0) {
+            const scale = rowPrice / klineLastClose;
+            candles = rawCandles.map((c) => ({
+              timestamp: c.timestamp,
+              open: c.open * scale,
+              high: c.high * scale,
+              low: c.low * scale,
+              close: c.close * scale,
+            }));
+          }
+        }
+
+        // Max 20 świec — przy 430px panelu to ~15px/świecę (jak Binance)
+        const usable = candles.length >= 2 ? candles.slice(-20) : fallbackHistory.slice(-20);
+        const lastClose = usable.length ? usable[usable.length - 1].close : rowPrice;
+        const pred = buildTfForecast(tf, row, forecast, lastClose);
+
+        const priceNode = $(`tfPrice-${tf}`);
+        if (priceNode) {
+          priceNode.textContent = Number.isFinite(lastClose) ? price(lastClose) : '--';
+        }
+
+        drawMiniChart(tf, usable, pred, { range, decision, row, orderbook });
+      });
     }
 
     function renderTicker() {
@@ -1076,11 +1753,14 @@
     }
 
     function renderFocus() {
+      renderChartGridSkeleton();
       const row = getFocusRow();
       const requestSymbol = dataSymbol(row);
       const decisionData = appState.cache.decision.get(requestSymbol) || appState.cache.decision.get(row?.symbol || '');
       const decision = decisionData?.data || {};
       const forecast = appState.cache.forecast.get(requestSymbol) || appState.cache.forecast.get(row?.symbol || '');
+      const range = appState.cache.ranges.get(requestSymbol) || appState.cache.ranges.get(row?.symbol || '') || null;
+      const book = orderbookMeta(appState.cache.orderbook.get(requestSymbol) || appState.cache.orderbook.get(row?.symbol || '') || {});
 
       if (!row) {
         $('symbol').textContent = 'BRAK DANYCH Z BOTA';
@@ -1096,7 +1776,8 @@
         $('pinSymbol').className = 'pin';
         $('pinSymbol').textContent = '☆';
         ['entry', 'tp', 'sl', 'conf', 'upd'].forEach((id) => { $(id).textContent = '--'; });
-        draw([], []);
+        $('chartNote').textContent = 'Brak aktywnego symbolu. Po pojawieniu się par dane świec i prognoza uzupełnią się automatycznie.';
+        drawAllCharts(null, null);
         return;
       }
 
@@ -1107,7 +1788,7 @@
       $('focusMeta').textContent = `${sym(row.symbol)} | wykres ${sym(requestSymbol || row.symbol)} | TF ${appState.selectedTf}`;
       $('pinSymbol').className = 'pin' + (appState.favorites.has(row.symbol) ? ' on' : '');
       $('pinSymbol').textContent = appState.favorites.has(row.symbol) ? '★' : '☆';
-      $('priceInfo').innerHTML = `Cena teraz: <span class="${cls(row.change_pct)}">${price(row.price)} ${row.quote || ''}</span> | Wynik pozycji: <span class="${cls(row.pnl_pct)}">${pct(row.pnl_pct)}</span> | Bot mówi: <span class="wait">${decisionLabel}</span>`;
+      $('priceInfo').innerHTML = `Cena teraz: <span class="${cls(row.change_pct)}">${price(row.price)} ${row.quote || ''}</span> | Spread: <span class="wait">${n(book.spreadBps) !== null ? fmt(book.spreadBps, 1) + ' bps' : '--'}</span> | Wynik pozycji: <span class="${cls(row.pnl_pct)}">${pct(row.pnl_pct)}</span> | Bot mówi: <span class="wait">${decisionLabel}</span>`;
       $('decision').textContent = decisionLabel;
       $('decision').className = 'pill ' + pillClass;
 
@@ -1115,15 +1796,44 @@
       if (n(conf) !== null && Number(conf) <= 1) conf = Number(conf) * 100;
       $('trend').textContent = `${simpleTrendLabel(decision.indicators?.trend || decision.market_context?.trend || row.trend)}${n(conf) !== null ? ` | pewność bota: ${pct(conf)}` : ''}`;
       const blockers = Array.isArray(decision.blockers) ? decision.blockers : [];
-      $('invest').textContent = decision.plain_reason || decision.plain_explanation || decision.final_signal_reason
-        ? `${decision.plain_reason || decision.plain_explanation || decision.final_signal_reason}${blockers.length ? `. Co go blokuje: ${blockers.join(', ')}.` : ''}`
-        : (n(row.edge) !== null ? `Po odjęciu kosztów bot ocenia tę okazję na ${fmt(row.edge, 2)}. Poziom ryzyka: ${row.risk_score || 'brak oceny'}.` : 'Bot nie podał jeszcze, czy to wejście ma sens po kosztach.');
+      const summary = appState.overlay?.summary || {};
+      const actionUpper = String(decision.recommended_action_label || row.action || '').toUpperCase();
+      const isExitAction = ['SPRZEDAJ', 'SELL', 'PREPARE_EXIT', 'BLOKADA'].includes(actionUpper);
+      const queueState = String(row.queue_state || '').toLowerCase();
+      const hasPositionLike = decision.has_position === true || (
+        n(row.entry) !== null &&
+        n(row.pnl_pct) !== null &&
+        (queueState.includes('binance_spot') || queueState.includes('in_position') || queueState.includes('position'))
+      );
+      if (hasPositionLike && (isExitAction || n(row.pnl_pct) !== null)) {
+        $('invest').textContent = 'Pozycja jest już otwarta. Bot zarządza wyjściem, więc nowe wejście nie jest teraz wymagane.';
+      } else if (n(row.edge) !== null || n(row.profitability_score) !== null) {
+        const edge = n(row.edge) !== null ? fmt(row.edge, 2) : fmt(row.profitability_score, 0);
+        $('invest').textContent = `Ocena opłacalności po kosztach: ${edge}. ${blockers.length ? `Blokery: ${blockers.join(', ')}.` : 'Brak krytycznych blokad wejścia.'}`;
+      } else if (summary.best_ready_symbol) {
+        $('invest').textContent = `Najbliższy sensowny kandydat wejścia teraz: ${summary.best_ready_symbol}${n(summary.best_ready_score) !== null ? ` (score ${fmt(summary.best_ready_score, 0)})` : ''}.`;
+      } else {
+        $('invest').textContent = 'Bot nie podał jeszcze pełnej oceny opłacalności po kosztach dla tego symbolu.';
+      }
       $('explain').textContent = decision.explanation?.plain || decision.plain_explanation || row.plain_summary || row.reason || row.plan || 'Bot nie zwrócił jeszcze prostego wyjaśnienia dla tej pary.';
       $('whale').textContent = row.whale || row.whale_state || row.anomaly || 'Brak mocnego sygnału, że duzi gracze teraz pchają cenę.';
-      $('capital').textContent = 'Kwota, od której taki ruch zaczyna mieć sens: ' + (row.min_capital ? money(row.min_capital, row.capital_ccy || '€') : '--');
-      $('entry').textContent = price(row.entry ?? decision.cta?.entry_price);
-      $('tp').textContent = price(row.target ?? decision.cta?.take_profit);
-      $('sl').textContent = price(row.stop ?? decision.cta?.stop_loss);
+      const minCapital = row.min_capital ?? summary.min_buy_eur;
+      const positionQty = n(decision.position?.quantity ?? row.quantity ?? row.qty);
+      const entryPx = n(decision.position?.entry_price ?? row.entry);
+      const positionValue = (positionQty !== null && entryPx !== null) ? positionQty * entryPx : null;
+      if (hasPositionLike && n(positionValue) !== null) {
+        $('capital').textContent = 'Aktualna ekspozycja tej pozycji: ' + money(positionValue, row.capital_ccy || '€');
+      } else {
+        $('capital').textContent = 'Kwota, od której taki ruch zaczyna mieć sens: ' + (minCapital ? money(minCapital, row.capital_ccy || '€') : '--');
+      }
+      // Ostatni fallback: jeśli decision-view timeoutuje, ale mamy otwartą pozycję z kanonicznego live-state,
+      // nie pokazuj pustego komunikatu o braku opłacalności.
+      if (hasPositionLike && String($('invest').textContent || '').includes('Bot nie podał')) {
+        $('invest').textContent = 'Pozycja jest aktywna. Bot monitoruje zarządzanie wyjściem i ryzykiem zamiast proponować nowe wejście.';
+      }
+      $('entry').textContent = price(row.entry ?? decision.cta?.entry_price ?? range?.buy_low);
+      $('tp').textContent = price(row.target ?? decision.cta?.take_profit ?? range?.buy_target ?? range?.sell_target);
+      $('sl').textContent = price(row.stop ?? decision.cta?.stop_loss ?? range?.sell_low);
       $('conf').textContent = n(conf) !== null ? pct(conf) : '--';
       $('upd').textContent = row.updated_at || appState.overlay?.fetched_at_local || '--';
 
@@ -1142,6 +1852,13 @@
         decision.indicators?.macd_signal ? `MACD: ${String(decision.indicators.macd_signal).toUpperCase()}` : null,
         // ATR / volatility
         n(decision.indicators?.atr ?? row.atr) !== null ? `ATR: ${fmt(decision.indicators?.atr ?? row.atr, 4)}` : null,
+        n(decision.indicators?.adx) !== null ? `ADX: ${fmt(decision.indicators?.adx, 1)}` : null,
+        n(decision.indicators?.stoch_k) !== null ? `STOCH: ${fmt(decision.indicators?.stoch_k, 1)}` : null,
+        n(decision.indicators?.volume_ratio) !== null ? `VOL/SMA20: ${fmt(decision.indicators?.volume_ratio, 2)}x` : null,
+        n(book.spreadBps) !== null ? `Spread: ${fmt(book.spreadBps, 1)} bps` : null,
+        n(book.imbalance) !== null ? `Orderbook: ${fmt(book.imbalance, 2)}` : null,
+        range?.buy_low !== undefined && range?.buy_high !== undefined ? `BUY: ${price(range.buy_low)}-${price(range.buy_high)}` : null,
+        range?.sell_low !== undefined && range?.sell_high !== undefined ? `SELL: ${price(range.sell_low)}-${price(range.sell_high)}` : null,
         forecast?.forecast_1h?.direction ? `Za 1h: ${String(forecast.forecast_1h.direction).toLowerCase()}` : null,
         forecast?.forecast_4h?.direction ? `Za 4h: ${String(forecast.forecast_4h.direction).toLowerCase()}` : null,
         forecast?.forecast_24h?.direction ? `Za 24h: ${String(forecast.forecast_24h.direction).toLowerCase()}` : null,
@@ -1150,13 +1867,8 @@
       ].filter(Boolean);
       $('chips').innerHTML = chips.map((chip) => `<div>${escapeHtml(chip)}</div>`).join('');
 
-      const klineCached = appState.cache.klines.get(`${requestSymbol || row.symbol}:${appState.selectedTf}`);
-      const klineData = Array.isArray(klineCached?.data) ? klineCached.data : (Array.isArray(klineCached) ? klineCached : []);
-      const history = klineData.length >= 2
-        ? klineData
-        : (Array.isArray(row.history) ? row.history : []);
-      const forecastPath = buildForecastPath(row, forecast);
-      draw(history, forecastPath);
+      $('chartNote').textContent = 'Każdy panel pokazuje świece OHLC, wolumen, EMA20/EMA50, pasma BUY/SELL, poziomy ENTRY/TP/SL, spread orderbooku i forecast ceny bota.';
+      drawAllCharts(row, forecast);
     }
 
     function renderBottom() {
@@ -1182,101 +1894,6 @@
             </div>
           `).join('')
         : '<div class="row"><span>Brak kolejki z bota</span><b>--</b></div>';
-    }
-
-    function draw(history, forecastPath) {
-      const canvas = $('chart');
-      const bounds = canvas.parentElement.getBoundingClientRect();
-      const ratio = window.devicePixelRatio || 1;
-      canvas.width = Math.max(300, bounds.width * ratio);
-      canvas.height = Math.max(180, bounds.height * ratio);
-      const ctx = canvas.getContext('2d');
-      ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
-      const w = bounds.width;
-      const h = bounds.height;
-
-      ctx.fillStyle = '#161c26';
-      ctx.fillRect(0, 0, w, h);
-      ctx.strokeStyle = 'rgba(255,255,255,.06)';
-      for (let i = 1; i < 8; i += 1) {
-        ctx.beginPath();
-        ctx.moveTo(w / 8 * i, 0);
-        ctx.lineTo(w / 8 * i, h);
-        ctx.stroke();
-      }
-      for (let i = 1; i < 5; i += 1) {
-        ctx.beginPath();
-        ctx.moveTo(0, h / 5 * i);
-        ctx.lineTo(w, h / 5 * i);
-        ctx.stroke();
-      }
-
-      const hist = Array.isArray(history) ? history.map(Number).filter(Number.isFinite) : [];
-      const fc = Array.isArray(forecastPath) ? forecastPath.map(Number).filter(Number.isFinite) : [];
-      if (hist.length < 2) {
-        ctx.fillStyle = 'rgba(255,217,102,.95)';
-        ctx.font = 'bold 18px Arial';
-        ctx.textAlign = 'center';
-        ctx.fillText('BRAK ŚWIEŻEJ HISTORII CEN Z BOTA', w / 2, h / 2 - 10);
-        ctx.fillStyle = 'rgba(168,177,196,.95)';
-        ctx.font = '13px Arial';
-        ctx.fillText('Brak świec dla tej pary. Overlay używa dostępnego symbolu wykresowego.', w / 2, h / 2 + 16);
-        $('chartNote').textContent = 'Brak świec dla wybranego symbolu i TF. Spróbuj innego TF lub pary.';
-        return;
-      }
-
-      const all = hist.concat(fc);
-      let min = Math.min(...all);
-      let max = Math.max(...all);
-      if (min === max) {
-        min *= .995;
-        max *= 1.005;
-      }
-      const pad = (max - min) * .12;
-      min -= pad;
-      max += pad;
-      const xx = (i, len, span = .72, offset = .04) => w * offset + w * span * (i / Math.max(1, len - 1));
-      const yy = (v) => h * .84 - ((v - min) / (max - min)) * h * .68;
-
-      ctx.lineWidth = 3;
-      ctx.strokeStyle = '#00c781';
-      ctx.beginPath();
-      hist.forEach((v, i) => {
-        if (i === 0) ctx.moveTo(xx(i, hist.length), yy(v));
-        else ctx.lineTo(xx(i, hist.length), yy(v));
-      });
-      ctx.stroke();
-
-      ctx.strokeStyle = 'rgba(255,217,102,.9)';
-      ctx.lineWidth = 2;
-      ctx.setLineDash([8, 8]);
-      ctx.beginPath();
-      hist.forEach((v, i) => {
-        const avg = hist.slice(Math.max(0, i - 4), i + 1).reduce((acc, value) => acc + value, 0) / Math.min(5, i + 1);
-        if (i === 0) ctx.moveTo(xx(i, hist.length), yy(avg));
-        else ctx.lineTo(xx(i, hist.length), yy(avg));
-      });
-      ctx.stroke();
-      ctx.setLineDash([]);
-
-      if (fc.length >= 1) {
-        const startX = xx(hist.length - 1, hist.length);
-        const start = hist.at(-1);
-        ctx.strokeStyle = '#50a7ff';
-        ctx.lineWidth = 3;
-        ctx.setLineDash([9, 7]);
-        ctx.beginPath();
-        ctx.moveTo(startX, yy(start));
-        fc.forEach((v, i) => ctx.lineTo(startX + w * .22 * ((i + 1) / Math.max(1, fc.length)), yy(v)));
-        ctx.stroke();
-        ctx.setLineDash([]);
-      }
-
-      ctx.fillStyle = 'rgba(168,177,196,.96)';
-      ctx.font = '12px Arial';
-      ctx.textAlign = 'left';
-      ctx.fillText(`min ${price(min)}  max ${price(max)}`, 12, h - 12);
-      $('chartNote').textContent = `Zielona: cena ${appState.selectedTf} | żółta: średnia | niebieska: przewidywanie bota`;
     }
 
     function statusBadge(st) {
@@ -1310,7 +1927,7 @@
       const rows = Array.isArray(overlay.active_pairs) ? overlay.active_pairs : [];
       if (appState.focusIndex >= Math.max(1, rows.length)) appState.focusIndex = 0;
       const focus = focusRowByRotation(rows);
-      if (!appState.focusSymbol && focus?.symbol) appState.focusSymbol = focus.symbol;
+      if (focus?.symbol) appState.focusSymbol = focus.symbol;
       overlay.fetched_at_local = new Date().toLocaleTimeString('pl-PL');
       appState.overlay = overlay;
       statusBadge(overlay);
@@ -1320,25 +1937,10 @@
       renderBottom();
       renderDrawer();
       if (appState.focusSymbol) prefetchFocusData(appState.focusSymbol);
-      // Prefetch klines dla pozostałych par w tle (bez blokowania render)
-      prefetchAllTickerKlines(rows);
     }
 
     function prefetchAllTickerKlines(rows) {
-      if (!Array.isArray(rows) || !rows.length) return;
-      const tf = appState.selectedTf;
-      rows.slice(0, 6).forEach((row) => {
-        const sym_ = row.chart_symbol || row.analysis_symbol || row.symbol;
-        if (!sym_) return;
-        const key = `${sym_}:${tf}`;
-        const cached = appState.cache.klines.get(key);
-        const age = cached ? Date.now() - (cached._ts || 0) : Infinity;
-        const ttl = (Array.isArray(cached?.data) && cached.data.length >= 2) ? 30000 : 8000;
-        if (age >= ttl) {
-          // Fetch w tle, bez await
-          ensureKlines(sym_, tf).catch(() => {});
-        }
-      });
+      void rows;
     }
 
     async function ensureKlines(symbol, tf) {
@@ -1355,7 +1957,14 @@
       appState.cache.klines.delete(key);
       try {
         const payload = await apiJson(`/api/market/kline?symbol=${encodeURIComponent(symbol)}&tf=${encodeURIComponent(tf)}&limit=120`);
-        const data = Array.isArray(payload.data) ? payload.data.map((row) => n(row.close)).filter((value) => value !== null) : [];
+        // Proxy 8099 opakowuje odpowiedź: {ok, data: {data: [...]}}, backend bezpośrednio: {data: [...]}
+        const inner = payload?.data?.data ?? payload?.data;
+        const data = Array.isArray(inner)
+          ? inner
+              .map((item, index) => normalizeKlineItem(item, index))
+              .filter(Boolean)
+              .sort((a, b) => a.timestamp - b.timestamp)
+          : [];
         appState.cache.klines.set(key, { data, _ts: Date.now() });
         return data;
       } catch {
@@ -1384,6 +1993,31 @@
         return payload;
       } catch {
         appState.cache.decision.set(symbol, null);
+        return null;
+      }
+    }
+
+    async function ensureRanges(symbol) {
+      if (appState.cache.ranges.has(symbol)) return appState.cache.ranges.get(symbol);
+      try {
+        const payload = await apiJson(`/api/market/ranges?symbol=${encodeURIComponent(symbol)}`);
+        const data = Array.isArray(payload?.data) ? payload.data[0] || null : null;
+        appState.cache.ranges.set(symbol, data);
+        return data;
+      } catch {
+        appState.cache.ranges.set(symbol, null);
+        return null;
+      }
+    }
+
+    async function ensureOrderbook(symbol) {
+      if (appState.cache.orderbook.has(symbol)) return appState.cache.orderbook.get(symbol);
+      try {
+        const payload = await apiJson(`/api/market/orderbook/${encodeURIComponent(symbol)}?limit=20`);
+        appState.cache.orderbook.set(symbol, payload);
+        return payload;
+      } catch {
+        appState.cache.orderbook.set(symbol, null);
         return null;
       }
     }
@@ -1432,10 +2066,13 @@
       if (!symbol) return;
       const row = getRow(symbol) || { symbol };
       const requestSymbol = dataSymbol(row) || symbol;
+      const tfFetches = TF_LIST.map((tf) => ensureKlines(requestSymbol, tf));
       await Promise.all([
-        ensureKlines(requestSymbol, appState.selectedTf),
+        ...tfFetches,
         ensureForecast(requestSymbol),
         ensureDecision(requestSymbol),
+        ensureRanges(requestSymbol),
+        ensureOrderbook(requestSymbol),
       ]);
       if (getRow(symbol)) renderFocus();
       if (appState.nav === 'analysis') renderDrawer();
@@ -1499,6 +2136,8 @@
       const requestSymbol = dataSymbol(row);
       const decision = (appState.cache.decision.get(requestSymbol) || appState.cache.decision.get(row?.symbol || ''))?.data || {};
       const forecast = appState.cache.forecast.get(requestSymbol) || appState.cache.forecast.get(row?.symbol || '');
+      const range = appState.cache.ranges.get(requestSymbol) || appState.cache.ranges.get(row?.symbol || '') || null;
+      const book = orderbookMeta(appState.cache.orderbook.get(requestSymbol) || appState.cache.orderbook.get(row?.symbol || '') || {});
       const blockers = Array.isArray(decision.blockers) ? decision.blockers : [];
       const horizons = decision.horizons || {};
       return `
@@ -1510,6 +2149,10 @@
               <div class="kv"><span>Stan danych</span><b>${decision.data_quality || '--'}</b></div>
               <div class="kv"><span>Cena teraz</span><b>${price(decision.market_context?.current_price ?? decision.current_price ?? row.price)}</b></div>
               <div class="kv"><span>Wiek danych</span><b>${decision.market_context?.data_age_s ?? decision.data_age_seconds ?? '--'} s</b></div>
+              <div class="kv"><span>Spread</span><b>${n(book.spreadBps) !== null ? `${fmt(book.spreadBps, 1)} bps` : '--'}</b></div>
+              <div class="kv"><span>Orderbook</span><b>${n(book.imbalance) !== null ? fmt(book.imbalance, 2) : '--'}</b></div>
+              <div class="kv"><span>BUY zakres</span><b>${range ? `${price(range.buy_low)} - ${price(range.buy_high)}` : '--'}</b></div>
+              <div class="kv"><span>SELL zakres</span><b>${range ? `${price(range.sell_low)} - ${price(range.sell_high)}` : '--'}</b></div>
             </div>
             <div class="narr">${escapeHtml(decision.explanation?.plain || decision.plain_explanation || row.plain_summary || decision.final_signal_reason || row.reason || 'Brak prostego wyjaśnienia.')}</div>
             <div style="margin-top:8px;">
@@ -1627,32 +2270,8 @@
       });
       $('closeDrawer').addEventListener('click', () => setNav('live'));
       $('pinSymbol').addEventListener('click', () => toggleFavorite(appState.focusSymbol));
-      document.querySelectorAll('#timeframes button[data-tf]').forEach((node) => {
-        node.addEventListener('click', async () => {
-          const tf = node.dataset.tf;
-          appState.selectedTf = tf;
-          document.querySelectorAll('#timeframes button[data-tf]').forEach((button) => {
-            button.classList.toggle('on', button.dataset.tf === tf);
-          });
-          if (appState.focusSymbol) {
-            const row = getRow(appState.focusSymbol) || { symbol: appState.focusSymbol };
-            const sym_ = dataSymbol(row) || appState.focusSymbol;
-            // Wymuś odświeżenie klines dla nowego TF
-            appState.cache.klines.delete(`${sym_}:${tf}`);
-            await ensureKlines(sym_, tf);
-            renderFocus();
-          }
-        });
-      });
       window.addEventListener('resize', () => {
-        const row = getFocusRow();
-        const requestSymbol = dataSymbol(row);
-        const _kc = appState.cache.klines.get(`${requestSymbol || row?.symbol}:${appState.selectedTf}`);
-        const history = (Array.isArray(_kc?.data) ? _kc.data : (Array.isArray(_kc) ? _kc : [])).length >= 2
-          ? (Array.isArray(_kc?.data) ? _kc.data : _kc)
-          : (row?.history || []);
-        const forecast = buildForecastPath(row, appState.cache.forecast.get(requestSymbol || row?.symbol || ''));
-        draw(history, forecast);
+        renderFocus();
       });
     }
 

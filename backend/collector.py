@@ -14,7 +14,6 @@ from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional
 
-import requests
 import websockets
 from dotenv import load_dotenv
 from sqlalchemy import desc, or_, text
@@ -87,6 +86,7 @@ from backend.runtime_settings import (
     upsert_overrides,
     watchlist_override,
 )
+from backend.notification_hooks import send_telegram_message
 from backend.system_logger import log_exception, log_to_db
 from backend.telegram_formatter import (
     AlertThrottler,
@@ -170,7 +170,8 @@ class DataCollector:
         self._usdc_policy_bootstrapped: bool = False
         self.last_no_watchlist_log_ts: Optional[datetime] = None
         self.interval = int(os.getenv("COLLECTION_INTERVAL_SECONDS", 60))
-        self.kline_timeframes = os.getenv("KLINE_TIMEFRAMES", "1m,1h").split(",")
+        # Grid.md wymagane: 15m, 1h, 4h (plus opcjonalnie 1m dla backward compat)
+        self.kline_timeframes = os.getenv("KLINE_TIMEFRAMES", "1m,15m,1h,4h").split(",")
         self.running = False
         self.ws_running = False
         self.ws_thread: threading.Thread | None = None
@@ -471,6 +472,14 @@ class DataCollector:
 
         # 1. Guard: aktywny pending lub cooldown → skip
         if _has_active_pending(symbol):
+            self._trace_decision(
+                db,
+                symbol=symbol,
+                action="SKIP",
+                reason_code="active_pending_exists",
+                runtime_ctx=runtime_ctx,
+                mode=mode,
+            )
             return 0
         if _pending_in_cooldown(symbol):
             self._trace_decision(
@@ -497,6 +506,15 @@ class DataCollector:
             return 0
 
         if not sig_result.is_valid:
+            logger.info(
+                "🔎 LIVE PIPELINE WHY_NOT_BUY %s: reason=%s score=%.3f conf=%.3f edge=%.3f%% details=%s",
+                symbol,
+                sig_result.reason_code or "signal_engine_rejected",
+                float(sig_result.score or 0.0),
+                float(sig_result.confidence or 0.0),
+                float(sig_result.expected_net_edge_pct or 0.0),
+                sig_result.details,
+            )
             self._trace_decision(
                 db, symbol=symbol, action="SKIP",
                 reason_code=sig_result.reason_code or "signal_engine_rejected",
@@ -948,6 +966,224 @@ class DataCollector:
 
         return sorted(resolved) if resolved else []
 
+    def _load_dynamic_grid_watchlist(self, top_n: int = 10) -> List[str]:
+        """
+        Wczytaj top-N par USDC używając dynamic_grid selectora (grid.md algorytm).
+        Zwraca listę symboli już rozwiązanych (np. "BTCUSDC", "ETHUSDC").
+        
+        Fallback na zwykłą _load_watchlist() jeśli dynamic_grid jest disabled w runtime.
+        """
+        try:
+            from backend.trading.dynamic_grid import select_top_usdc_pairs
+            
+            # Pobierz top-N par
+            top_pairs = select_top_usdc_pairs(
+                client=self.binance,
+                top_n=top_n,
+                min_quote_volume_abs=100000,
+                min_trade_count_abs=100,
+                max_spread_bps_cap=50.0,
+            )
+            
+            if not top_pairs:
+                logger.warning("⚠️ Dynamic grid selector returned empty list, falling back to portfolio watchlist")
+                return self._load_watchlist(allow_env_fallback=True)
+            
+            # Konwertuj do symboli (pare pair_data zawiera pole 'symbol')
+            symbols = [p.get("symbol") for p in top_pairs if p.get("symbol")]
+            
+            if symbols:
+                logger.info(f"✅ Dynamic grid top-{len(symbols)} USDC pairs selected: {', '.join(symbols)}")
+                return sorted(symbols)
+            else:
+                logger.warning("⚠️ Failed to extract symbols from top pairs, falling back")
+                return self._load_watchlist(allow_env_fallback=True)
+                
+        except Exception as e:
+            logger.error(f"❌ Dynamic grid selector failed: {e}, falling back to portfolio watchlist")
+            return self._load_watchlist(allow_env_fallback=True)
+
+    def _build_dynamic_grid_plans(self, db: Session) -> int:
+        """
+        Zbuduj/odśwież plany gridu dla każdej pary z watchlisty (grid.md logika).
+        
+        Dla każdej pary:
+        1. Pobierz multi-timeframe context (15m, 1h, 4h)
+        2. Zbuduj plan gridu (center, range, levels, invest)
+        3. Utrwal w RuntimeSetting
+        4. Sprawdź czy recenterung jest potrzebny
+        
+        Returns: Liczba pomyślnie zbudowanych planów
+        """
+        try:
+            from backend.trading.dynamic_grid import build_grid_plan, get_grid_context, load_grid_plan
+            from backend.analysis import get_grid_context as analysis_get_grid_context
+            from backend.trading.risk_engine import build_account_state
+            
+            enable_dynamic_grid = effective_bool(
+                db, "enable_dynamic_grid", "ENABLE_DYNAMIC_GRID", False
+            )
+            
+            if not enable_dynamic_grid or not self.watchlist:
+                return 0
+            
+            # Pobierz dostępny kapitał dla sizingu
+            try:
+                account = build_account_state(db, mode="live")
+                equity = float(account.get("equity", 1000) or 1000)
+            except:
+                equity = 1000.0
+            
+            # Runtime config dla gridu
+            grid_config = {
+                "dynamic_grid_invest_pct": float(
+                    os.getenv("DYNAMIC_GRID_INVEST_PCT", "0.1") or 0.1
+                ),
+                "dynamic_grid_hardstop_pad_pct": float(
+                    os.getenv("DYNAMIC_GRID_HARDSTOP_PAD_PCT", "0.03") or 0.03
+                ),
+            }
+            
+            built_count = 0
+            
+            for symbol in self.watchlist[:10]:  # Ogranicź do 10 symboli aby nie overload API
+                try:
+                    # Pobierz multi-timeframe context
+                    grid_ctx = analysis_get_grid_context(db, symbol)
+                    if not grid_ctx:
+                        logger.debug(f"⚠️ {symbol}: Brak wystarczających danych (< 60 barów) do gridu")
+                        continue
+                    
+                    # Zbuduj plan gridu
+                    plan = build_grid_plan(
+                        db=db,
+                        symbol=symbol,
+                        grid_context=grid_ctx,
+                        equity=equity,
+                        config=grid_config,
+                    )
+                    
+                    if plan:
+                        # Utrwal plan w RuntimeSetting
+                        from backend.trading.dynamic_grid import persist_grid_plan
+                        persist_grid_plan(db, symbol, plan)
+                        built_count += 1
+                        logger.info(
+                            f"✅ Grid plan built for {symbol}: "
+                            f"range=[{plan.lower:.8f}, {plan.upper:.8f}], "
+                            f"levels={plan.grid_count}, invest={plan.invest_quote:.2f}"
+                        )
+                    else:
+                        logger.debug(f"⚠️ {symbol}: Grid builder returned None")
+                        
+                except Exception as e:
+                    logger.warning(f"⚠️ {symbol}: Failed to build grid plan: {e}")
+                    continue
+            
+            if built_count > 0:
+                logger.info(f"📊 Built {built_count}/{len(self.watchlist)} dynamic grid plans")
+            
+            return built_count
+            
+        except Exception as e:
+            logger.error(f"❌ Error in _build_dynamic_grid_plans: {e}")
+            return 0
+
+    def _orchestrate_grid_trades(self, db: Session) -> int:
+        """
+        Orchestruj entry/exit dla dynamicznych gridów (T-155).
+        Dla każdej pary ze zbudowanymi grid planami: place BUY na buy_levels, manage SL/TP na sell_levels.
+        """
+        try:
+            from backend.trading.grid_orchestration import (
+                orchestrate_grid_entries,
+                orchestrate_grid_exits,
+            )
+            from backend.trading.dynamic_grid import load_grid_plan
+
+            # Pobierz aktywne grid plany z RuntimeSetting
+            active_grids = db.query(RuntimeSetting).filter(
+                RuntimeSetting.key == "active_grid_plans"
+            ).first()
+
+            if not active_grids:
+                return 0
+
+            try:
+                grid_plans_dict = json.loads(active_grids.value) if active_grids.value else {}
+            except json.JSONDecodeError:
+                logger.error("❌ Failed to parse active_grid_plans from RuntimeSetting")
+                return 0
+
+            if not grid_plans_dict:
+                return 0
+
+            # Pobierz balans i equity
+            positions = db.query(Position).filter(Position.status == "OPEN").all()
+            balance_result = self.client.get_balances()
+            if not balance_result or balance_result.get("code") != "OK":
+                logger.warning("⚠️ Failed to get balance for grid orchestration")
+                return 0
+
+            balance = float(balance_result.get("data", {}).get("totalBalance", 0))
+            equity = balance if balance > 0 else 10000.0
+
+            config = {
+                "min_qty": float(os.getenv("MIN_QTY", 0.001)),
+                "min_notional": float(os.getenv("MIN_BUY_NOTIONAL_DEMO", 10.0)),
+            }
+
+            orders_placed = 0
+
+            # Dla każdej pary w grid_plans
+            for symbol, grid_plan_data in grid_plans_dict.items():
+                try:
+                    grid_plan = grid_plan_data
+                    current_price = float(grid_plan.get("last_price", 0))
+                    if current_price <= 0:
+                        continue
+
+                    # 1) Entry orchestration
+                    placed, entry_reasons = orchestrate_grid_entries(
+                        db,
+                        symbol,
+                        grid_plan,
+                        current_price,
+                        equity,
+                        balance,
+                        config,
+                        positions,
+                    )
+                    orders_placed += placed
+                    if placed > 0:
+                        logger.info(
+                            f"✅ Grid entries placed for {symbol}: {placed} orders, reasons={entry_reasons}"
+                        )
+
+                    # 2) Exit orchestration (dla otwartych pozycji)
+                    open_pos = next((p for p in positions if p.symbol == symbol), None)
+                    if open_pos:
+                        exit_triggered, exit_reasons = orchestrate_grid_exits(
+                            db, symbol, grid_plan, current_price, open_pos, config
+                        )
+                        if exit_triggered:
+                            logger.warning(
+                                f"⚠️ Grid exit triggered for {symbol}: reasons={exit_reasons}"
+                            )
+
+                except Exception as e:
+                    logger.error(f"❌ Error orchestrating grid for {symbol}: {e}")
+                    continue
+
+            return orders_placed
+
+        except ImportError as e:
+            logger.debug(f"Grid orchestration not available: {e}")
+            return 0
+        except Exception as e:
+            logger.error(f"❌ Error in _orchestrate_grid_trades: {e}")
+            return 0
+
     def _has_openai_key(self) -> bool:
         return os.getenv("OPENAI_API_KEY", "").strip() != ""
 
@@ -1089,9 +1325,21 @@ class DataCollector:
 
         self.last_watchlist_refresh_ts = now
         try:
-            # Jeśli watchlista już istnieje, nie używaj fallbacku z .env przy chwilowych
-            # problemach z saldami Binance - zostaw poprzednią listę i unikaj flappingu.
-            new_list = self._load_watchlist(allow_env_fallback=not bool(self.watchlist))
+            # Sprawdź czy dynamic_grid jest włączony w runtime
+            enable_dynamic_grid = effective_bool(
+                db, "enable_dynamic_grid", "ENABLE_DYNAMIC_GRID", False
+            )
+            
+            if enable_dynamic_grid:
+                # Użyj dynamicznego selectora top-N USDC par
+                dynamic_top_n = int(
+                    os.getenv("DYNAMIC_GRID_TOP_N", "10") or 10
+                )
+                new_list = self._load_dynamic_grid_watchlist(top_n=dynamic_top_n)
+            else:
+                # Fallback na portfolio-based watchlist
+                new_list = self._load_watchlist(allow_env_fallback=not bool(self.watchlist))
+                
         except Exception as exc:
             log_exception("collector", "Błąd odświeżania watchlisty", exc, db=db)
             return False
@@ -1119,7 +1367,7 @@ class DataCollector:
         if new_list != self.watchlist:
             old = ", ".join(self.watchlist) if self.watchlist else "(pusto)"
             new = ", ".join(new_list)
-            logger.info(f"🔁 Watchlista z portfela: {old} -> {new}")
+            logger.info(f"🔁 Watchlista: {old} -> {new}")
             log_to_db("INFO", "collector", f"Watchlist updated: {old} -> {new}", db=db)
             self.watchlist = new_list
         # Filtrowanie wg quote currency mode (twarde, deterministyczne)
@@ -1620,6 +1868,16 @@ class DataCollector:
             self._inflight_symbol_orders.pop(key, None)
 
     def _send_telegram_alert(self, title: str, message: str, force_send: bool = False):
+        app_env = str(os.getenv("APP_ENV", "")).lower()
+        disable_telegram = os.getenv("DISABLE_TELEGRAM", "false").lower() in {
+            "1",
+            "true",
+            "yes",
+        }
+        test_mode = bool(os.getenv("PYTEST_CURRENT_TEST")) or app_env == "test"
+        if disable_telegram or test_mode:
+            return
+
         risk_alerts = os.getenv("TELEGRAM_RISK_ALERTS", "false").lower() == "true"
         error_only = os.getenv("TELEGRAM_ERROR_ONLY", "false").lower() == "true"
         token = os.getenv("TELEGRAM_BOT_TOKEN", "")
@@ -1635,11 +1893,9 @@ class DataCollector:
         ):
             return
         try:
-            url = f"https://api.telegram.org/bot{token}/sendMessage"
-            requests.post(
-                url,
-                json={"chat_id": chat_id, "text": f"⚠️ {title}\n{message}"},
-                timeout=5,
+            send_telegram_message(
+                f"⚠️ {title}\n{message}",
+                source_module="collector",
             )
         except Exception as exc:
             log_exception("collector", "Błąd wysyłki alertu Telegram", exc)
@@ -1922,6 +2178,37 @@ class DataCollector:
                 )
                 continue
             try:
+                claim_ok = (
+                    db.query(PendingOrder)
+                    .filter(
+                        PendingOrder.id == pending.id,
+                        PendingOrder.status.in_(list(EXECUTABLE_PENDING_STATUSES)),
+                    )
+                    .update({"status": "EXECUTING"}, synchronize_session=False)
+                )
+                if claim_ok != 1:
+                    self._trace_decision(
+                        db,
+                        symbol=pending.symbol,
+                        action="SKIP_PENDING",
+                        reason_code="pending_claim_lost",
+                        runtime_ctx=runtime_ctx,
+                        mode=p_mode,
+                        execution_check={
+                            "eligible": False,
+                            "pending_id": pending.id,
+                        },
+                        details={
+                            "stage": "claim_pending",
+                            "reason": "already_claimed_or_status_changed",
+                        },
+                        level="WARNING",
+                    )
+                    db.rollback()
+                    continue
+                db.commit()
+                pending.status = "EXECUTING"
+
                 qty = float(pending.quantity)
 
                 if qty <= 0:
@@ -2487,6 +2774,14 @@ class DataCollector:
                     _live_fee_asset = (
                         fills[0].get("commissionAsset", "") if fills else ""
                     )
+                    _live_base_fee = 0.0
+                    if fills and str(pending.side or "").upper() == "BUY":
+                        _base_asset = str(get_base_asset(pending.symbol) or "").upper()
+                        _live_base_fee = sum(
+                            float(f.get("commission", 0))
+                            for f in fills
+                            if str(f.get("commissionAsset", "")).upper() == _base_asset
+                        )
                     _notional_filled = qty * exec_price
                     _side = str(pending.side or "ORDER").upper()
 
@@ -2574,6 +2869,7 @@ class DataCollector:
                 else:
                     _live_actual_fee = 0.0
                     _live_fee_asset = ""
+                    _live_base_fee = 0.0
                     # ——— DEMO: symulacja po aktualnej cenie rynkowej ———
                     exec_price = pending.price
                     ticker = self.binance.get_ticker_price(pending.symbol)
@@ -2726,6 +3022,17 @@ class DataCollector:
                 _closed_pos_id: Optional[int] = None  # zachowamy przed db.delete
 
                 if pending.side == "BUY":
+                    position_fill_qty = qty
+                    if p_mode == "live" and _live_base_fee > 0:
+                        position_fill_qty = max(0.0, qty - _live_base_fee)
+                        logger.info(
+                            "🧮 LIVE BUY NET QTY: %s gross=%.8g fee_base=%.8g net=%.8g",
+                            pending.symbol,
+                            qty,
+                            _live_base_fee,
+                            position_fill_qty,
+                        )
+
                     # Zachowaj plan wyjścia policzony przy wejściu; fallback tylko gdy go brak.
                     _planned_tp = None
                     _planned_sl = None
@@ -2797,7 +3104,7 @@ class DataCollector:
                             symbol=pending.symbol,
                             side="LONG",
                             entry_price=exec_price,
-                            quantity=qty,
+                            quantity=position_fill_qty,
                             current_price=exec_price,
                             unrealized_pnl=0.0,
                             gross_pnl=0.0,
@@ -2827,15 +3134,15 @@ class DataCollector:
                             "🟢 LIFECYCLE POSITION_OPENED: %s mode=%s pos_id=%s "
                             "entry=%.6f qty=%.8g tp=%.6f sl=%.6f",
                             pending.symbol, p_mode, position.id,
-                            exec_price, qty,
+                            exec_price, position_fill_qty,
                             float(_planned_tp or 0), float(_planned_sl or 0),
                         )
                     else:
-                        total_qty = float(position.quantity) + qty
+                        total_qty = float(position.quantity) + position_fill_qty
                         if total_qty > 0:
                             position.entry_price = (
                                 (float(position.entry_price) * float(position.quantity))
-                                + (exec_price * qty)
+                                + (exec_price * position_fill_qty)
                             ) / total_qty
                         position.quantity = total_qty
                         position.current_price = exec_price
@@ -4320,7 +4627,7 @@ class DataCollector:
             if sym_tier.get("hold_mode"):
                 continue
 
-            if _has_active_pending(sym) or _pending_in_cooldown(sym):
+            if _has_active_pending(sym):
                 continue
 
             latest = (
@@ -4502,6 +4809,9 @@ class DataCollector:
                         timestamp=now,
                     )
                 )
+                continue
+
+            if _pending_in_cooldown(sym):
                 continue
 
             # ━━━ WARSTWA 2: TRAILING STOP ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -7202,6 +7512,22 @@ class DataCollector:
 
             # Analiza + blog (co najmniej raz na godzinę)
             maybe_generate_insights_and_blog(db, self.watchlist)
+
+            # Zbuduj/odśwież plany gridu dla dynamic_grid (jeśli włączony)
+            try:
+                self._build_dynamic_grid_plans(db)
+            except Exception as exc:
+                log_exception(
+                    "collector", "Błąd budowania planów gridu", exc, db=db
+                )
+
+            # Orchestruj entry/exit dla gridów (T-155)
+            try:
+                self._orchestrate_grid_trades(db)
+            except Exception as exc:
+                log_exception(
+                    "collector", "Błąd orchestracji grid trades", exc, db=db
+                )
 
             # DEMO trading
             self._demo_trading(db, mode="demo")

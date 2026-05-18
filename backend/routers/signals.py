@@ -143,10 +143,71 @@ def signals_root():
     }
 
 
+def _build_live_entry_alignment_signals(
+    db: Session,
+    symbols: List[str],
+) -> List[dict]:
+    """
+    Zbuduj short-term sygnały wejścia zgodne z collectorowym signal_engine.
+
+    Używamy tego tylko dla symboli bez otwartej pozycji, aby UI/decision layer
+    nie promowały historycznych BUY, których live pipeline już nie zaakceptuje.
+    """
+    from backend.binance_client import get_binance_client
+    from backend.trading.signal_engine import evaluate_entry_signal
+    from backend.trading.trade_config import get_trade_config
+
+    cfg = get_trade_config(db)
+    binance_client = get_binance_client()
+    results: List[dict] = []
+
+    for symbol in symbols:
+        try:
+            live_sig = evaluate_entry_signal(
+                db,
+                symbol,
+                cfg,
+                meta=None,
+                binance_client=binance_client,
+            )
+        except Exception:
+            continue
+
+        signal_type = "BUY" if live_sig.is_valid else "HOLD"
+        reason = (
+            f"Live BUY potwierdzony: {live_sig.reason_code or 'entry_signal_valid'}"
+            if live_sig.is_valid
+            else f"Live BUY zablokowany: {live_sig.reason_pl or live_sig.reason_code or 'brak setupu'}"
+        )
+
+        results.append(
+            {
+                "id": None,
+                "symbol": symbol,
+                "signal_type": signal_type,
+                "confidence": float(live_sig.confidence or 0.0),
+                "price": float(live_sig.entry_price or 0.0),
+                "indicators": {
+                    "atr": float(live_sig.atr or 0.0),
+                    "entry_score": float(live_sig.score or 0.0),
+                    "expected_net_edge_pct": float(
+                        live_sig.expected_net_edge_pct or 0.0
+                    ),
+                    "signal_engine_reason": live_sig.reason_code,
+                },
+                "reason": reason,
+                "timestamp": utc_now_naive().isoformat(),
+                "source": "signal_engine_live",
+            }
+        )
+
+    return results
+
+
 def _load_signals_from_db_or_live(
     db: Session,
     symbols: List[str],
-    max_age_minutes: int = 90,
+    max_age_minutes: int = 20,
 ) -> List[dict]:
     """
     Pobierz najnowszy sygnał z tabeli Signal dla każdego symbolu (szybko).
@@ -172,9 +233,26 @@ def _load_signals_from_db_or_live(
         .all()
     )
 
+    try:
+        open_position_symbols = {
+            row[0]
+            for row in db.query(Position.symbol)
+            .filter(
+                Position.mode == "live",
+                Position.exit_reason_code.is_(None),
+                Position.quantity > 0,
+            )
+            .all()
+            if row and row[0]
+        }
+    except Exception:
+        open_position_symbols = set()
+
     result = []
     found_symbols: set[str] = set()
     stale_symbols: List[str] = []
+    fresh_buy_symbols_to_revalidate: List[str] = []
+    signals_by_symbol: Dict[str, dict] = {}
 
     for sig in rows:
         try:
@@ -189,20 +267,34 @@ def _load_signals_from_db_or_live(
             stale_symbols.append(sig.symbol)
             continue
 
-        result.append(
-            {
-                "id": sig.id,
-                "symbol": sig.symbol,
-                "signal_type": sig.signal_type,
-                "confidence": sig.confidence,
-                "price": sig.price,
-                "indicators": ind,
-                "reason": sig.reason,
-                "timestamp": sig.timestamp.isoformat(),
-                "source": "database",
-            }
-        )
+        payload = {
+            "id": sig.id,
+            "symbol": sig.symbol,
+            "signal_type": sig.signal_type,
+            "confidence": sig.confidence,
+            "price": sig.price,
+            "indicators": ind,
+            "reason": sig.reason,
+            "timestamp": sig.timestamp.isoformat(),
+            "source": "database",
+        }
+        signals_by_symbol[sig.symbol] = payload
         found_symbols.add(sig.symbol)
+
+        if sig.symbol not in open_position_symbols and str(sig.signal_type or "").upper() == "BUY":
+            fresh_buy_symbols_to_revalidate.append(sig.symbol)
+        else:
+            result.append(payload)
+
+    if fresh_buy_symbols_to_revalidate:
+        revalidated = {
+            item["symbol"]: item
+            for item in _build_live_entry_alignment_signals(
+                db, fresh_buy_symbols_to_revalidate
+            )
+        }
+        for symbol in fresh_buy_symbols_to_revalidate:
+            result.append(revalidated.get(symbol, signals_by_symbol[symbol]))
 
     # Fallback: symbole bez rekordu w DB + symbole ze zbyt starym rekordem
     missing = [s for s in symbols if s.strip().upper() not in found_symbols]
@@ -210,8 +302,15 @@ def _load_signals_from_db_or_live(
         dict.fromkeys(missing + stale_symbols)
     )  # uniq, kolejność zachowana
     if regenerate:
-        live_fallback = _build_live_signals(db, regenerate, limit=len(regenerate))
-        result.extend(live_fallback)
+        entry_symbols = [s for s in regenerate if s not in open_position_symbols]
+        position_symbols = [s for s in regenerate if s in open_position_symbols]
+        if entry_symbols:
+            result.extend(_build_live_entry_alignment_signals(db, entry_symbols))
+        if position_symbols:
+            live_fallback = _build_live_signals(
+                db, position_symbols, limit=len(position_symbols)
+            )
+            result.extend(live_fallback)
 
     result.sort(key=lambda x: (-x["confidence"], x["signal_type"] == "HOLD"))
     return result
@@ -4107,9 +4206,59 @@ def get_symbol_decision_view(
         except Exception:
             pass
 
-    rsi = indicators_raw.get("rsi_14")
-    ema20 = indicators_raw.get("ema_20")
-    ema50 = indicators_raw.get("ema_50")
+    def _num(value):
+        try:
+            return float(value) if value is not None else None
+        except Exception:
+            return None
+
+    rsi = _num(indicators_raw.get("rsi_14") or indicators_raw.get("rsi"))
+    ema20 = _num(indicators_raw.get("ema_20") or indicators_raw.get("ema20"))
+    ema50 = _num(indicators_raw.get("ema_50") or indicators_raw.get("ema50"))
+    atr = _num(indicators_raw.get("atr") or indicators_raw.get("atr_14"))
+    adx = _num(indicators_raw.get("adx"))
+    stoch_k = _num(indicators_raw.get("stoch_k"))
+    volume_ratio = _num(indicators_raw.get("volume_ratio"))
+    macd_hist = _num(indicators_raw.get("macd_hist"))
+    bb_upper = _num(indicators_raw.get("bb_upper"))
+    bb_lower = _num(indicators_raw.get("bb_lower"))
+    fib_382 = _num(indicators_raw.get("fib_382"))
+    fib_618 = _num(indicators_raw.get("fib_618"))
+    spread_bps = _num(
+        indicators_raw.get("spread_bps")
+        or indicators_raw.get("spread_bps_est")
+        or indicators_raw.get("spread_bps_live")
+    )
+    orderbook_imbalance = _num(
+        indicators_raw.get("orderbook_imbalance")
+        or indicators_raw.get("depth_ratio")
+    )
+    ema_cross = None
+    if ema20 is not None and ema50 is not None:
+        if ema20 > ema50:
+            ema_cross = "bullish"
+        elif ema20 < ema50:
+            ema_cross = "bearish"
+        else:
+            ema_cross = "flat"
+
+    boll_position = None
+    if current_price is not None and bb_upper is not None and bb_lower is not None:
+        if current_price <= bb_lower:
+            boll_position = "lower_band"
+        elif current_price >= bb_upper:
+            boll_position = "upper_band"
+        else:
+            boll_position = "inside_band"
+
+    macd_signal = None
+    if macd_hist is not None:
+        if macd_hist > 0:
+            macd_signal = "bullish"
+        elif macd_hist < 0:
+            macd_signal = "bearish"
+        else:
+            macd_signal = "flat"
 
     if ema20 is not None and ema50 is not None:
         trend = (
@@ -4326,6 +4475,20 @@ def get_symbol_decision_view(
             "ema20": ema20,
             "ema50": ema50,
             "trend": trend,
+            "atr": atr,
+            "adx": adx,
+            "stoch_k": stoch_k,
+            "volume_ratio": volume_ratio,
+            "macd_hist": macd_hist,
+            "bb_upper": bb_upper,
+            "bb_lower": bb_lower,
+            "fib_382": fib_382,
+            "fib_618": fib_618,
+            "spread_bps": spread_bps,
+            "orderbook_imbalance": orderbook_imbalance,
+            "ema_cross": ema_cross,
+            "boll_position": boll_position,
+            "macd_signal": macd_signal,
         },
         "target": target,
         "blockers": blockers,

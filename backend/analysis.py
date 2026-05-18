@@ -848,6 +848,122 @@ def get_regime_indicators(db, symbol: str) -> Optional[Dict]:
     Zwraca słownik gotowy do przekazania do risk.detect_regime().
     Graceful fallback: jeśli brak 15m, używa 1h dla obu zestawów.
     """
+
+
+def get_grid_context(db, symbol: str) -> Optional[Dict]:
+    """
+    Pobiera bogatą kontekst dla dynamicznego gridu:
+    - 15m: szybka zmienność, spacing poziomów
+    - 1h: główna kotwica zakresu i VWAP
+    - 4h: filtr strukturalnego trendu
+    
+    Wymagane co najmniej 60 barów dla każdego interwału.
+    
+    Returns:
+        {
+            "symbol": str,
+            "last_price": float,
+            "15m": { ema_20, ema_50, rsi, atr, adx, volume_ratio },
+            "1h": { ema_20, ema_50, rsi, atr, adx, vwap, volume_ratio },
+            "4h": { ema_20, ema_50, rsi, adx },
+            "spread_bps": float (z orderbook),
+        }
+        lub None jeśli brak wystarczających danych
+    """
+    try:
+        # Pobierz świece dla 15m, 1h, 4h
+        ctx = {"symbol": symbol}
+        timeframes_needed = ["15m", "1h", "4h"]
+        
+        for tf in timeframes_needed:
+            klines = (
+                db.query(Kline)
+                .filter(Kline.symbol == symbol, Kline.timeframe == tf)
+                .order_by(Kline.open_time.desc())
+                .limit(200)
+                .all()
+            )
+            if not klines or len(klines) < 60:
+                logger.warning(
+                    f"⚠️ get_grid_context {symbol}: brak wystarczających barów dla {tf} "
+                    f"(mamy {len(klines) if klines else 0}, potrzebujemy ≥60)"
+                )
+                return None
+            
+            df = _klines_to_df(list(reversed(klines)))
+            if df is None or len(df) < 60:
+                return None
+            
+            df = df.copy()
+            
+            # Podstawowe wskaźniki
+            df["ema_20"] = ta.ema(df["close"], length=20)
+            df["ema_50"] = ta.ema(df["close"], length=50)
+            df["rsi_14"] = ta.rsi(df["close"], length=14)
+            df["atr_14"] = ta.atr(df["high"], df["low"], df["close"], length=14)
+            
+            # ADX dla 1h i 4h
+            try:
+                adx_result = ta.adx(df["high"], df["low"], df["close"], length=14)
+                if adx_result is not None and not adx_result.empty:
+                    adx_col = next((c for c in adx_result.columns if c.startswith("ADX_")), None)
+                    if adx_col:
+                        df["adx_14"] = adx_result[adx_col]
+            except Exception:
+                pass
+            
+            # Volume ratio
+            vol_ratio = None
+            if "volume" in df.columns:
+                try:
+                    vol_sma = df["volume"].rolling(20).mean()
+                    last_vol = df["volume"].iloc[-1]
+                    last_sma = vol_sma.iloc[-1]
+                    if pd.notna(last_vol) and pd.notna(last_sma) and last_sma > 0:
+                        vol_ratio = float(last_vol / last_sma)
+                except Exception:
+                    pass
+            
+            # VWAP dla 1h (rolling 24 świece)
+            vwap_24 = None
+            if tf == "1h" and "volume" in df.columns and len(df) >= 24:
+                try:
+                    typical = (df["high"] + df["low"] + df["close"]) / 3
+                    vwap_24 = float(
+                        (typical * df["volume"]).rolling(24).sum() / df["volume"].rolling(24).sum()
+                    )
+                except Exception:
+                    pass
+            
+            last = df.iloc[-1]
+            
+            ctx[tf] = {
+                "ema_20": float(last["ema_20"]) if pd.notna(last["ema_20"]) else None,
+                "ema_50": float(last["ema_50"]) if pd.notna(last["ema_50"]) else None,
+                "rsi": float(last["rsi_14"]) if pd.notna(last["rsi_14"]) else None,
+                "atr": float(last["atr_14"]) if pd.notna(last["atr_14"]) else None,
+                "adx": float(last.get("adx_14", None)) if "adx_14" in df.columns and pd.notna(last.get("adx_14")) else None,
+                "volume_ratio": vol_ratio,
+                "vwap_24": vwap_24,
+            }
+        
+        # Ostatnia cena i trend
+        last_1h_klines = (
+            db.query(Kline)
+            .filter(Kline.symbol == symbol, Kline.timeframe == "1h")
+            .order_by(Kline.open_time.desc())
+            .limit(1)
+            .all()
+        )
+        if last_1h_klines:
+            ctx["last_price"] = float(last_1h_klines[0].close)
+            ctx["last_high"] = float(last_1h_klines[0].high)
+            ctx["last_low"] = float(last_1h_klines[0].low)
+        
+        return ctx
+    except Exception as e:
+        logger.error(f"❌ get_grid_context {symbol}: {e}")
+        return None
     ctx_15m = get_live_context(db, symbol, timeframe="15m", limit=300)
     ctx_1h = get_live_context(db, symbol, timeframe="1h", limit=300)
 

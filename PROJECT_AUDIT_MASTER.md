@@ -1,5 +1,253 @@
 # PROJECT_AUDIT_MASTER.md — RLdC Trading BOT
 
+## AKTUALIZACJA: SESJA T-150 DO T-152 INFRASTRUKTURA DYNAMICZNEGO GRIDU (PHASE 1 — 18-05-2026)
+
+### STATUS
+- Potwierdzony **CRITICAL BUG w risk.py dla live mode**: `initial_balance` był hardcoded na 0.0, co unieważniało exposure ratio gates dla multi-pair trading (CATASTROPHIC).
+- Potwierdzony paraliż live z 30-min monitoringu: **0 BUY fills** mimo wszystkich otworów progów w T-147 do T-149 → root cause: architektura pipeline'u opiera się na portfolio-based watchlist selection, która nie skaluje się dla multi-pair.
+- **Pivot na architecture**: zamiast dalszych threshold tweaków → pełna dynamiczna grid engine per grid.md specification.
+
+### ZMIANY W KODZIE — FASE 1 INFRASTRUKTURA
+
+#### T-150: Fix risk.py + Market data helpers
+1. **backend/risk.py** (lines 695-707):
+   - **FIXED**: `initial_balance` dla live mode teraz czyta z `risk_snapshot.live_balance` lub fallbackuje do `LIVE_INITIAL_BALANCE` env var
+   - **Before**: `initial_balance = 0.0` dla live → `total_exposure_ratio = 0/0 = 0`, `symbol_exposure_ratio = 0/0 = 0` (gates ineffective)
+   - **After**: `initial_balance = risk_snapshot.live_balance` lub env default → exposure gates teraz funkcjonalne
+
+2. **backend/binance_client.py** (lines ~1300+):
+   - `get_all_24hr_tickers()`: Agreguje wszystkie 24h stats w jednym callzie (weight 80) zamiast N callków per pair
+   - `get_usdc_pairs()`: Filtruje USDC pairs, excludes stable-stable, computes spread_bps, ready dla dynamic selector
+
+3. **backend/analysis.py** (lines ~900+):
+   - `get_grid_context(db, symbol)`: Multi-timeframe context (15m, 1h, 4h) z ≥60 bars dla każdego TF
+   - Returns: Dict z ema_20, ema_50, rsi, atr, adx, vwap, volume_ratio per timeframe
+
+#### T-151: Kline collection expansion
+1. **backend/collector.py** (line 173):
+   - Zmiana: `KLINE_TIMEFRAMES` z `"1m,1h"` na `"1m,15m,1h,4h"`
+   - Cel: Wiele interwałów wymagane dla `get_grid_context()`
+   - Impact: ~2x więcej API weight, ale niezbędne dla grid builder
+
+#### T-152: Dynamic grid module
+1. **backend/trading/dynamic_grid.py** (NEW):
+   - `GridPlan` dataclass: center, lower, upper, buy_levels[], sell_levels[], invest_quote, hard_stop
+   - `select_top_usdc_pairs()`: Ranking all USDC pairs z z-score scoring (0.30*range + 0.20*change + 0.20*volume + 0.15*trades - 0.20*spread)
+   - `build_grid_plan()`: Generator geometrycznych gridów per pair (center z VWAP+trend, half_width z ATR+ADX, step z ATR+spread)
+   - `check_recentering_needed()`: Detektor gdy position_in_range < 0.15 lub > 0.85
+   - `persist_grid_plan()` / `load_grid_plan()`: State persistence w RuntimeSetting
+
+### WERYFIKACJA
+- ✅ Syntax check: Wszystkie pliki kompilują się bez błędów
+- ✅ Import check: Funkcje mają poprawne sygnatury
+- ⚠️ Kline collection: Musi zbierać 15m, 1h, 4h (zmiana w place)
+- ⏳ Grid context: Czeka na test na live symbols
+
+### WNIOSEK
+- **PHASE 1 COMPLETE**: Infrastructure dla dynamic gridu w miejscu
+- Risk.py: Live exposure gates teraz funkcjonalne (fix critical bug)
+- Market data: Helpers gotowe dla top-N selector
+- Kline collection: Expanded do wymaganych interwałów
+- Grid module: Pełna logika selector + builder + recentering gotowa
+
+### NASTĘPNY KROK: PHASE 2
+1. Test `get_grid_context()` na live symbols
+2. Integracja dynamic grid z collector main loop (replace portfolio watchlist)
+3. Grid entry/exit orchestration
+
+---
+
+## AKTUALIZACJA: SESJA T-149 AGRESYWNY BYPASS NO_BUY_SIGNAL (18-05-2026)
+
+### STATUS
+- Po otwarciu runtime progów wejściowych i sizingu nadal dominował `no_buy_signal`, więc część rynku nie dochodziła nawet do końcowej oceny score/confidence/edge/RR.
+- Potwierdzono potrzebę dodatkowego odblokowania warunku technicznego, ale tylko w jawnie agresywnym profilu runtime.
+
+### ZMIANY W KODZIE
+1. `backend/trading/signal_engine.py`
+	- dodano `aggressive_mode` aktywny wyłącznie dla runtime z obniżonymi progami i wyłączonym HTF hard-gate;
+	- dodano `aggressive_entry_condition`, który zwiększa przepustowość kandydatów do dalszych gate'ów ekonomicznych;
+	- dodano pola diagnostyczne `aggressive_mode` i `aggressive_entry_condition`.
+
+### WERYFIKACJA
+- `DISABLE_COLLECTOR=true .venv/bin/pytest tests/test_trading_signal_engine.py -q` -> **46 passed**.
+- Skan 120 symboli USDC: **3 valid BUY** (`ADAUSDC`, `AIGENSYNUSDC`, `ATOMUSDC`).
+- Risk gate:
+	- `ADAUSDC` -> `risk_gate_passed`, notional ~`88.85`
+	- `AIGENSYNUSDC` -> `qty_too_small`
+	- `ATOMUSDC` -> `symbol_has_open_position`
+- `final-decisions?mode=live`: `buy_ready=1`, `consider_buy=1`.
+
+### WNIOSEK
+- Krytyczny paraliż wejść został dodatkowo poluzowany na etapie warunku technicznego, ale bez usuwania końcowych zabezpieczeń ekonomii i ryzyka.
+- System przeszedł z trybu „stale blokowany” do trybu „realnie gotowy do wykonywania co najmniej części wejść live”.
+
+## AKTUALIZACJA: SESJA T-148 AGRESYWNE RUNTIME THRESHOLDS DLA STARTU HANDLU (18-05-2026)
+
+### STATUS
+- Potwierdzono, że sam `signal_engine` można było już częściowo otworzyć, ale aktywny runtime DB nadal był zbyt konserwatywny, więc bot w praktyce nie handlował.
+- Potwierdzono też drugi bloker execution: przy małym kapitale live ograniczenie `max_exposure_per_symbol_pct` obcinało pozycję poniżej `min_buy_notional`, więc nawet poprawny BUY nie przechodził przez risk gate.
+
+### ZMIANY W RUNTIME
+1. Runtime overrides dla entry zostały celowo otwarte:
+	- `trade_min_net_edge_pct=-0.20`
+	- `trade_min_expected_rr=0.70`
+	- `trade_min_signal_confidence=0.45`
+	- `trade_min_entry_score=0.45`
+	- `trade_require_volume_confirmation=false`
+	- `trade_volume_ratio_min=0.50`
+	- `trade_min_liquidity_score=0.10`
+	- `trade_min_quote_volume_trade=10000`
+	- `trade_min_depth_to_order_ratio=2.0`
+	- `trade_require_htf_trend_agreement=false`
+2. Runtime overrides dla sizingu/execution:
+	- `trade_max_exposure_per_symbol_pct=25.0`
+	- `trade_risk_per_trade_pct=1.0`
+	- `trade_max_open_positions=8`
+
+### WERYFIKACJA
+- Skan 120 symboli USDC po zmianie: **2 valid BUY** (`AIXBTUSDC`, `ATOMUSDC`).
+- `final-decisions?mode=live`: summary ma `buy_ready=1`; `ATOMUSDC` pojawia się jako `BUY`.
+- `RiskEngine.evaluate()`:
+	- `AIXBTUSDC` -> `risk_gate_passed`, notional ~`89.04`
+	- `ATOMUSDC` -> `risk_gate_passed`, notional ~`89.04`
+
+### WNIOSEK
+- Krytyczny bloker „bot nic nie robi” został zdjęty na poziomie aktywnego runtime, a nie tylko testowego kodu.
+- System jest teraz ustawiony na świadomie agresywny start handlu i wymaga dalszego strojenia na podstawie realnych trade'ów oraz rozkładu zysk/strata, nie dalszego zaostrzania progów wejścia.
+
+## AKTUALIZACJA: SESJA T-147 ADAPTACYJNY RR DLA SHORT-TERM BREAKOUTÓW (18-05-2026)
+
+### STATUS
+- Potwierdzony lokalny bloker wejść short-term: sztywny `min_expected_rr` odrzucał część mocnych setupów 15m-1h mimo dodatniego edge po kosztach i niskich kosztów egzekucji.
+- Po wcześniejszym zgraniu UI z live engine system przestał obiecywać fałszywe BUY, ale nadal wymagał delikatniejszego dopuszczenia krótkich breakoutów bez globalnego poluzowania ochrony jakości.
+
+### ZMIANY W KODZIE
+1. `backend/trading/signal_engine.py`
+	- dodano `effective_min_expected_rr` dla setupów z wysokim `score`, `confidence`, `effective_volume_ratio`, dobrą płynnością i niskim spreadem;
+	- diagnostyka sygnału rozróżnia teraz `required_rr` i `required_rr_base`, więc można odróżnić lokalną ulgę breakoutową od bazowego wymogu ekonomicznego;
+	- zwykłe i słabsze setupy nadal używają pełnego bazowego `min_expected_rr`.
+2. `tests/test_trading_signal_engine.py`
+	- dodano dwa testy regresyjne: pozytywny dla mocnego breakoutu oraz ochronny dla zbyt słabego wolumenu.
+
+### WERYFIKACJA
+- `DISABLE_COLLECTOR=true .venv/bin/pytest tests/test_trading_signal_engine.py -q` -> **46 passed**.
+- Walidacja live `final-decisions`:
+	- `ATOMUSDC`: `HOLD` — `volume_too_low`;
+	- `TRXUSDC`: `HOLD` — `negative_edge_after_costs`;
+	- `APEUSDC`: `HOLD` — `htf_trend_disagrees`;
+	- summary: `buy_ready=0`, `consider_buy=0`.
+
+### WNIOSEK
+- Naprawiono jeden realny bottleneck ekonomiczny dla krótkich impulsów 15m-1h, ale bez generowania sztucznych wejść.
+- Repo pozostaje prawdomówne: brak BUY w aktualnym oknie wynika dalej z rynku i kosztów, a nie z rozjazdu UI lub zbyt sztywnego lokalnego warunku RR.
+
+## AKTUALIZACJA: SESJA T-146 BINANCE-STYLE CHARTS + DECISION-VIEW ENRICHMENT (18-05-2026)
+
+### STATUS
+- Potwierdzona niespójność UI: web_portal nadal rysował cenę jako line/area zamiast świec OHLC, a overlay miał świece, ale bez pełnego kontekstu wejścia/wyjścia (wolumen, EMA50, zakresy BUY/SELL, spread/orderbook).
+- Potwierdzony brak danych w kanonicznym modelu decyzji: `decision-view` eksponował tylko skrócony zestaw wskaźników, mimo że backend już liczył ATR, ADX, Stochastic, MACD hist, Bollinger i poziomy Fibo.
+
+### ZMIANY W KODZIE
+1. `backend/routers/signals.py`
+	- rozszerzono `decision-view` o `atr`, `adx`, `stoch_k`, `volume_ratio`, `macd_hist`, `bb_upper`, `bb_lower`, `fib_382`, `fib_618`, `spread_bps`, `orderbook_imbalance`;
+	- dodano pochodne etykiety wskaźnikowe `ema_cross`, `boll_position`, `macd_signal` dla WWW i overlay.
+2. `web_portal/src/components/widgets/BinanceStyleChart.tsx`
+	- dodano wspólny renderer Binance-style oparty o `lightweight-charts`: świece OHLC, wolumen, EMA20/EMA50, forecast, poziomy BUY/SELL i osobny panel RSI.
+3. `web_portal/src/components/widgets/TradingView.tsx`
+	- zastąpiono line/area chart prawdziwym wykresem świecowym z orderbookiem, kanonicznym `decision-view` i forecastem.
+4. `web_portal/src/components/MainContent.tsx`
+	- `ForecastChart` używa teraz tego samego renderera i tych samych danych źródłowych co główny TradingView.
+5. `live_overlay/index.html`
+	- renderer canvasa pokazuje teraz wolumen, EMA50, pasma BUY/SELL, poziomy ENTRY/TP/SL oraz spread/orderbook;
+	- focus i panel analizy czytają dodatkowo `ranges` i `orderbook`, a chips pokazują faktyczne wskaźniki wejścia/wyjścia.
+
+### WERYFIKACJA
+- `npm --prefix web_portal run lint` -> **PASS**.
+- `python -m py_compile backend/routers/signals.py live_overlay/serve_live_overlay.py` -> **PASS**.
+- `DISABLE_COLLECTOR=true .venv/bin/pytest tests/test_smoke.py -q` -> **1 fail / 226 pass**;
+	- fail dotyczy istniejącej ścieżki `positions/analysis` (`test_acceptance_live_positions_analysis_restores_entry_baseline`), nie dotkniętej zmianą wykresów ani `decision-view`.
+
+### WNIOSEK
+- Web portal i overlay pokazują teraz tę samą, bliższą Binance semantykę wykresu: świece, wolumen, EMA, forecast i poziomy wejścia/wyjścia.
+- UI przestał ukrywać część danych już liczonych przez backend, więc analiza wejść/wyjść nie opiera się wyłącznie na uproszczonej narracji.
+
+## AKTUALIZACJA: SESJA T-145 ADAPTIVE VOLUME TIERS + BREAKOUT BUY GATE (18-05-2026)
+
+### STATUS
+- Potwierdzony problem operacyjny: stały próg `volume_ratio_min` dawał zbyt dużo fałszywych blokad na płynnych parach i nie rozróżniał tierów rynku.
+- Potwierdzony problem setupowy: BUY miał głównie ścieżkę trend-follow i słabiej obejmował momenty breakout/reversal przy poprawnym HTF i momentum.
+
+### ZMIANY W KODZIE
+1. `backend/trading/signal_engine.py`
+	- dodano adaptacyjny próg `effective_volume_ratio_min` zależny od `quote_volume_24h` oraz spreadu;
+	- volume confirmation używa teraz progu dynamicznego zamiast sztywnego globalnego;
+	- dodano bezpieczny warunek `breakout_reversal_condition` (mocne momentum + fast trend + HTF), obok klasycznego trend-follow;
+	- rozszerzono diagnostykę o `effective_volume_ratio_min`, `trend_follow_condition`, `breakout_reversal_condition`.
+
+### WERYFIKACJA
+- Testy: `DISABLE_COLLECTOR=true .venv/bin/pytest tests/test_trading_signal_engine.py -q` -> **44 passed**.
+- Ręczny skan par po zmianie: brak nowych fałszywych wejść; kandydaci najbliżsi wejścia to m.in. `ATOMUSDC` (blokada wolumenowa) przy zachowanej blokadzie dla słabego setupu trendowego.
+
+### WNIOSEK
+- Wejścia BUY są lepiej dopasowane do realnej płynności rynku i nie opierają się wyłącznie na jednym, sztywnym progu wolumenu.
+- System pozostaje konserwatywny w warunkach słabego trendu, ale mniej gubi okazje przy zmianie impulsu.
+
+## AKTUALIZACJA: SESJA T-144 BUY/SELL SIGNAL QUALITY TUNING (17-05-2026)
+
+### STATUS
+- Potwierdzony bloker jakości wejść: w `signal_engine` warunek `has_buy_signal` używał ostrzejszego progu HTF (`>=0.50`) niż wcześniejszy gate niezgodności trendu HTF (`<0.35`), co powodowało systemowe odrzucanie kandydatów jako `no_buy_signal`.
+- Potwierdzony drugi bloker jakości: wolumen potwierdzający wejście był liczony praktycznie tylko z `entry_tf=1h`; dla wielu par 1h `volume_ratio` bywa niski wewnątrz świecy, mimo mocnego wolumenu na `fast_tf=15m`.
+
+### ZMIANY W KODZIE
+1. `backend/trading/signal_engine.py`
+	- ujednolicono próg HTF dla warunku BUY: `min_htf_agreement_for_buy` (fallback 0.35), spójnie z logiką gate HTF;
+	- potwierdzenie wolumenu i scoring wolumenu bazują teraz na `effective_volume_ratio = max(volume_ratio_1h, volume_ratio_15m)` oraz analogicznym `effective_volume_spike`;
+	- rozszerzono diagnostykę decyzji o `fast_volume_ratio` i `effective_volume_ratio`.
+
+### WERYFIKACJA
+- Ręczna walidacja na parach: `BTCUSDC`, `ETHUSDC`, `AAVEUSDC`, `SOLUSDC`, `BNBUSDC` oraz skan 68 par USDC z DB.
+- Po poprawce:
+	- zniknęła część fałszywych blokad czysto wolumenowych z 1h;
+	- reason distribution przesunął się z dominacji szumu wolumenowego w stronę realnych blokad trendowych (`htf_trend_disagrees`) i kosztowych.
+- Testy: `DISABLE_COLLECTOR=true .venv/bin/pytest tests/test_trading_signal_engine.py -q` -> **44 passed**.
+
+### WNIOSEK
+- Logika wejścia jest bardziej spójna i mniej podatna na fałszywe odrzucenia wynikające z krótkoterminowej fazy świecy 1h.
+- Nadal brak masowych wejść w aktualnym oknie rynku, ale główne przyczyny odrzuceń są teraz ekonomicznie uzasadnione (trend HTF i edge), a nie artefaktem niespójnego progu.
+
+## AKTUALIZACJA: SESJA T-143 LIVE EXECUTION CONSISTENCY + TELEGRAM TEST GUARDS (17-05-2026)
+
+### STATUS
+- Potwierdzony błąd krytyczny: po BUY w LIVE `Position.quantity` mogło zapisywać wartość brutto z Binance (`executedQty`) zamiast netto po fee w aktywie bazowym, co prowadziło do późniejszego `insufficient balance` na SELL.
+- Potwierdzony dług operacyjny: brak atomowego claimu pending powodował ryzyko podwójnego wykonania tego samego `PendingOrder` przy wyścigu workerów/restartów.
+- Potwierdzony szum diagnostyczny: brak jawnych logów `WHY_NOT_BUY` dla odrzuceń `signal_engine` utrudniał analizę dlaczego kandydaci ze skanera nie przechodzą do pending.
+
+### ZMIANY W KODZIE / RUNTIME
+1. `backend/collector.py`
+	- `_execute_confirmed_pending_orders()` wykonuje atomowy claim `PENDING_CONFIRMED/CONFIRMED -> EXECUTING` przed wysłaniem orderu;
+	- przy BUY w LIVE liczone jest `position_fill_qty = executedQty - fee_base_asset` (jeśli fee pobrane w aktywie bazowym), a `Position.quantity` zapisuje już qty netto;
+	- dodano jawne logi diagnostyczne `LIVE PIPELINE WHY_NOT_BUY ...` oraz trace `active_pending_exists`.
+2. `backend/binance_client.py`
+	- `place_order()` wymusza `newOrderRespType=FULL` dla `MARKET`, aby mieć deterministyczne `fills` i poprawne rozliczenie wykonania.
+3. `backend/notification_hooks.py` + `backend/collector.py`
+	- wysyłka Telegram z collectora przechodzi przez `send_telegram_message()` (jedna warstwa adaptera);
+	- dodano twarde guardy `APP_ENV=test` oraz `DISABLE_TELEGRAM=true`.
+4. `tests/conftest.py`
+	- środowisko testowe wymusza `APP_ENV=test` i `DISABLE_TELEGRAM=true`.
+5. `tests/test_live_execution_cash_management.py`
+	- dodano regresję dla BUY z fee w base asset: pozycja zapisuje qty netto (nie brutto).
+
+### WERYFIKACJA
+- `pytest -q tests/test_live_execution_cash_management.py -k "submitted_without_fill or base_fee_net_qty or rejected_by_exchange or confirmed_pending_live_buy_is_executed_with_conversion_path"` -> **3 passed**.
+- `pytest -q tests/test_trading_collector_live_path.py -k "signal_engine_reject_returns_zero or risk_engine_reject_returns_zero or success_returns_one_and_creates_pending"` -> **3 passed**.
+- `pytest -q tests/test_trading_state_manager.py -k "EXCHANGE_SUBMITTED or check_pending_fills"` -> **1 passed**.
+
+### WNIOSEK
+- SELL po BUY z fee w base asset nie powinien już próbować sprzedać większej ilości niż realnie dostępna na Binance.
+- Pipeline execution jest odporniejszy na race condition pendingów.
+- Diagnostyka odrzuceń wejścia LIVE jest czytelniejsza i gotowa do dalszego RCA progów sygnału/ryzyka.
+
 ## AKTUALIZACJA: SESJA T-141 OVERLAY 8099 RECOVERY + CHART SYMBOL FALLBACK (17-05-2026)
 
 ### STATUS
@@ -20,6 +268,32 @@
 - `GET http://127.0.0.1:8099/overlay/api/live-state` -> `ok=true`.
 - Dla `AAVEEUR` adapter zwraca teraz `chart_symbol=AAVEUSDC` oraz `history_len=120`.
 - Snapshot przeglądarki 8099: brak lewego paska, status `POŁĄCZONO`, focus pokazuje symbol wykresowy (np. `BTC/USDC`).
+- Walidacja runtime: auto-focus przełącza się między aktywnymi parami, a sekcja `CZY WARTO INWESTOWAĆ?`/`ILE ZAINWESTOWAĆ?` pokazuje treść opartą o realny stan pozycji zamiast pustego fallbacku.
+
+## AKTUALIZACJA: SESJA T-142 LIVE SELL GUARD + HARD EXIT COOLDOWN SPLIT (17-05-2026)
+
+### STATUS
+- Potwierdzony krytyczny błąd LIVE SELL: ilość z DB mogła być większa niż realne `free balance` Binance, a w takim przypadku Binance słusznie zwracał `insufficient balance for requested action`.
+- Potwierdzony drugi błąd operacyjny: exit cooldown blokował także hard exit SL, choć powinien dotyczyć tylko kolejnych warstw exit po pierwszym hard triggerze.
+
+### ZMIANY W KODZIE / RUNTIME
+1. `backend/binance_client.py`
+	- dodano `get_free_balance()` i `prepare_sell_quantity()`;
+	- SELL jest teraz capowany do realnego salda aktywa oraz `LOT_SIZE.stepSize` przed `create_order()`;
+	- `place_order()` zwraca jawny `_error`, jeśli symbol meta nie istnieje albo po capowaniu qty spada do zera / poniżej min qty.
+2. `backend/collector.py`
+	- `_check_exits()` nie używa już `_pending_in_cooldown()` jako blokady dla hard exit SL;
+	- cooldown pozostaje aktywny dla trailing/TP/reversal, czyli dla kolejnych warstw exit, a nie dla pierwszego krytycznego SL.
+3. Testy
+	- `tests/test_binance_client_sell_guard.py`;
+	- regresja w `tests/test_live_execution_cash_management.py` dla SL mimo cooldown.
+
+### WERYFIKACJA
+- `pytest tests/test_binance_client_sell_guard.py tests/test_live_execution_cash_management.py -q` -> **15 passed**.
+
+### WNIOSEK
+- SELL live nie powinien już próbować sprzedać więcej niż realnie dostępne saldo Binance po step-size.
+- Hard exit SL nie powinien być uwięziony przez cooldown, który miał służyć tylko do ochrony przed powtarzaniem dalszych warstw exit.
 
 ### WNIOSEK
 - Overlay 8099 został przywrócony operacyjnie i przestał udawać brak danych wykresowych dla par EUR; UI jest prostszy i mniej podatny na mylące stany.

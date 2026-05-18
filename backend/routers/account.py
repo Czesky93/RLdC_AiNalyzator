@@ -2877,6 +2877,8 @@ def get_system_status(request: Request, db: Session = Depends(get_db)):
         return {
             "success": True,
             "data": {
+                "collector_running": bool(collector_running),
+                "ws_running": bool(ws_running),
                 "watchlist": watchlist,
                 "symbols_with_data": symbols_with_data,
                 "last_tick_ts": last_tick_ts,

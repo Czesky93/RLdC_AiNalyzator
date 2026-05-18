@@ -2,6 +2,7 @@
 
 import React, { useEffect, useState } from 'react'
 import { ADMIN_TOKEN_STORAGE_KEY, getAdminToken, getApiBase, withAdminToken } from '../lib/api'
+import BinanceStyleChart from './widgets/BinanceStyleChart'
 import DecisionRisk from './widgets/DecisionRisk'
 import DecisionsRiskPanel from './widgets/DecisionsRiskPanel'
 import EquityCurve from './widgets/EquityCurve'
@@ -542,149 +543,81 @@ function ViewHeader({ title, description }: { title: string; description?: strin
  * ───────────────────────────────────────────────── */
 
 function ForecastChart({ symbol }: { symbol: string }) {
-  const { data: klines } = useFetch<any>(`/api/market/kline?symbol=${symbol}&limit=60`, 30000)
+  const { data: klines } = useFetch<any>(`/api/market/kline?symbol=${symbol}&limit=80`, 30000)
   const { data: forecast } = useFetch<any>(`/api/market/forecast/${symbol}`, 60000)
+  const { data: decisionViewRaw } = useFetch<any>(`/api/signals/${symbol}/decision-view?mode=live`, 15000)
+  const { data: rangesRaw } = useFetch<any>(`/api/market/ranges?symbol=${symbol}`, 60000)
+  const { data: orderbookRaw } = useFetch<any>(`/api/market/orderbook/${symbol}?limit=20`, 15000)
 
-  // Oblicz EMA pomocniczo
-  function calcEma(closes: number[], period: number): (number | undefined)[] {
-    const k = 2 / (period + 1)
-    const result: (number | undefined)[] = Array(closes.length).fill(undefined)
-    let ema: number | undefined
-    for (let i = 0; i < closes.length; i++) {
-      if (ema === undefined) {
-        if (i >= period - 1) ema = closes.slice(0, period).reduce((a, b) => a + b, 0) / period
-      } else {
-        ema = closes[i] * k + ema * (1 - k)
-      }
-      result[i] = ema
+  const decisionView = (decisionViewRaw as any)?.data ?? null
+  const candles = (klines?.data || [])
+    .map((item: any) => {
+      const timestamp = typeof item?.timestamp === 'number'
+        ? (item.timestamp > 1_000_000_000_000 ? item.timestamp : item.timestamp * 1000)
+        : Date.parse(item?.timestamp || '') || Date.now()
+      const open = Number(item?.open)
+      const high = Number(item?.high)
+      const low = Number(item?.low)
+      const close = Number(item?.close)
+      const volume = Number(item?.volume || 0)
+      return Number.isFinite(open) && Number.isFinite(high) && Number.isFinite(low) && Number.isFinite(close)
+        ? { timestamp, open, high, low, close, volume }
+        : null
+    })
+    .filter(Boolean) as Array<{ timestamp: number; open: number; high: number; low: number; close: number; volume: number }>
+
+  const forecastPoints = Array.isArray(forecast?.data)
+    ? forecast.data
+        .map((item: any) => {
+          const timestamp = typeof item?.timestamp === 'number'
+            ? (item.timestamp > 1_000_000_000_000 ? item.timestamp : item.timestamp * 1000)
+            : Date.parse(item?.timestamp || '') || Date.now()
+          const value = Number(item?.price ?? item?.forecast_price ?? item?.projected_price)
+          return Number.isFinite(value) ? { timestamp, value } : null
+        })
+        .filter(Boolean)
+    : []
+
+  const orderbook = (() => {
+    const bids = Array.isArray(orderbookRaw?.bids) ? orderbookRaw.bids : []
+    const asks = Array.isArray(orderbookRaw?.asks) ? orderbookRaw.asks : []
+    const bestBid = Number(bids[0]?.[0])
+    const bestAsk = Number(asks[0]?.[0])
+    const bidDepth = bids.slice(0, 10).reduce((sum: number, item: any) => sum + (Number(item?.[1]) || 0), 0)
+    const askDepth = asks.slice(0, 10).reduce((sum: number, item: any) => sum + (Number(item?.[1]) || 0), 0)
+    const spreadBps = Number.isFinite(bestBid) && Number.isFinite(bestAsk) && bestBid > 0 && bestAsk > 0
+      ? ((bestAsk - bestBid) / ((bestAsk + bestBid) / 2)) * 10000
+      : null
+    const imbalance = bidDepth + askDepth > 0 ? (bidDepth - askDepth) / (bidDepth + askDepth) : null
+    return {
+      bestBid: Number.isFinite(bestBid) ? bestBid : null,
+      bestAsk: Number.isFinite(bestAsk) ? bestAsk : null,
+      spreadBps,
+      bidDepth,
+      askDepth,
+      imbalance,
     }
-    return result
-  }
+  })()
 
-  // Oblicz RSI(14)
-  function calcRsi(closes: number[], period = 14): (number | undefined)[] {
-    const result: (number | undefined)[] = Array(closes.length).fill(undefined)
-    for (let i = period; i < closes.length; i++) {
-      let gains = 0, losses = 0
-      for (let j = i - period + 1; j <= i; j++) {
-        const diff = closes[j] - closes[j - 1]
-        if (diff > 0) gains += diff; else losses += -diff
-      }
-      const rs = losses === 0 ? 100 : gains / losses
-      result[i] = 100 - 100 / (1 + rs)
-    }
-    return result
-  }
-
-  const historyPoints: { t: string; price: number }[] = (klines?.data || []).map((k: any) => ({
-    t: typeof k.timestamp === 'string' ? k.timestamp.slice(11, 16) : new Date(typeof k.timestamp === 'number' ? k.timestamp : 0).toISOString().slice(11, 16),
-    price: typeof k.close === 'number' ? k.close : typeof k.price === 'number' ? k.price : null,
-  })).filter((p: any) => p.price !== null)
-
-  const forecastPoints: { t: string; forecast: number }[] = (forecast?.data || []).map((f: any) => ({
-    t: typeof f.timestamp === 'string' ? f.timestamp.slice(11, 16) : String(f.timestamp || ''),
-    forecast: typeof f.price === 'number' ? f.price : null,
-  })).filter((p: any) => p.forecast !== null)
-
-  if (historyPoints.length === 0) {
+  if (candles.length === 0) {
     return <div className="text-xs text-slate-500 py-4 text-center">Brak danych do wykresu</div>
   }
 
-  const closes = historyPoints.map(p => p.price)
-  const ema20vals = calcEma(closes, 20)
-  const ema50vals = calcEma(closes, 50)
-  const rsiVals = calcRsi(closes, 14)
-
-  const allPrices = [
-    ...closes,
-    ...ema20vals.filter((v): v is number => v !== undefined),
-    ...ema50vals.filter((v): v is number => v !== undefined),
-    ...forecastPoints.map(p => p.forecast),
-  ]
-  const minP = Math.min(...allPrices) * 0.998
-  const maxP = Math.max(...allPrices) * 1.002
-  const fmt = (v: number) => v < 1 ? v.toFixed(6) : v < 100 ? v.toFixed(4) : v.toFixed(2)
-
-  // Połączony zestaw danych: historia + prognoza + EMA
-  const combined = [
-    ...historyPoints.map((p, i) => ({
-      t: p.t,
-      price: p.price,
-      ema20: ema20vals[i],
-      ema50: ema50vals[i],
-      forecast: undefined as number | undefined,
-    })),
-    ...(forecastPoints.length > 0
-      ? [{ t: historyPoints[historyPoints.length - 1]?.t, price: historyPoints[historyPoints.length - 1]?.price, ema20: undefined, ema50: undefined, forecast: historyPoints[historyPoints.length - 1]?.price }]
-      : []),
-    ...forecastPoints.map(p => ({ t: p.t, price: undefined as number | undefined, ema20: undefined, ema50: undefined, forecast: p.forecast })),
-  ]
-
-  // Dane RSI (tylko historia)
-  const rsiData = historyPoints.map((p, i) => ({ t: p.t, rsi: rsiVals[i] !== undefined ? Math.round(rsiVals[i]! * 10) / 10 : undefined }))
-  const lastRsi = rsiVals.filter(v => v !== undefined).pop()
-
-  const { LineChart, Line, XAxis, YAxis, Tooltip, ReferenceLine, ResponsiveContainer, ComposedChart, Area } =
-    require('recharts')
-
   return (
     <div>
-      <ResponsiveContainer width="100%" height={180}>
-        <LineChart data={combined} margin={{ top: 4, right: 8, bottom: 0, left: 0 }}>
-          <XAxis dataKey="t" tick={{ fontSize: 9, fill: '#64748b' }} interval="preserveStartEnd" />
-          <YAxis domain={[minP, maxP]} tick={{ fontSize: 9, fill: '#64748b' }} tickFormatter={fmt} width={58} />
-          <Tooltip
-            contentStyle={{ background: '#0f1923', border: '1px solid #1e2d3d', fontSize: 10 }}
-            formatter={(val: any, name: string) => [
-              val != null ? fmt(val) : '--',
-              name === 'price' ? 'Cena' : name === 'ema20' ? 'EMA 20' : name === 'ema50' ? 'EMA 50' : 'Prognoza'
-            ]}
-          />
-          {forecastPoints.length > 0 && (
-            <ReferenceLine
-              x={historyPoints[historyPoints.length - 1]?.t}
-              stroke="#64748b"
-              strokeDasharray="3 3"
-              label={{ value: 'teraz', fill: '#64748b', fontSize: 9 }}
-            />
-          )}
-          <Line type="monotone" dataKey="ema50" stroke="#7c3aed" dot={false} strokeWidth={1} connectNulls name="ema50" />
-          <Line type="monotone" dataKey="ema20" stroke="#fbbf24" dot={false} strokeWidth={1} connectNulls name="ema20" />
-          <Line type="monotone" dataKey="price" stroke="#00d4aa" dot={false} strokeWidth={1.5} connectNulls={false} name="price" />
-          <Line type="monotone" dataKey="forecast" stroke="#f97316" dot={false} strokeWidth={1.5} strokeDasharray="4 4" connectNulls={false} name="forecast" />
-        </LineChart>
-      </ResponsiveContainer>
-
-      {/* Mini RSI chart */}
-      <div className="mt-1">
-        <div className="flex items-center justify-between mb-0.5 px-1">
-          <span className="text-[9px] text-slate-500 uppercase tracking-widest">RSI (14)</span>
-          <span className={`text-[10px] font-mono font-bold ${lastRsi == null ? 'text-slate-500' : lastRsi < 30 ? 'text-rldc-green-primary' : lastRsi > 70 ? 'text-rldc-red-primary' : 'text-slate-300'}`}>
-            {lastRsi != null ? Math.round(lastRsi) : '--'}
-            {lastRsi != null && lastRsi < 30 ? ' (wyprzedanie)' : lastRsi != null && lastRsi > 70 ? ' (wykupienie)' : ''}
-          </span>
-        </div>
-        <ResponsiveContainer width="100%" height={50}>
-          <LineChart data={rsiData} margin={{ top: 0, right: 8, bottom: 0, left: 0 }}>
-            <XAxis dataKey="t" hide />
-            <YAxis domain={[0, 100]} tick={{ fontSize: 8, fill: '#64748b' }} width={30} tickCount={3} ticks={[30, 50, 70]} />
-            <ReferenceLine y={70} stroke="#ef4444" strokeDasharray="2 2" strokeWidth={0.8} />
-            <ReferenceLine y={30} stroke="#22c55e" strokeDasharray="2 2" strokeWidth={0.8} />
-            <Line type="monotone" dataKey="rsi" stroke="#a78bfa" dot={false} strokeWidth={1.2} connectNulls name="rsi" />
-          </LineChart>
-        </ResponsiveContainer>
-      </div>
-
-      {/* Legenda wskaźników */}
-      <div className="flex items-center gap-3 mt-1 px-1 flex-wrap">
-        <span className="flex items-center gap-1 text-[9px] text-slate-500"><span className="inline-block w-3 h-0.5 bg-rldc-teal-primary"></span> Cena</span>
-        <span className="flex items-center gap-1 text-[9px] text-slate-500"><span className="inline-block w-3 h-0.5 bg-yellow-400"></span> EMA 20</span>
-        <span className="flex items-center gap-1 text-[9px] text-slate-500"><span className="inline-block w-3 h-0.5 bg-purple-500"></span> EMA 50</span>
-        <span className="flex items-center gap-1 text-[9px] text-slate-500"><span className="inline-block w-3 h-0.5 bg-rldc-orange-primary" style={{backgroundImage:'repeating-linear-gradient(90deg,#f97316 0,#f97316 3px,transparent 3px,transparent 6px)'}}></span> Prognoza</span>
-      </div>
-
+      <BinanceStyleChart
+        candles={candles}
+        forecastPoints={forecastPoints as Array<{ timestamp: number; value: number }>}
+        range={(rangesRaw?.data?.[0] || null) as any}
+        indicators={decisionView?.indicators || null}
+        horizons={decisionView?.horizons || null}
+        orderbook={orderbook}
+        chartHeight={220}
+        rsiHeight={60}
+        emptyMessage={`Brak danych świecowych dla ${symbol}`}
+      />
       {forecastPoints.length === 0 && (
-        <div className="text-[10px] text-slate-500 text-center mt-1">Prognoza niedostępna (AI offline lub brak danych)</div>
+        <div className="text-[10px] text-slate-500 text-center mt-2">Prognoza niedostępna albo backend nie zwrócił ścieżki ceny.</div>
       )}
     </div>
   )
@@ -3730,7 +3663,7 @@ function DashboardV2View({ tradingMode, onSymbolClick }: { tradingMode: 'live' |
 	          <div className="col-span-12 lg:col-span-8 space-y-4">
 	            <TradingView
 	              symbol={selectedSymbol}
-	              onSymbolChange={(s) => setSelectedSymbol(s)}
+                onSymbolChange={(s: string) => setSelectedSymbol(s)}
 	              allowSymbolSelect={true}
 	              refreshMs={60000}
 	              titleOverride="Wykres rynku"

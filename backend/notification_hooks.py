@@ -35,7 +35,13 @@ def _get_config() -> Dict[str, Any]:
         "true",
         "yes",
     )
-    test_mode = bool(os.getenv("PYTEST_CURRENT_TEST"))
+    app_env = str(os.getenv("APP_ENV", "")).lower()
+    disable_telegram = os.getenv("DISABLE_TELEGRAM", "false").lower() in (
+        "1",
+        "true",
+        "yes",
+    )
+    test_mode = bool(os.getenv("PYTEST_CURRENT_TEST")) or app_env == "test"
     allow_test_telegram = os.getenv("ALLOW_TEST_TELEGRAM", "false").lower() in (
         "1",
         "true",
@@ -44,9 +50,14 @@ def _get_config() -> Dict[str, Any]:
     return {
         "telegram_bot_token": os.getenv("TELEGRAM_BOT_TOKEN", ""),
         "telegram_chat_id": os.getenv("TELEGRAM_CHAT_ID", ""),
-        "enabled": env_enabled and not (test_mode and not allow_test_telegram),
+        "enabled": (
+            env_enabled
+            and not disable_telegram
+            and not (test_mode and not allow_test_telegram)
+        ),
         "telegram_min_priority": os.getenv("TELEGRAM_MIN_PRIORITY", "high"),
         "test_mode": test_mode,
+        "disable_telegram": disable_telegram,
         "allow_test_telegram": allow_test_telegram,
     }
 
@@ -288,6 +299,9 @@ def send_telegram_message(text: str, source_module: str = "notification_hooks") 
     Każda wysłana wiadomość jest archiwizowana przez Telegram Intelligence Layer.
     """
     cfg = _get_config()
+    if cfg.get("disable_telegram"):
+        logger.debug("Telegram: pomijam wysyłkę (DISABLE_TELEGRAM=true)")
+        return False
     if cfg.get("test_mode") and not cfg.get("allow_test_telegram"):
         logger.debug("Telegram: pomijam wysyłkę w trybie testowym (pytest)")
         return False

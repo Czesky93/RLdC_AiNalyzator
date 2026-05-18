@@ -688,11 +688,18 @@ def evaluate_risk(context: RiskContext) -> RiskDecision:
         reason_codes.append("activity_gate_symbol_hour")
         limit_breaches.append("activity_gate_symbol_hour")
 
-    initial_balance = (
-        float(os.getenv("DEMO_INITIAL_BALANCE", "10000") or 10000)
-        if context.mode == "demo"
-        else 0.0
-    )
+    # Dla demo: używamy DEMO_INITIAL_BALANCE
+    # Dla live: używamy live_balance z risk_snapshot, fallback na LIVE_INITIAL_BALANCE
+    if context.mode == "demo":
+        initial_balance = float(os.getenv("DEMO_INITIAL_BALANCE", "10000") or 10000)
+    else:
+        # live: prioritet live_balance -> LIVE_INITIAL_BALANCE -> fallback 1000
+        live_balance = float(rs.get("live_balance") or 0.0)
+        if live_balance > 0:
+            initial_balance = live_balance
+        else:
+            initial_balance = float(os.getenv("LIVE_INITIAL_BALANCE", "1000") or 1000)
+    
     total_exposure_ratio = (
         (float(rs.get("total_exposure") or 0.0) / initial_balance)
         if initial_balance > 0

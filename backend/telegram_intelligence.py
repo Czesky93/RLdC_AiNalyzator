@@ -495,11 +495,17 @@ def _compute_profit_pressure(db, mode: str) -> dict:
     total_pnl = sum((o.net_pnl or 0.0) for o in orders_24h)
     profitable = sum(1 for o in orders_24h if (o.net_pnl or 0.0) > 0)
     lossy = sum(1 for o in orders_24h if (o.net_pnl or 0.0) < 0)
-    open_pos = db.query(Position).filter(Position.mode == mode).count()
-    unrealized = sum(
-        (p.unrealized_pnl or 0.0)
-        for p in db.query(Position).filter(Position.mode == mode).all()
+    active_positions = (
+        db.query(Position)
+        .filter(
+            Position.mode == mode,
+            Position.exit_reason_code.is_(None),
+            Position.quantity > 0,
+        )
+        .all()
     )
+    open_pos = len(active_positions)
+    unrealized = sum((p.unrealized_pnl or 0.0) for p in active_positions)
 
     status = "brak_aktywnosci"
     if len(orders_24h) > 0:

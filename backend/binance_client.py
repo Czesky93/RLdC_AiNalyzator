@@ -8,6 +8,7 @@ import logging
 import math
 import os
 import time
+from decimal import Decimal
 from functools import lru_cache
 from typing import Any, Dict, List, Optional
 from urllib.parse import quote, urlencode
@@ -449,6 +450,101 @@ class BinanceClient:
 
         return None
 
+    @staticmethod
+    def _floor_to_step_size(quantity: float, step_size: float) -> str:
+        """Zwraca ilość zaokrągloną w dół do wielokrotności step_size."""
+        qty_d = Decimal(str(quantity or 0.0))
+        step_d = Decimal(str(step_size or 0.0))
+
+        if qty_d <= 0:
+            return "0"
+        if step_d <= 0:
+            return format(qty_d.normalize(), "f")
+
+        floored = (qty_d // step_d) * step_d
+        if floored <= 0:
+            return "0"
+        return format(floored.normalize(), "f")
+
+    def get_free_balance(self, asset: str) -> float:
+        """Zwraca aktualne free balance danego aktywa z Binance."""
+        asset = (asset or "").upper().strip()
+        if not asset:
+            return 0.0
+
+        for balance in self.get_balances():
+            if (balance.get("asset") or "").upper() == asset:
+                try:
+                    return float(balance.get("free") or 0.0)
+                except Exception:
+                    return 0.0
+        return 0.0
+
+    def prepare_sell_quantity(self, symbol: str, requested_qty: float) -> Dict[str, Any]:
+        """
+        Przygotuj bezpieczną ilość SELL.
+
+        - bierze aktualne free balance z Binance,
+        - obcina do LOT_SIZE step_size,
+        - nigdy nie zaokrągla w górę.
+        """
+        resolved_symbol = self.resolve_symbol(symbol) or (symbol or "").upper().strip()
+        allowed = self.get_allowed_symbols() or {}
+        meta = allowed.get(resolved_symbol)
+
+        if not meta:
+            return {
+                "ok": False,
+                "reason": "symbol_meta_missing",
+                "symbol": resolved_symbol,
+                "requested_qty": float(requested_qty or 0.0),
+            }
+
+        base_asset = (meta.get("base_asset") or "").upper().strip()
+        step_size = float(meta.get("step_size") or 0.0)
+        min_qty = float(meta.get("min_qty") or 0.0)
+        free_qty = self.get_free_balance(base_asset)
+        raw_qty = min(float(requested_qty or 0.0), float(free_qty or 0.0))
+        prepared_qty_str = self._floor_to_step_size(raw_qty, step_size)
+        prepared_qty = float(prepared_qty_str or 0.0)
+
+        if prepared_qty <= 0:
+            return {
+                "ok": False,
+                "reason": "no_free_balance",
+                "symbol": resolved_symbol,
+                "base_asset": base_asset,
+                "requested_qty": float(requested_qty or 0.0),
+                "free_qty": free_qty,
+                "step_size": step_size,
+                "prepared_qty": prepared_qty,
+            }
+
+        if min_qty and prepared_qty < min_qty:
+            return {
+                "ok": False,
+                "reason": "qty_below_min_qty",
+                "symbol": resolved_symbol,
+                "base_asset": base_asset,
+                "requested_qty": float(requested_qty or 0.0),
+                "free_qty": free_qty,
+                "min_qty": min_qty,
+                "step_size": step_size,
+                "prepared_qty": prepared_qty,
+            }
+
+        return {
+            "ok": True,
+            "symbol": resolved_symbol,
+            "base_asset": base_asset,
+            "requested_qty": float(requested_qty or 0.0),
+            "free_qty": free_qty,
+            "step_size": step_size,
+            "min_qty": min_qty,
+            "prepared_qty": prepared_qty,
+            "prepared_qty_str": prepared_qty_str,
+        }
+
     def place_order(
         self,
         symbol: str,
@@ -483,29 +579,39 @@ class BinanceClient:
             )
             return None
 
+        resolved_symbol = self.resolve_symbol(symbol) or (symbol or "").upper().strip()
+        if not resolved_symbol:
+            logger.error("❌ place_order: nie udało się znormalizować symbolu %s", symbol)
+            return {
+                "_error": True,
+                "error_code": "symbol_resolution_failed",
+                "error_message": "symbol resolution failed",
+            }
+
+        side = (side or "").upper().strip()
+        order_type = (order_type or "").upper().strip()
+
+        if side == "SELL" and quantity > 0:
+            prepared = self.prepare_sell_quantity(resolved_symbol, quantity)
+            if not prepared.get("ok"):
+                logger.error("❌ SELL qty guard blocked %s: %s", resolved_symbol, prepared)
+                return {
+                    "_error": True,
+                    "error_code": "sell_qty_guard_failed",
+                    "error_message": prepared.get("reason") or "sell quantity guard failed",
+                    "details": prepared,
+                }
+            quantity = float(prepared.get("prepared_qty") or 0.0)
+
         try:
             kwargs: Dict[str, Any] = {
-                "symbol": symbol,
+                "symbol": resolved_symbol,
                 "side": side,
                 "type": order_type,
             }
             if quote_qty > 0:
                 kwargs["quoteOrderQty"] = round(quote_qty, 2)
             else:
-                # Zaokrąglij qty do step_size (LOT_SIZE filter) — zapobiega odrzuceniu przez Binance
-                try:
-                    sym_info = (self.get_allowed_symbols() or {}).get(symbol, {})
-                    step = float(sym_info.get("step_size") or 0)
-                    if step > 0:
-                        quantity = math.floor(quantity / step) * step
-                        # Normalizacja: usuń błędy zmiennoprzecinkowe
-                        decimals = max(0, -int(math.floor(math.log10(step))))
-                        quantity = round(quantity, decimals)
-                except Exception as step_exc:
-                    logger.warning(
-                        "⚠️ place_order: nie udało się znormalizować qty do step_size dla %s: %s — wysyłam oryginalną wartość qty=%s",
-                        symbol, step_exc, quantity,
-                    )
                 kwargs["quantity"] = quantity
             if order_type == "LIMIT":
                 if price is None:
@@ -513,6 +619,8 @@ class BinanceClient:
                     return None
                 kwargs["price"] = f"{price:.8f}"
                 kwargs["timeInForce"] = "GTC"
+            elif order_type == "MARKET":
+                kwargs["newOrderRespType"] = "FULL"
 
             # Uwzględnij przesunięcie czasu
             kwargs["recvWindow"] = 5000
@@ -523,14 +631,14 @@ class BinanceClient:
             )
             logger.info(
                 "📤 place_order SEND: %s %s %s qty=%s price=%s",
-                side, _log_qty, symbol, kwargs.get("quantity"), kwargs.get("price", "MARKET"),
+                side, _log_qty, resolved_symbol, kwargs.get("quantity"), kwargs.get("price", "MARKET"),
             )
             try:
                 result = self.client.create_order(**kwargs)
             except BinanceAPIException as e:
                 if getattr(e, "code", None) == -1021:
                     # Timestamp out of range — synchronizuj czas i powtórz
-                    logger.warning("⏳ place_order: timestamp out of range dla %s — sync czasu i retry", symbol)
+                    logger.warning("⏳ place_order: timestamp out of range dla %s — sync czasu i retry", resolved_symbol)
                     self._sync_time()
                     result = self.client.create_order(**kwargs)
                 else:
@@ -542,13 +650,13 @@ class BinanceClient:
             fills_count = len(result.get("fills") or [])
             logger.info(
                 "✅ place_order RESPONSE: %s %s %s → orderId=%s status=%s executedQty=%s cumQuote=%s fills=%d",
-                side, _log_qty, symbol, order_id, binance_status, exec_qty, cum_quote, fills_count,
+                side, _log_qty, resolved_symbol, order_id, binance_status, exec_qty, cum_quote, fills_count,
             )
             return result
         except BinanceAPIException as e:
             logger.error(
                 "❌ place_order Binance API error %s: code=%s msg=%s",
-                symbol, e.status_code, e.message,
+                resolved_symbol, e.status_code, e.message,
             )
             return {
                 "_error": True,
@@ -558,7 +666,7 @@ class BinanceClient:
         except Exception as e:
             logger.error(
                 "❌ place_order nieoczekiwany błąd %s: %s — %s",
-                symbol, type(e).__name__, str(e),
+                resolved_symbol, type(e).__name__, str(e),
             )
             return {
                 "_error": True,
@@ -882,6 +990,95 @@ class BinanceClient:
         except Exception as exc:
             logger.error("❌ cancel_order %s: %s", symbol, exc)
             return None
+
+    @_binance_retry
+    def get_all_24hr_tickers(self) -> List[Dict]:
+        """
+        Pobierz statystyki 24h dla WSZYSTKICH symboli na Binance.
+        Wymaga tylko jednego endpointa: GET /api/v3/ticker/24hr (waga 80).
+        
+        Returns:
+            Lista słowników z polami: symbol, price_change_percent, high_price, low_price,
+                                      quote_volume, count, bid_price, ask_price, last_price
+        """
+        try:
+            tickers = self.client.get_ticker() or []
+            result = []
+            for t in tickers:
+                try:
+                    result.append({
+                        "symbol": t.get("symbol", ""),
+                        "price_change_percent": float(t.get("priceChangePercent", 0) or 0),
+                        "high_price": float(t.get("highPrice", 0) or 0),
+                        "low_price": float(t.get("lowPrice", 0) or 0),
+                        "quote_volume": float(t.get("quoteVolume", 0) or 0),
+                        "count": int(t.get("count", 0) or 0),
+                        "bid_price": float(t.get("bidPrice", 0) or 0),
+                        "ask_price": float(t.get("askPrice", 0) or 0),
+                        "last_price": float(t.get("lastPrice", 0) or 0),
+                    })
+                except (ValueError, TypeError) as e:
+                    logger.warning(f"⚠️ Błąd parsowania tickera {t.get('symbol')}: {e}")
+                    continue
+            logger.info(f"✅ get_all_24hr_tickers: pobrano {len(result)} symboli")
+            return result
+        except Exception as e:
+            logger.error(f"❌ Error getting all 24hr tickers: {str(e)}")
+            return []
+
+    def get_usdc_pairs(self) -> List[Dict]:
+        """
+        Pobierz wszystkie pary USDC z pełnymi danymi dla selekcji top-N (grid.md wymaganie).
+        
+        Kombinuje:
+        - exchangeInfo (symbole, filtry)
+        - ticker/24hr (ruch, głębokość)
+        - depth (bid/ask) — ograniczone do top 50 par po objętości
+        
+        Returns:
+            Lista słowników z polami: symbol, base_asset, price_change_percent, high_price, 
+                                      low_price, quote_volume, count, spread_bps, bid_price, ask_price
+        """
+        try:
+            # Krok 1: Pobierz alle tickery
+            all_tickers = self.get_all_24hr_tickers()
+            if not all_tickers:
+                logger.warning("⚠️ get_usdc_pairs: nie udało się pobrać tickerów")
+                return []
+            
+            # Krok 2: Filtruj do USDC + oblicz spread
+            usdc_ticker_map = {}
+            for t in all_tickers:
+                sym = t.get("symbol", "").upper()
+                if sym.endswith("USDC"):
+                    base = sym[:-4]  # remove "USDC"
+                    if base not in {"USDC", "USDT", "FDUSD", "TUSD", "BUSD", "DAI", "USD1", "EUR", "EURI"}:
+                        bid = float(t.get("bid_price", 0) or 0)
+                        ask = float(t.get("ask_price", 0) or 0)
+                        last_price = float(t.get("last_price", 0) or 0)
+                        spread_pct = ((ask - bid) / max(last_price, 1e-9)) * 100 if ask > bid else 0
+                        spread_bps = spread_pct * 100
+                        
+                        usdc_ticker_map[sym] = {
+                            "symbol": sym,
+                            "base_asset": base,
+                            "price_change_percent": float(t.get("price_change_percent", 0) or 0),
+                            "high_price": float(t.get("high_price", 0) or 0),
+                            "low_price": float(t.get("low_price", 0) or 0),
+                            "quote_volume": float(t.get("quote_volume", 0) or 0),
+                            "count": int(t.get("count", 0) or 0),
+                            "spread_bps": spread_bps,
+                            "bid_price": bid,
+                            "ask_price": ask,
+                            "last_price": float(t.get("last_price", 0) or 0),
+                        }
+            
+            result = list(usdc_ticker_map.values())
+            logger.info(f"✅ get_usdc_pairs: znaleziono {len(result)} par USDC")
+            return result
+        except Exception as e:
+            logger.error(f"❌ Error getting USDC pairs: {str(e)}")
+            return []
 
     def place_oco_order(
         self,

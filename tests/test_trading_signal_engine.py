@@ -526,6 +526,65 @@ class TestEvaluateEntrySignal:
             # Sprawdź wartości numeryczne
             assert False, f"Edge powinien być dodatni: {result.details}"
 
+    def test_adaptive_rr_allows_strong_short_term_breakout(self):
+        """Mocny short-term breakout może przejść przy niższym RR tylko lokalnie."""
+        cfg = _default_cfg(
+            min_net_edge_pct=0.10,
+            min_expected_rr=1.5,
+            require_volume_confirmation=True,
+            require_htf_trend_agreement=True,
+            min_liquidity_score=0.0,
+        )
+        ctx = _make_good_ctx(
+            price=100.0,
+            atr=1.2,
+            rsi=52.0,
+            ema_20=101.0,
+            ema_50=98.0,
+            ema_200=90.0,
+            macd_hist=0.3,
+            volume_ratio=2.2,
+        )
+        fast = _make_fast_ctx(ema_20=101.0, ema_50=99.0)
+        htf = _make_htf_ctx(ema_20=105.0, ema_50=100.0, rsi=60.0)
+
+        result = self._call(cfg, ctx_entry=ctx, ctx_htf=htf, ctx_fast=fast)
+
+        assert result.is_valid is True
+        assert result.details["required_rr"] == pytest.approx(1.25)
+        assert result.details["required_rr_base"] == pytest.approx(1.5)
+        assert result.details["rr_ratio"] > result.details["required_rr"]
+
+    def test_adaptive_rr_does_not_relax_without_volume_confirmation(self):
+        """Bez mocnego wolumenu zostaje bazowy RR i sygnał odpada."""
+        cfg = _default_cfg(
+            min_net_edge_pct=0.10,
+            min_expected_rr=1.5,
+            require_volume_confirmation=False,
+            require_htf_trend_agreement=True,
+            min_liquidity_score=0.0,
+        )
+        ctx = _make_good_ctx(
+            price=100.0,
+            atr=1.2,
+            rsi=52.0,
+            ema_20=101.0,
+            ema_50=98.0,
+            ema_200=90.0,
+            macd_hist=0.3,
+            volume_ratio=1.2,
+        )
+        fast = _make_fast_ctx(ema_20=101.0, ema_50=99.0)
+        htf = _make_htf_ctx(ema_20=105.0, ema_50=100.0, rsi=60.0)
+
+        result = self._call(cfg, ctx_entry=ctx, ctx_htf=htf, ctx_fast=fast)
+
+        assert result.is_valid is False
+        assert result.reason_code == "negative_edge_after_costs"
+        assert result.details["required_rr"] == pytest.approx(1.5)
+        assert result.details["required_rr_base"] == pytest.approx(1.5)
+        assert result.details["rr_ratio"] < result.details["required_rr"]
+
     # ─── Score / confidence gate ───────────────────────────────────────────
 
     def test_score_too_low_blocks_buy(self):

@@ -36,6 +36,8 @@ os.environ["ADMIN_TOKEN"] = ""
 os.environ.setdefault("DEMO_INITIAL_BALANCE", "10000")
 os.environ["TRADING_MODE"] = "demo"
 os.environ["ALLOW_LIVE_TRADING"] = "false"
+os.environ["APP_ENV"] = "test"
+os.environ["DISABLE_TELEGRAM"] = "true"
 
 # Inicjalizuj tabele DB po ustawieniu DATABASE_URL — przed jakimikolwiek importami
 try:

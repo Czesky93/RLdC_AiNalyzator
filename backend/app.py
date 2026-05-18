@@ -361,8 +361,16 @@ async def live_state_for_overlay():
                             p.get("current_price") or p.get("entry_price") or 0
                         ),
                         "pnl_pct": round(float(p.get("pnl_percent") or 0), 3),
-                        "planned_tp": 0.0,
-                        "planned_sl": 0.0,
+                        "planned_tp": (
+                            float(p.get("planned_tp"))
+                            if p.get("planned_tp") not in (None, "")
+                            else None
+                        ),
+                        "planned_sl": (
+                            float(p.get("planned_sl"))
+                            if p.get("planned_sl") not in (None, "")
+                            else None
+                        ),
                         "state": str(p.get("classification") or p.get("source") or "IN_POSITION"),
                         "source": p.get("source") or "binance_spot",
                         "has_entry_price": p.get("entry_price") is not None,

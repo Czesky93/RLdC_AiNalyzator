@@ -16,6 +16,7 @@ DECISION_TIMEOUT=float(os.environ.get('RLDC_OVERLAY_DECISION_TIMEOUT','2.5'))
 ENRICH_ROWS=max(0,int(os.environ.get('RLDC_OVERLAY_ENRICH_ROWS','8')))
 ENDPOINTS=[
     '/api/rldc/safe/live-state',
+    '/api/account/trading-status?mode=live',
 ]
 if os.environ.get('RLDC_OVERLAY_INCLUDE_POSITIONS_ANALYSIS', '0').strip().lower() in {'1', 'true', 'yes', 'on'}:
     ENDPOINTS.append('/api/positions/analysis?mode=live')
@@ -39,7 +40,7 @@ if os.environ.get('RLDC_OVERLAY_USE_EXTENDED_ENDPOINTS', '0').strip().lower() in
 if os.environ.get('RLDC_OVERLAY_INCLUDE_MARKET_SCAN', '0').strip().lower() in {'1', 'true', 'yes', 'on'}:
     ENDPOINTS.append('/api/dashboard/market-scan?mode=live')
 HISTORY_TIMEFRAMES=('15m','5m','1m','1h')
-NUM={'price':['price','last_price','current_price','mark_price','close','last'],'change_pct':['price_change_pct','change_pct','change_1m_pct','price_change_1m','price_change_5m','change24h_pct'],'pnl_pct':['pnl_pct','pnl_percent','current_pnl_pct','total_pnl_pct','net_pnl_pct','roi_pct'],'pnl_eur':['pnl_eur','current_pnl_eur','net_pnl_eur','total_pnl_eur','realized_pnl_eur','unrealized_pnl_eur'],'entry':['entry','entry_price','avg_entry_price','entry_target','buy_at','entry_zone'],'target':['target','target_price','take_profit','tp','tp_price','planned_tp','target_zone','sell_at'],'stop':['stop','stop_price','stop_loss','sl','sl_price','planned_sl','stop_zone'],'confidence':['confidence','overall_decision_confidence','direction_confidence','profitability_confidence','final_confidence'],'risk_score':['risk_score','risk','risk_value'],'edge':['edge','profitability_score','expected_edge','expected_net_move_pct_after_costs'],'min_capital':['minimal_sensible_capital','min_capital','recommended_capital','min_order_eur','min_notional_eur']}
+NUM={'price':['price','last_price','current_price','mark_price','close','last'],'change_pct':['price_change_pct','change_pct','change_1m_pct','price_change_1m','price_change_5m','change24h_pct'],'pnl_pct':['pnl_pct','pnl_percent','current_pnl_pct','total_pnl_pct','net_pnl_pct','roi_pct'],'pnl_eur':['pnl_eur','current_pnl_eur','net_pnl_eur','total_pnl_eur','realized_pnl_eur','unrealized_pnl_eur'],'entry':['entry','entry_price','avg_entry_price','entry_target','buy_at','entry_zone'],'target':['target','target_price','take_profit','tp','tp_price','planned_tp','target_zone','sell_at'],'stop':['stop','stop_price','stop_loss','sl','sl_price','planned_sl','stop_zone'],'quantity':['qty','quantity','position_qty','size'],'confidence':['confidence','overall_decision_confidence','direction_confidence','profitability_confidence','final_confidence'],'risk_score':['risk_score','risk','risk_value'],'edge':['edge','profitability_score','expected_edge','expected_net_move_pct_after_costs'],'min_capital':['minimal_sensible_capital','min_capital','recommended_capital','min_order_eur','min_notional_eur']}
 TXT={'symbol':['symbol','pair','market','ticker'],'analysis_symbol':['analysis_symbol','chart_symbol','canonical_symbol'],'quote':['quote','quote_asset','currency'],'action':['recommended_action_label','recommended_action','action','signal','decision','side','final_action','final_action_pl','signal_type'],'trend':['trend','trend_state','direction_label','market_regime'],'plan':['plan','plan_summary_short','plan_summary_plain','plain_summary','summary','next_action','final_user_message'],'reason':['plain_summary','plain_reasons','reason','reasons','reasons_short','explanation','plain_explanation','why','final_reason','raw_reason'],'whale':['whale','whale_state','anomaly','anomaly_state'],'queue_state':['queue_state','state','position_state','status','classification'],'updated_at':['updated_at','last_update','timestamp','created_at','generated_at']}
 _OVERLAY_CACHE_LOCK = threading.Lock()
 _OVERLAY_CACHE: dict[str, tuple[float, tuple[bool, Any, str]]] = {}
@@ -48,6 +49,7 @@ _HEAVY_CACHE_TTL_SECONDS = float(os.environ.get('RLDC_OVERLAY_HEAVY_CACHE_TTL', 
 _SYMBOL_RESOLVE_CACHE_LOCK = threading.Lock()
 _SYMBOL_RESOLVE_CACHE: dict[str, tuple[float, str]] = {}
 _SYMBOL_RESOLVE_TTL_SECONDS = float(os.environ.get('RLDC_OVERLAY_SYMBOL_RESOLVE_TTL', '45.0') or 45.0)
+_MIN_POSITION_VALUE_EUR = float(os.environ.get('RLDC_OVERLAY_MIN_POSITION_VALUE_EUR', '2.0') or 2.0)
 
 # Last-known-good state cache — zwraca stale data zamiast timeout gdy backend wolny
 _STATE_CACHE_LOCK = threading.Lock()
@@ -258,6 +260,37 @@ def useful_pair(row):
     state=str(row.get('queue_state') or '').upper()
     return state in {'IN_POSITION','FULL_TRADING_POSITION','ENTRY_READY','WATCHING','SETUP_FORMING'}
 def collect(payloads):
+    # Kanoniczny fallback: final-decisions daje decyzje/score nawet gdy safe-live-state ma tylko pozycje.
+    for payload in payloads:
+        if not isinstance(payload, dict):
+            continue
+        decisions=payload.get('decisions')
+        if not isinstance(decisions, list):
+            continue
+        for item in decisions:
+            if not isinstance(item, dict):
+                continue
+            symbol=nsym(item.get('symbol'))
+            if not symbol:
+                continue
+            analysis=item.get('symbol_analysis') if isinstance(item.get('symbol_analysis'), dict) else {}
+            position=item.get('position_state') if isinstance(item.get('position_state'), dict) else {}
+            synthetic={
+                'symbol': symbol,
+                'action': text(item.get('final_action_pl') or item.get('final_action') or analysis.get('signal_type')),
+                'confidence': fl(analysis.get('confidence')),
+                'score': fl(analysis.get('score')),
+                'trend': text(analysis.get('trend')),
+                'price': fl(position.get('current_price')) or fl(analysis.get('price')),
+                'entry': fl(position.get('entry_price')),
+                'target': fl(position.get('planned_tp')),
+                'stop': fl(position.get('planned_sl')),
+                'pnl_pct': fl(position.get('pnl_pct')),
+                'queue_state': text(item.get('final_action')),
+                'reason': text(item.get('final_reason') or analysis.get('raw_reason')),
+            }
+            payloads.append(synthetic)
+
     rows=[]
     for p in payloads:
         for it in walk(p):
@@ -340,6 +373,7 @@ def _resolve_chart_symbol(symbol: str) -> str:
     return resolved
 
 def enrich_row(row):
+    source_symbol=row.get('symbol')
     symbol=row.get('chart_symbol') or row.get('analysis_symbol') or row.get('symbol')
     if not symbol:
         return row
@@ -419,11 +453,27 @@ def enrich_row(row):
         current=fl(forecast.get('current_price'))
         if current is not None and row.get('price') is None:
             row['price']=current
+
+    # Gdy wykres jest pobrany z innej waluty quote (np. BTCUSDC dla BTCEUR),
+    # przeskaluj serie do waluty symbolu wyświetlanego, aby uniknąć fałszywego obrazu.
+    src_quote=quote_symbol(source_symbol)
+    chart_quote=quote_symbol(symbol)
+    row_price=fl(row.get('price'))
+    history=row.get('history') if isinstance(row.get('history'),list) else []
+    if src_quote and chart_quote and src_quote != chart_quote and row_price is not None and history:
+        last_history=fl(history[-1])
+        if last_history and last_history > 0:
+            scale=row_price/last_history
+            if 0.2 <= scale <= 5.0:
+                row['history']=[round(float(v)*scale, 8) for v in history]
+                if isinstance(row.get('forecast_path'), list) and row.get('forecast_path'):
+                    row['forecast_path']=[round(float(v)*scale, 8) for v in row['forecast_path']]
+
     if not row.get('plain_summary'):
         row['plain_summary']=plain_row_summary(row)
     return row
 def summary(payloads):
-    keys={'total_value_eur':['total_value_eur','portfolio_value_eur','wallet_value_eur','equity_eur','total_value'],'total_cost_eur':['total_cost_eur','invested_eur','total_cost'],'total_pnl_eur':['total_pnl_eur','net_pnl_eur','unrealized_pnl_eur'],'total_pnl_pct':['total_pnl_pct','net_pnl_pct','roi_pct'],'positions_count':['positions_count','valid_positions_count','open_positions_count','count'],'mode':['mode','trading_mode','environment'],'allow_new_entries':['allow_new_entries'],'reduce_only_mode':['reduce_only_mode'],'no_trade_mode':['no_trade_mode'],'market_health_mode':['market_health_mode']}
+    keys={'total_value_eur':['total_value_eur','portfolio_value_eur','wallet_value_eur','equity_eur','equity','total_equity','balance','total_value'],'total_cost_eur':['total_cost_eur','invested_eur','invested','total_cost'],'total_pnl_eur':['total_pnl_eur','total_pnl','pnl_eur','net_pnl_eur','unrealized_pnl_eur'],'total_pnl_pct':['total_pnl_pct','equity_change_pct','pnl_pct','net_pnl_pct','roi_pct'],'positions_count':['positions_count','open_positions','valid_positions_count','open_positions_count','count'],'mode':['mode','trading_mode','environment'],'allow_new_entries':['allow_new_entries'],'reduce_only_mode':['reduce_only_mode'],'no_trade_mode':['no_trade_mode'],'market_health_mode':['market_health_mode'],'min_buy_eur':['min_buy_eur','min_buy_reference_eur','required_cash_eur'],'cash_available_eur':['cash_available_eur','free_cash','cash_available'],'best_ready_symbol':['best_ready_symbol'],'best_ready_score':['best_ready_score'],'status_pl':['status_pl']}
     res={}
 
     # Najpierw preferuj dane z kanonicznych endpointow statusowych
@@ -530,6 +580,65 @@ def narr(payloads,rows):
             tt=text(t)
             if tt and len(tt)>12: return tt[:420]
     return f"Bot patrzy na {rows[0]['symbol']} i czeka na pełniejsze dane." if rows else 'Brak prostego komentarza z bota. Overlay czeka na synchronizację.'
+
+
+def _extract_position_rows(payloads: list[dict]) -> list[dict]:
+    rows: list[dict] = []
+    for node in walk(payloads):
+        if not isinstance(node, dict):
+            continue
+        positions = node.get('positions')
+        if isinstance(positions, list):
+            for item in positions:
+                if isinstance(item, dict):
+                    rows.append(item)
+    return rows
+
+
+def _is_countable_position(pos: dict) -> bool:
+    symbol = nsym(first(pos, ['symbol', 'pair', 'market']))
+    if not symbol:
+        return False
+    qty = fl(first(pos, ['qty', 'quantity', 'position_qty'])) or 0.0
+    if qty <= 0:
+        return False
+    state = str(first(pos, ['state', 'position_state', 'source']) or '').lower()
+    if 'dust' in state:
+        return False
+    price = fl(first(pos, ['current_price', 'price', 'mark_price', 'last_price']))
+    notional = (qty * price) if (price is not None and price > 0) else None
+    if notional is not None and notional < _MIN_POSITION_VALUE_EUR:
+        return False
+    return True
+
+
+def _count_positions_from_payloads(payloads: list[dict]) -> int | None:
+    positions = _extract_position_rows(payloads)
+    if not positions:
+        return None
+    symbols = {
+        nsym(first(pos, ['symbol', 'pair', 'market']))
+        for pos in positions
+        if _is_countable_position(pos)
+    }
+    symbols.discard(None)
+    return len(symbols)
+
+
+def _estimate_total_value_eur(payloads: list[dict]) -> float | None:
+    total = 0.0
+    seen_any = False
+    for pos in _extract_position_rows(payloads):
+        if not _is_countable_position(pos):
+            continue
+        qty = fl(first(pos, ['qty', 'quantity', 'position_qty'])) or 0.0
+        price = fl(first(pos, ['current_price', 'price', 'mark_price', 'last_price'])) or 0.0
+        if qty > 0 and price > 0:
+            total += qty * price
+            seen_any = True
+    return total if seen_any else None
+
+
 def _compute_live_state() -> dict:
     statuses={}; payloads=[]
     max_workers=min(4,max(1,len(ENDPOINTS)))
@@ -556,7 +665,27 @@ def _compute_live_state() -> dict:
                 except Exception: enriched.append(original)
         rows=enriched+rest
     summ=summary(payloads)
-    if 'positions_count' not in summ and rows: summ['positions_count']=len(rows)
+    payload_positions_count=_count_positions_from_payloads(payloads)
+    if payload_positions_count is not None:
+        summ['positions_count']=payload_positions_count
+    if ('total_value_eur' not in summ) or ((fl(summ.get('total_value_eur')) or 0.0) <= 0.0):
+        estimated_total=_estimate_total_value_eur(payloads)
+        if estimated_total is not None:
+            summ['total_value_eur']=round(estimated_total, 6)
+
+    if 'positions_count' not in summ and rows:
+        open_rows=0
+        for row in rows:
+            state=str(row.get('queue_state') or '').lower()
+            qty=fl(row.get('quantity')) or 0.0
+            entry=fl(row.get('entry')) or 0.0
+            if 'dust' in state:
+                continue
+            if qty <= 0:
+                continue
+            if ('position' in state) or state in {'binance_spot','in_position'} or entry > 0:
+                open_rows += 1
+        summ['positions_count']=open_rows
     ok_any=bool(payloads); partial=ok_any and (not rows or any(v!='ok' for v in statuses.values()))
     warn=''
     if not ok_any: warn=f'Brak odpowiedzi JSON z backendu RLdC {BACKEND}. Sprawdź, czy FastAPI działa na :8000 albo ustaw RLDC_BACKEND_URL.'

@@ -347,6 +347,83 @@ def _effective_quote_volume_trade_threshold(cfg, volume_ratio: float, spread_pct
     return base_threshold * spread_penalty / volume_boost
 
 
+def _effective_volume_ratio_min(
+    cfg,
+    quote_volume_24h: float,
+    spread_pct: float,
+) -> float:
+    """
+    Dynamiczny próg potwierdzenia wolumenowego zależny od tieru płynności.
+
+    Tiers na podstawie `quote_volume_24h`:
+      - >= 20M: very liquid
+      - >= 5M:  large
+      - >= 1M:  mid
+      - >= 250k: small
+      - < 250k: micro (bez ulgi względem base)
+
+    Dla wyższej płynności obniżamy wymagany `volume_ratio`,
+    ale przy szerokim spreadzie dokładamy karę i podnosimy próg.
+    """
+    base_min = max(_safe_float(getattr(cfg, "volume_ratio_min", 1.0), 1.0), 0.1)
+    qv = max(_safe_float(quote_volume_24h, 0.0), 0.0)
+    spread_bps = max(0.0, spread_pct * 100.0)
+
+    tier_mult = 1.0
+    if qv >= 20_000_000:
+        tier_mult = 0.30
+    elif qv >= 5_000_000:
+        tier_mult = 0.45
+    elif qv >= 1_000_000:
+        tier_mult = 0.60
+    elif qv >= 250_000:
+        tier_mult = 0.80
+
+    required = max(0.15, base_min * tier_mult)
+
+    # Szeroki spread zwykle oznacza gorszą egzekucję i wyższy poślizg.
+    # W takim rynku podnosimy próg potwierdzenia wolumenowego.
+    if spread_bps >= 40.0:
+        required *= 1.20
+    elif spread_bps >= 25.0:
+        required *= 1.10
+
+    # Nigdy nie wymagaj więcej niż bazowy cfg.
+    return min(base_min, required)
+
+
+def _effective_min_expected_rr(
+    cfg,
+    entry_score: float,
+    confidence: float,
+    effective_volume_ratio: float,
+    spread_pct: float,
+    liquidity_score: float,
+    expected_net_edge_pct: float,
+) -> float:
+    """
+    Dynamiczny próg RR dla short-term breakoutów.
+
+    Dla bardzo dobrych, tanich egzekucyjnie setupów obniżamy minimalny RR,
+    ale tylko umiarkowanie. To pozwala łapać krótsze impulsy 15m–1h bez
+    globalnego luzowania ochrony jakości wejścia.
+    """
+    base_rr = max(_safe_float(getattr(cfg, "min_expected_rr", 0.0), 0.0), 0.1)
+    spread_bps = max(0.0, _safe_float(spread_pct, 0.0) * 100.0)
+
+    if (
+        entry_score >= 0.72
+        and confidence >= 0.72
+        and effective_volume_ratio >= 2.0
+        and liquidity_score >= max(0.45, _safe_float(getattr(cfg, "min_liquidity_score", 0.0), 0.0))
+        and spread_bps <= 15.0
+        and expected_net_edge_pct >= max(0.60, _safe_float(getattr(cfg, "min_net_edge_pct", 0.0), 0.0))
+    ):
+        return max(1.25, base_rr - 0.25)
+
+    return base_rr
+
+
 def _get_orderbook_depth_ratio(
     binance_client,
     symbol: str,
@@ -503,12 +580,20 @@ def evaluate_entry_signal(
     macd_sig = ctx_entry.get("macd_signal")
     volume_ratio = ctx_entry.get("volume_ratio")
     volume_spike = ctx_entry.get("volume_spike_ratio")
+    fast_volume_ratio = ctx_fast.get("volume_ratio")
+    fast_volume_spike = ctx_fast.get("volume_spike_ratio")
     bb_upper = ctx_entry.get("bb_upper")
     bb_lower = ctx_entry.get("bb_lower")
     bb_mid = ctx_entry.get("bb_middle") or ctx_entry.get("bb_mid")
     quote_volume_24h = _safe_float(ctx_entry.get("volume_24h_quote") or ctx_entry.get("quote_volume"))
     trades_1h = _safe_float(ctx_entry.get("trade_count") or ctx_entry.get("num_trades"))
     volume_ratio_v = _safe_float(volume_ratio, 1.0)
+    fast_volume_ratio_v = _safe_float(fast_volume_ratio, volume_ratio_v)
+    effective_volume_ratio = max(volume_ratio_v, fast_volume_ratio_v)
+    effective_volume_spike = max(
+        _safe_float(volume_spike, effective_volume_ratio),
+        _safe_float(fast_volume_spike, effective_volume_ratio),
+    )
 
     result.details.update({
         "quote_volume_24h": round(quote_volume_24h, 4),
@@ -516,6 +601,8 @@ def evaluate_entry_signal(
         "spread_bps": round(spread_bps, 4),
         "trade_count_1h": round(trades_1h, 4),
         "volume_ratio": round(volume_ratio_v, 4),
+        "fast_volume_ratio": round(fast_volume_ratio_v, 4),
+        "effective_volume_ratio": round(effective_volume_ratio, 4),
     })
 
     market_block: Optional[Tuple[int, str, str, Dict[str, Any]]] = None
@@ -537,11 +624,16 @@ def evaluate_entry_signal(
 
     trend_score = _compute_trend_score(ema_20, ema_50, ema_200, price)
     momentum_score = _compute_momentum_score(rsi, macd_hist, macd_sig)
-    volume_score = _compute_volume_score(volume_ratio, volume_spike)
+    volume_score = _compute_volume_score(effective_volume_ratio, effective_volume_spike)
 
     effective_min_quote_volume_trade = _effective_quote_volume_trade_threshold(
         cfg,
-        volume_ratio=volume_ratio_v,
+        volume_ratio=effective_volume_ratio,
+        spread_pct=spread_pct,
+    )
+    effective_volume_ratio_min = _effective_volume_ratio_min(
+        cfg,
+        quote_volume_24h=quote_volume_24h,
         spread_pct=spread_pct,
     )
 
@@ -553,20 +645,21 @@ def evaluate_entry_signal(
                 "quote_volume_24h": round(quote_volume_24h, 4),
                 "min_quote_volume_trade": round(_safe_float(getattr(cfg, "min_quote_volume_trade", 0.0), 0.0), 4),
                 "effective_min_quote_volume_trade": round(effective_min_quote_volume_trade, 4),
-                "volume_ratio": round(volume_ratio_v, 3),
+                "volume_ratio": round(effective_volume_ratio, 3),
                 "spread_bps": round(spread_bps, 4),
                 "market_mode": "observe_only",
                 "tradable": False,
             },
         )
 
-    if cfg.require_volume_confirmation and volume_ratio_v < cfg.volume_ratio_min:
+    if cfg.require_volume_confirmation and effective_volume_ratio < effective_volume_ratio_min:
         _mark_market_block(
             3,
             "volume_too_low",
             {
-                "volume_ratio": round(volume_ratio_v, 3),
-                "required": cfg.volume_ratio_min,
+                "volume_ratio": round(effective_volume_ratio, 3),
+                "required": round(effective_volume_ratio_min, 4),
+                "required_base": round(_safe_float(getattr(cfg, "volume_ratio_min", 0.0), 0.0), 4),
                 "market_mode": "observe_only",
                 "tradable": False,
             },
@@ -655,12 +748,40 @@ def evaluate_entry_signal(
         and _safe_float(fast_ema_20) > _safe_float(fast_ema_50)
     )
 
-    has_buy_signal = (
+    min_htf_for_buy = _safe_float(getattr(cfg, "min_htf_agreement_for_buy", 0.35), 0.35)
+    trend_follow_condition = (
         trend_score >= 0.60           # trend w górę na entry TF
         and momentum_score >= 0.50    # impet pozytywny
-        and (htf_score >= 0.50 or not cfg.require_htf_trend_agreement)
+        and (htf_score >= min_htf_for_buy or not cfg.require_htf_trend_agreement)
         and (fast_above_trend or trend_score >= 0.80)  # 15m potwierdza lub wyraźny 1h trend
     )
+
+    # Reversal/breakout entry: dopuszczamy słabszy trend 1h, ale wymagamy
+    # mocnego momentum, potwierdzenia 15m i wyraźnie lepszego HTF.
+    breakout_reversal_condition = (
+        trend_score >= 0.35
+        and momentum_score >= 0.75
+        and regime_score >= 0.55
+        and fast_above_trend
+        and (htf_score >= max(0.60, min_htf_for_buy) or not cfg.require_htf_trend_agreement)
+    )
+
+    # Tryb agresywny (runtime): gdy operator świadomie obniży progi score/confidence
+    # i wyłączy twarde HTF confirmation, dopuszczamy szerszy kandydat wejścia,
+    # ale dalej przez standardowe bramki score/confidence/edge/RR.
+    aggressive_mode = (
+        not cfg.require_htf_trend_agreement
+        and _safe_float(getattr(cfg, "min_entry_score", 1.0), 1.0) <= 0.50
+        and _safe_float(getattr(cfg, "min_signal_confidence", 1.0), 1.0) <= 0.50
+    )
+    aggressive_entry_condition = (
+        aggressive_mode
+        and trend_score >= 0.30
+        and momentum_score >= 0.45
+        and htf_score >= 0.30
+    )
+
+    has_buy_signal = trend_follow_condition or breakout_reversal_condition or aggressive_entry_condition
 
     if not has_buy_signal:
         result.reason_code = "no_buy_signal"
@@ -670,6 +791,10 @@ def evaluate_entry_signal(
             "momentum_score": round(momentum_score, 3),
             "htf_score": round(htf_score, 3),
             "fast_above_trend": fast_above_trend,
+            "trend_follow_condition": trend_follow_condition,
+            "breakout_reversal_condition": breakout_reversal_condition,
+            "aggressive_mode": aggressive_mode,
+            "aggressive_entry_condition": aggressive_entry_condition,
         })
         return result
 
@@ -717,9 +842,12 @@ def evaluate_entry_signal(
         "confidence": round(confidence, 4),
         "min_confidence": _safe_float(getattr(cfg, "min_signal_confidence", 0.0), 0.0),
         "effective_min_quote_volume_trade": round(effective_min_quote_volume_trade, 4),
+        "effective_volume_ratio_min": round(effective_volume_ratio_min, 4),
         "orderbook_quote_depth": round(orderbook_quote_depth, 4),
         "depth_to_order_ratio": round(depth_to_order_ratio, 4),
         "orderbook_depth_bps": round(orderbook_depth_bps, 4),
+        "fast_volume_ratio": round(fast_volume_ratio_v, 4),
+        "effective_volume_ratio": round(effective_volume_ratio, 4),
     })
 
     if market_block is not None:
@@ -783,12 +911,23 @@ def evaluate_entry_signal(
         })
         return result
 
-    if rr_ratio < cfg.min_expected_rr:
+    effective_min_rr = _effective_min_expected_rr(
+        cfg,
+        entry_score=entry_score,
+        confidence=confidence,
+        effective_volume_ratio=effective_volume_ratio,
+        spread_pct=spread_pct,
+        liquidity_score=liquidity_score,
+        expected_net_edge_pct=expected_net_edge_pct,
+    )
+
+    if rr_ratio < effective_min_rr:
         result.reason_code = "negative_edge_after_costs"
         result.reason_pl = _REASON_PL["negative_edge_after_costs"]
         result.details.update({
             "rr_ratio": round(rr_ratio, 3),
-            "required_rr": cfg.min_expected_rr,
+            "required_rr": round(effective_min_rr, 3),
+            "required_rr_base": _safe_float(getattr(cfg, "min_expected_rr", 0.0), 0.0),
             "potential_gain_pct": round(potential_gain_pct, 4),
             "potential_loss_pct": round(potential_loss_pct, 4),
         })
@@ -813,6 +952,8 @@ def evaluate_entry_signal(
         "spread_bps": round(spread_bps, 4),
         "atr": round(atr, 8),
         "rr_ratio": round(rr_ratio, 3),
+        "required_rr": round(effective_min_rr, 3),
+        "required_rr_base": _safe_float(getattr(cfg, "min_expected_rr", 0.0), 0.0),
         "htf_ema_20": _safe_float(htf_ema_20),
         "htf_ema_50": _safe_float(htf_ema_50),
         "htf_rsi": _safe_float(htf_rsi),

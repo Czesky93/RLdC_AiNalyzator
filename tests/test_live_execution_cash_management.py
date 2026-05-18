@@ -231,6 +231,51 @@ class _MockBinanceRejectBuy(_MockBinance):
         return {"_error": True, "error_message": "unsupported mock order"}
 
 
+class _MockBinanceBaseFeeBuy(_MockBinance):
+    def place_order(
+        self,
+        symbol: str,
+        side: str,
+        order_type: str = "MARKET",
+        quantity: float = 0.0,
+        price=None,
+        quote_qty: float = 0.0,
+    ):
+        self.orders.append((symbol, side, quantity, quote_qty))
+        if symbol == "EURUSDC" and side == "SELL":
+            self.converted = True
+            return {
+                "symbol": symbol,
+                "orderId": 7301,
+                "status": "FILLED",
+                "executedQty": str(quantity),
+                "fills": [
+                    {
+                        "qty": str(quantity),
+                        "price": "1.1",
+                        "commission": "0.0",
+                        "commissionAsset": "USDC",
+                    }
+                ],
+            }
+        if symbol == "ETHUSDC" and side == "BUY":
+            return {
+                "symbol": symbol,
+                "orderId": 7302,
+                "status": "FILLED",
+                "executedQty": str(quantity),
+                "fills": [
+                    {
+                        "qty": str(quantity),
+                        "price": "2000.0",
+                        "commission": "0.001",
+                        "commissionAsset": "ETH",
+                    }
+                ],
+            }
+        return {"_error": True, "error_message": "unsupported mock order"}
+
+
 def test_min_buy_eur_is_converted_to_required_usdc_notional():
     collector = _collector_with_mock_binance()
     required, meta = collector._resolve_min_buy_quote_notional(
@@ -479,6 +524,46 @@ def test_buy_submitted_without_fill_does_not_become_filled_or_open_position():
         db.close()
 
 
+def test_live_buy_position_quantity_uses_net_qty_when_fee_in_base_asset():
+    db = SessionLocal()
+    try:
+        db.query(PendingOrder).delete()
+        db.query(Position).delete()
+        db.commit()
+
+        pending = PendingOrder(
+            symbol="ETHUSDC",
+            side="BUY",
+            order_type="MARKET",
+            price=2000.0,
+            quantity=0.04,
+            mode="live",
+            status="PENDING_CONFIRMED",
+            reason="pytest_base_fee_net_qty",
+            created_at=utc_now_naive(),
+            confirmed_at=utc_now_naive(),
+        )
+        db.add(pending)
+        db.commit()
+
+        collector = _collector_with_binance(_MockBinanceBaseFeeBuy())
+        collector._execute_confirmed_pending_orders(db)
+
+        position = (
+            db.query(Position)
+            .filter(
+                Position.symbol == "ETHUSDC",
+                Position.mode == "live",
+                Position.exit_reason_code.is_(None),
+            )
+            .first()
+        )
+        assert position is not None
+        assert abs(float(position.quantity) - 0.039) < 1e-9
+    finally:
+        db.close()
+
+
 def test_buy_rejected_by_exchange_has_no_fake_success_and_no_position():
     db = SessionLocal()
     try:
@@ -634,3 +719,87 @@ def test_funding_conversion_logs_started_and_filled():
     assert result["ok"] is True
     assert result["converted"] is True
     assert result["reason_code"] == "funding_conversion_filled"
+
+
+def test_stop_loss_is_not_blocked_by_pending_cooldown():
+    """Hard exit SL musi wejść mimo pending cooldown, bo cooldown dotyczy tylko kolejnych warstw exit."""
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock, patch
+
+    from backend.database import ForecastRecord
+
+    collector = DataCollector.__new__(DataCollector)
+    collector.binance = MagicMock()
+    collector._trace_decision = MagicMock()
+    collector._send_telegram_alert = MagicMock()
+    collector._save_exit_quality = MagicMock()
+    collector._create_pending_order = MagicMock(return_value=777)
+    collector._exit_alert_sent_at = {}
+    collector._exit_alert_min_interval_s = 900
+    collector._trailing_alert_state = {}
+    collector._binance_rejection_cooldown = {}
+    collector._binance_rejection_cooldown_s = 600
+    collector.demo_state = {}
+
+    latest_price = SimpleNamespace(price=90.0)
+    market_query = MagicMock()
+    market_query.order_by.return_value.first.return_value = latest_price
+
+    forecast_query = MagicMock()
+    forecast_query.filter.return_value.order_by.return_value.first.return_value = None
+
+    db = MagicMock()
+
+    def _query_side_effect(model):
+        if model.__name__ == "MarketData":
+            return market_query
+        if model is ForecastRecord:
+            return forecast_query
+        return MagicMock()
+
+    db.query.side_effect = _query_side_effect
+    db.add = MagicMock()
+    db.commit = MagicMock()
+    db.rollback = MagicMock()
+
+    position = SimpleNamespace(
+        symbol="AAVEUSDC",
+        quantity=0.5474794,
+        mode="live",
+        entry_price=100.0,
+        current_price=90.0,
+        highest_price_seen=100.0,
+        planned_sl=95.0,
+        planned_tp=120.0,
+        trailing_active=False,
+        trailing_stop_price=None,
+        partial_take_count=0,
+        unrealized_pnl=-5.0,
+    )
+
+    tc = {
+        "now": utc_now_naive(),
+        "mode": "live",
+        "runtime_ctx": {"snapshot_id": "pytest-snapshot"},
+        "config": {},
+        "positions": [position],
+        "atr_stop_mult": 2.0,
+        "atr_take_mult": 3.0,
+        "trail_mult": 2.0,
+        "min_klines": 60,
+        "daily_loss_triggered": False,
+        "base_cooldown": 60,
+        "loss_streak_limit": 3,
+        "max_drawdown_pct": 20.0,
+        "tier_map": {},
+        "_has_active_pending": lambda sym: False,
+        "_pending_in_cooldown": lambda sym: True,
+    }
+
+    with patch("backend.collector.get_live_context", return_value={"atr": 1.0, "ema_20": None, "ema_50": None, "rsi": 50.0}):
+        collector._check_exits(db, tc)
+
+    assert collector._create_pending_order.called, "SL nie powinien być blokowany cooldownem"
+    pending_kwargs = collector._create_pending_order.call_args.kwargs
+    assert pending_kwargs["side"] == "SELL"
+    assert pending_kwargs["mode"] == "live"

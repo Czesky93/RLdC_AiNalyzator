@@ -2,60 +2,51 @@
 
 import { getApiBase } from '@/lib/api'
 import { useEffect, useMemo, useState } from 'react'
-import {
-    Area,
-    CartesianGrid,
-    ComposedChart,
-    Line,
-    LineChart,
-    ReferenceArea,
-    ReferenceLine,
-    ResponsiveContainer,
-    Tooltip,
-    XAxis,
-    YAxis
-} from 'recharts'
+import BinanceStyleChart from './BinanceStyleChart'
 
 type KlinePoint = {
-  time: string
-  price: number
+  timestamp: number
+  open: number
+  high: number
+  low: number
+  close: number
   volume: number
-  ema20?: number
-  ema50?: number
 }
 
-type RsiPoint = {
-  time: string
-  rsi: number | undefined
+type ForecastPoint = {
+  timestamp: number
+  value: number
 }
 
-function calcEma(closes: number[], period: number): (number | undefined)[] {
-  const k = 2 / (period + 1)
-  const result: (number | undefined)[] = Array(closes.length).fill(undefined)
-  let ema: number | undefined
-  for (let i = 0; i < closes.length; i++) {
-    if (ema === undefined) {
-      if (i >= period - 1) ema = closes.slice(0, period).reduce((a, b) => a + b, 0) / period
-    } else {
-      ema = closes[i] * k + ema * (1 - k)
-    }
-    result[i] = ema
-  }
-  return result
+type RangeData = {
+  buy_low?: number | null
+  buy_high?: number | null
+  sell_low?: number | null
+  sell_high?: number | null
+  buy_target?: number | null
+  sell_target?: number | null
+  comment?: string | null
 }
 
-function calcRsi(closes: number[], period = 14): (number | undefined)[] {
-  const result: (number | undefined)[] = Array(closes.length).fill(undefined)
-  for (let i = period; i < closes.length; i++) {
-    let gains = 0, losses = 0
-    for (let j = i - period + 1; j <= i; j++) {
-      const diff = closes[j] - closes[j - 1]
-      if (diff > 0) gains += diff; else losses += -diff
-    }
-    const rs = losses === 0 ? 100 : gains / losses
-    result[i] = 100 - 100 / (1 + rs)
-  }
-  return result
+type OrderbookMeta = {
+  bestBid?: number | null
+  bestAsk?: number | null
+  spreadBps?: number | null
+  bidDepth?: number | null
+  askDepth?: number | null
+  imbalance?: number | null
+}
+
+type DecisionView = {
+  final_signal?: string
+  final_signal_reason?: string
+  recommended_action_label?: string
+  plain_explanation?: string
+  data_quality?: string
+  final_confidence?: number | null
+  indicators?: Record<string, number | string | null | undefined>
+  horizons?: Record<string, { direction?: string | null; projected_pct?: number | null; forecast_price?: number | null }>
+  blockers?: string[]
 }
 
 interface TradingViewProps {
@@ -66,6 +57,88 @@ interface TradingViewProps {
   onSymbolChange?: (symbol: string) => void
 }
 
+function normalizeSymbol(symbol: string) {
+  return symbol.includes('/') ? symbol.replace('/', '') : symbol
+}
+
+function parseTimestamp(value: unknown) {
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return value > 1_000_000_000_000 ? value : value * 1000
+  }
+  if (typeof value === 'string') {
+    const parsed = Date.parse(value)
+    if (Number.isFinite(parsed)) return parsed
+  }
+  return Date.now()
+}
+
+function toNum(value: unknown) {
+  const parsed = Number(value)
+  return Number.isFinite(parsed) ? parsed : null
+}
+
+function timeframeMs(timeframe: string) {
+  if (timeframe === '1m') return 60_000
+  if (timeframe === '5m') return 5 * 60_000
+  if (timeframe === '15m') return 15 * 60_000
+  if (timeframe === '1h') return 60 * 60_000
+  if (timeframe === '4h') return 4 * 60 * 60_000
+  if (timeframe === '1d') return 24 * 60 * 60_000
+  return 60_000
+}
+
+function formatPrice(value: number | null) {
+  if (value === null) return '--'
+  if (Math.abs(value) < 0.01) return value.toFixed(8)
+  if (Math.abs(value) < 1) return value.toFixed(5)
+  if (Math.abs(value) < 100) return value.toFixed(4)
+  return value.toFixed(2)
+}
+
+function buildForecastPoints(payload: any, timeframe: string, lastTimestamp: number, lastClose: number | null): ForecastPoint[] {
+  const direct = Array.isArray(payload?.data)
+    ? payload.data
+        .map((item: any) => ({
+          timestamp: parseTimestamp(item?.timestamp ?? item?.forecast_ts ?? item?.time),
+          value: toNum(item?.price ?? item?.forecast_price ?? item?.projected_price),
+        }))
+        .filter((item: { value: number | null }) => item.value !== null)
+        .map((item: { timestamp: number; value: number | null }) => ({ timestamp: item.timestamp, value: item.value as number }))
+    : []
+  if (direct.length > 0) return direct.sort((a: ForecastPoint, b: ForecastPoint) => a.timestamp - b.timestamp)
+
+  const basePrice = lastClose ?? toNum(payload?.current_price)
+  if (basePrice === null) return []
+  const step = timeframeMs(timeframe)
+  const meta = [
+    { key: 'forecast_1h', offset: 1 },
+    { key: 'forecast_4h', offset: 4 },
+    { key: 'forecast_24h', offset: 24 },
+  ]
+  const derived = meta
+    .map(({ key, offset }) => ({
+      timestamp: lastTimestamp + offset * step,
+      value: toNum(payload?.[key]?.projected_price ?? payload?.[key]?.forecast_price),
+    }))
+    .filter((item: { value: number | null }) => item.value !== null)
+    .map((item: { timestamp: number; value: number | null }) => ({ timestamp: item.timestamp, value: item.value as number }))
+
+  return derived.length > 0 ? [{ timestamp: lastTimestamp, value: basePrice }, ...derived] : []
+}
+
+function buildOrderbookMeta(payload: any): OrderbookMeta | null {
+  const bids = Array.isArray(payload?.bids) ? payload.bids : []
+  const asks = Array.isArray(payload?.asks) ? payload.asks : []
+  const bestBid = toNum(bids[0]?.[0])
+  const bestAsk = toNum(asks[0]?.[0])
+  const bidDepth = bids.slice(0, 10).reduce((sum: number, item: any) => sum + (toNum(item?.[1]) ?? 0), 0)
+  const askDepth = asks.slice(0, 10).reduce((sum: number, item: any) => sum + (toNum(item?.[1]) ?? 0), 0)
+  const spreadBps = bestBid && bestAsk ? ((bestAsk - bestBid) / ((bestAsk + bestBid) / 2)) * 10_000 : null
+  const imbalance = bidDepth + askDepth > 0 ? (bidDepth - askDepth) / (bidDepth + askDepth) : null
+  if (bestBid === null && bestAsk === null && spreadBps === null) return null
+  return { bestBid, bestAsk, spreadBps, bidDepth, askDepth, imbalance }
+}
+
 export default function TradingView({
   symbol: symbolProp,
   allowSymbolSelect = true,
@@ -73,216 +146,166 @@ export default function TradingView({
   refreshMs: refreshMsProp = 60000,
   onSymbolChange,
 }: TradingViewProps) {
-  const [mounted, setMounted] = useState(false)
   const [timeframe, setTimeframe] = useState('1h')
   const [symbol, setSymbol] = useState('BTCUSDT')
   const [data, setData] = useState<KlinePoint[]>([])
-  const [rsiData, setRsiData] = useState<RsiPoint[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [lastPrice, setLastPrice] = useState<number | null>(null)
   const [lastUpdate, setLastUpdate] = useState<string | null>(null)
-  const [range, setRange] = useState<any | null>(null)
+  const [range, setRange] = useState<RangeData | null>(null)
   const [symbols, setSymbols] = useState<string[]>([])
-  const [decision, setDecision] = useState<{ buy: string, sell: string } | null>(null)
+  const [decisionView, setDecisionView] = useState<DecisionView | null>(null)
+  const [forecastPoints, setForecastPoints] = useState<ForecastPoint[]>([])
+  const [orderbook, setOrderbook] = useState<OrderbookMeta | null>(null)
   const [fixedSymbol, setFixedSymbol] = useState<string | null>(null)
   const [allowSelect, setAllowSelect] = useState<boolean>(true)
   const [titleOverride, setTitleOverride] = useState<string | null>(null)
   const [refreshMs, setRefreshMs] = useState<number>(60000)
 
   useEffect(() => {
-    setMounted(true)
-  }, [])
-
-  useEffect(() => {
     setFixedSymbol(symbolProp || null)
     setAllowSelect(allowSymbolSelect)
     setTitleOverride(titleOverrideProp || null)
     setRefreshMs(refreshMsProp)
-    if (symbolProp) {
-      setSymbol(symbolProp)
-    }
+    if (symbolProp) setSymbol(symbolProp)
   }, [symbolProp, allowSymbolSelect, titleOverrideProp, refreshMsProp])
 
   useEffect(() => {
-    // Reset danych natychmiast przy zmianie symbolu/timeframe — zapobiega "ciągłej linii"
-    setData([])
-    setRsiData([])
-    setLastPrice(null)
-    setRange(null)
-    setDecision(null)
-
-    const normalized = normalizeSymbol(fixedSymbol || symbol)
     let cancelled = false
+    const normalized = normalizeSymbol(fixedSymbol || symbol)
 
-    const fetchKlines = async () => {
+    const fetchChartData = async () => {
       setLoading(true)
       setError(null)
       try {
         const base = getApiBase()
-        const res = await fetch(`${base}/api/market/kline?symbol=${normalized}&tf=${timeframe}&limit=120`)
+        const [klineRes, rangeRes, forecastRes, decisionRes, orderbookRes] = await Promise.all([
+          fetch(`${base}/api/market/kline?symbol=${normalized}&tf=${timeframe}&limit=120`),
+          fetch(`${base}/api/market/ranges?symbol=${normalized}`),
+          fetch(`${base}/api/market/forecast/${normalized}`),
+          fetch(`${base}/api/signals/${normalized}/decision-view?mode=live`),
+          fetch(`${base}/api/market/orderbook/${normalized}?limit=20`),
+        ])
         if (cancelled) return
-        if (!res.ok) {
-          throw new Error('Błąd pobierania świec')
-        }
-        const json = await res.json()
-        const sorted = (json.data || []).sort(
-          (a: any, b: any) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime()
-        )
-        const closes = sorted.map((k: any) => k.close as number)
-        const ema20vals = calcEma(closes, 20)
-        const ema50vals = calcEma(closes, 50)
-        const rsiVals = calcRsi(closes, 14)
-        const mapped = sorted.map((k: any, i: number) => ({
-          time: new Date(k.timestamp).toLocaleTimeString('pl-PL', { hour: '2-digit', minute: '2-digit' }),
-          price: k.close,
-          volume: k.volume,
-          ema20: ema20vals[i],
-          ema50: ema50vals[i],
-        }))
-        const rsiPoints = sorted.map((k: any, i: number) => ({
-          time: new Date(k.timestamp).toLocaleTimeString('pl-PL', { hour: '2-digit', minute: '2-digit' }),
-          rsi: rsiVals[i] !== undefined ? Math.round(rsiVals[i]! * 10) / 10 : undefined,
-        }))
+        if (!klineRes.ok) throw new Error('Błąd pobierania świec')
+
+        const klineJson = await klineRes.json()
+        const sorted = (klineJson.data || [])
+          .map((item: any) => ({
+            timestamp: parseTimestamp(item?.timestamp ?? item?.open_time ?? item?.time),
+            open: toNum(item?.open),
+            high: toNum(item?.high),
+            low: toNum(item?.low),
+            close: toNum(item?.close),
+            volume: toNum(item?.volume) ?? 0,
+          }))
+          .filter((item: any) => item.open !== null && item.high !== null && item.low !== null && item.close !== null)
+          .map((item: any) => ({
+            timestamp: item.timestamp,
+            open: item.open as number,
+            high: item.high as number,
+            low: item.low as number,
+            close: item.close as number,
+            volume: item.volume as number,
+          }))
+          .sort((a: KlinePoint, b: KlinePoint) => a.timestamp - b.timestamp)
+
+        const rangeJson = rangeRes.ok ? await rangeRes.json() : null
+        const forecastJson = forecastRes.ok ? await forecastRes.json() : null
+        const decisionJson = decisionRes.ok ? await decisionRes.json() : null
+        const orderbookJson = orderbookRes.ok ? await orderbookRes.json() : null
+        const last = sorted[sorted.length - 1] ?? null
+
         if (!cancelled) {
-          setData(mapped)
-          setRsiData(rsiPoints)
-          if (mapped.length > 0) {
-            setLastPrice(mapped[mapped.length - 1].price)
-          }
+          setData(sorted)
+          setRange((rangeJson?.data?.[0] || null) as RangeData | null)
+          setDecisionView((decisionJson?.data || null) as DecisionView | null)
+          setForecastPoints(buildForecastPoints(forecastJson, timeframe, last?.timestamp ?? Date.now(), last?.close ?? null))
+          setOrderbook(buildOrderbookMeta(orderbookJson))
+          setLastPrice(last?.close ?? null)
           setLastUpdate(new Date().toLocaleTimeString('pl-PL'))
         }
-      } catch (err) {
-        if (!cancelled) setError('Nie udało się pobrać danych wykresu')
+      } catch {
+        if (!cancelled) setError('Nie udało się pobrać danych wykresu z Binance/backendu')
       } finally {
         if (!cancelled) setLoading(false)
       }
     }
 
-    fetchKlines()
-    const interval = setInterval(fetchKlines, refreshMs)
+    fetchChartData()
+    const interval = window.setInterval(fetchChartData, refreshMs)
     return () => {
       cancelled = true
-      clearInterval(interval)
+      window.clearInterval(interval)
     }
-  }, [timeframe, symbol, fixedSymbol, refreshMs])
-
-  useEffect(() => {
-    const normalized = normalizeSymbol(fixedSymbol || symbol)
-    let cancelled = false
-
-    const fetchRange = async () => {
-      try {
-        const base = getApiBase()
-        const res = await fetch(`${base}/api/market/ranges?symbol=${normalized}`)
-        if (cancelled || !res.ok) return
-        const json = await res.json()
-        const r = json.data?.[0] || null
-        if (!cancelled) {
-          setRange(r)
-          if (r) {
-            const buy = r.buy_action ? `${r.buy_action} (cel: ${r.buy_target})` : 'CZEKAJ'
-            const sell = r.sell_action ? `${r.sell_action} (cel: ${r.sell_target})` : 'CZEKAJ'
-            setDecision({ buy, sell })
-          } else {
-            setDecision(null)
-          }
-        }
-      } catch (err) {
-        if (!cancelled) {
-          setRange(null)
-          setDecision(null)
-        }
-      }
-    }
-    fetchRange()
-    const interval = setInterval(fetchRange, refreshMs)
-    return () => {
-      cancelled = true
-      clearInterval(interval)
-    }
-  }, [symbol, fixedSymbol, refreshMs])
+  }, [fixedSymbol, refreshMs, symbol, timeframe])
 
   useEffect(() => {
     const fetchSymbols = async () => {
       try {
         const base = getApiBase()
-        const res = await fetch(`${base}/api/market/summary`)
-        if (!res.ok) return
-        const json = await res.json()
-        const list = (json.data || []).map((m: any) => m.symbol)
-        setSymbols(list)
-        if (!fixedSymbol && list.length > 0 && !list.includes(symbol)) {
-          setSymbol(list[0])
+        const response = await fetch(`${base}/api/market/summary`)
+        if (!response.ok) return
+        const payload = await response.json()
+        const nextSymbols = (payload.data || []).map((item: any) => item.symbol)
+        setSymbols(nextSymbols)
+        if (!fixedSymbol && nextSymbols.length > 0 && !nextSymbols.includes(symbol)) {
+          setSymbol(nextSymbols[0])
         }
-      } catch (err) {
-        // ignore
+      } catch {
+        // brak listy symboli nie blokuje wykresu
       }
     }
     fetchSymbols()
-  }, [symbol, fixedSymbol])
-
-  function normalizeSymbol(s: string) {
-    return s.includes('/') ? s.replace('/', '') : s
-  }
-
-  function toNum(value: any): number | null {
-    const n = Number(value)
-    return Number.isFinite(n) ? n : null
-  }
+  }, [fixedSymbol, symbol])
 
   const displayTitle = useMemo(() => {
     if (titleOverride) return titleOverride
     return `Wykres ${fixedSymbol || symbol}`
   }, [fixedSymbol, symbol, titleOverride])
 
-  function formatPrice(v: number | null) {
-    if (v === null) return '--'
-    if (v < 1) return v.toFixed(4)
-    if (v < 1000) return v.toFixed(2)
-    return v.toFixed(2)
-  }
-
-  const lastRsi = rsiData.length > 0
-    ? [...rsiData].reverse().find(p => p.rsi !== undefined)?.rsi ?? null
+  const headlineAction = decisionView?.recommended_action_label || decisionView?.final_signal || 'CZEKAJ'
+  const blockers = Array.isArray(decisionView?.blockers) ? decisionView.blockers : []
+  const confidencePct = decisionView?.final_confidence != null
+    ? (decisionView.final_confidence <= 1 ? decisionView.final_confidence * 100 : decisionView.final_confidence)
     : null
 
   return (
     <div className="bg-rldc-dark-card rounded-lg p-6 border border-rldc-dark-border neon-card terminal-card">
-      <div className="flex items-center justify-between mb-4">
+      <div className="flex items-start justify-between gap-4 mb-4">
         <div>
           <h2 className="text-lg font-semibold text-slate-200">{displayTitle}</h2>
-          <div className="flex items-center space-x-4 mt-1">
-            <span className="text-2xl font-bold text-rldc-green-primary">
-              {formatPrice(lastPrice)}
-            </span>
-            <span className="text-sm text-slate-400">
-              Ostatnia aktualizacja: {lastUpdate || '--'}
-            </span>
+          <div className="flex flex-wrap items-center gap-4 mt-1">
+            <span className="text-2xl font-bold text-rldc-green-primary">{formatPrice(lastPrice)}</span>
+            <span className="text-sm text-slate-400">Ostatnia aktualizacja: {lastUpdate || '--'}</span>
+            <span className="text-sm text-slate-300">Decyzja: <span className="font-semibold">{headlineAction}</span></span>
+            {confidencePct !== null && (
+              <span className="text-sm text-slate-300">Pewność: {confidencePct.toFixed(1)}%</span>
+            )}
           </div>
-          {range && (
-            <div className="text-sm text-slate-200 mt-2">
-              Co robić teraz: <span className="font-semibold">{decision?.buy?.includes('KUP') ? 'KUP' : decision?.sell?.includes('SPRZEDAJ') ? 'SPRZEDAJ' : 'CZEKAJ'}</span>
-            </div>
+          <div className="text-sm text-slate-400 mt-2 max-w-4xl">
+            {decisionView?.plain_explanation || decisionView?.final_signal_reason || range?.comment || 'Wykres pokazuje kanoniczne świece OHLC, wolumen, forecast i zakresy BUY/SELL z backendu.'}
+          </div>
+          {blockers.length > 0 && (
+            <div className="text-xs text-amber-300 mt-2">Blokery: {blockers.join(', ')}</div>
           )}
         </div>
-        
-        <div className="flex space-x-2 items-center">
+
+        <div className="flex space-x-2 items-center flex-wrap justify-end">
           {allowSelect && (
             <select
               title="Wybór symbolu"
               value={symbol}
-              onChange={(e) => {
-                const next = e.target.value
+              onChange={(event) => {
+                const next = event.target.value
                 setSymbol(next)
-                if (onSymbolChange) {
-                  onSymbolChange(normalizeSymbol(next))
-                }
+                onSymbolChange?.(normalizeSymbol(next))
               }}
               className="bg-rldc-dark-bg border border-rldc-dark-border text-slate-200 text-xs rounded px-2 py-1"
             >
-              {symbols.map((s) => (
-                <option key={s} value={s}>{s}</option>
+              {symbols.map((item) => (
+                <option key={item} value={item}>{item}</option>
               ))}
             </select>
           )}
@@ -302,126 +325,27 @@ export default function TradingView({
         </div>
       </div>
 
-      <div className="rldc-chart bg-[#0b121a] border border-rldc-dark-border/60">
-        <div className="h-72">
-          {loading && <div className="text-sm text-slate-400 px-4 py-2">Ładowanie wykresu...</div>}
-          {error && <div className="text-sm text-rldc-red-primary px-4 py-2">{error}</div>}
-          {mounted && (
-            <ResponsiveContainer width="100%" height="100%" minWidth={0} minHeight={0}>
-              <ComposedChart data={data}>
-                <defs>
-                  <linearGradient id="colorPrice" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="5%" stopColor="#16f2a3" stopOpacity={0.35}/>
-                    <stop offset="95%" stopColor="#16f2a3" stopOpacity={0}/>
-                  </linearGradient>
-                </defs>
-                {range && (
-                  <>
-                    {toNum(range.buy_target) !== null && (
-                      <ReferenceLine
-                        y={toNum(range.buy_target) as number}
-                        stroke="#16f2a3"
-                        strokeDasharray="6 6"
-                        label={{ value: `BUY target ${range.buy_target}`, position: 'insideTopRight', fill: '#7cfde0', fontSize: 11 }}
-                      />
-                    )}
-                    {toNum(range.sell_target) !== null && (
-                      <ReferenceLine
-                        y={toNum(range.sell_target) as number}
-                        stroke="#ef4444"
-                        strokeDasharray="6 6"
-                        label={{ value: `SELL target ${range.sell_target}`, position: 'insideTopLeft', fill: '#fca5a5', fontSize: 11 }}
-                      />
-                    )}
-                    <ReferenceArea
-                      y1={range.buy_low}
-                      y2={range.buy_high}
-                      strokeOpacity={0}
-                      fill="#16f2a3"
-                      fillOpacity={0.18}
-                    />
-                    <ReferenceArea
-                      y1={range.sell_low}
-                      y2={range.sell_high}
-                      strokeOpacity={0}
-                      fill="#ef4444"
-                      fillOpacity={0.16}
-                    />
-                  </>
-                )}
-                <CartesianGrid strokeDasharray="3 3" stroke="#1e2d3d" />
-                <XAxis
-                  dataKey="time"
-                  stroke="#64748b"
-                  style={{ fontSize: '12px' }}
-                />
-                <YAxis
-                  stroke="#64748b"
-                  style={{ fontSize: '12px' }}
-                  domain={['dataMin - 10', 'dataMax + 10']}
-                />
-                <Tooltip
-                  contentStyle={{
-                    backgroundColor: '#111c26',
-                    border: '1px solid #1e2d3d',
-                    borderRadius: '8px',
-                    color: '#f1f5f9'
-                  }}
-                  formatter={(val: any, name: string | number | undefined) => [
-                    val != null ? String(val) : '--',
-                    name === 'price' ? 'Cena' : name === 'ema20' ? 'EMA 20' : name === 'ema50' ? 'EMA 50' : (name ?? '')
-                  ]}
-                />
-                <Area
-                  type="monotone"
-                  dataKey="price"
-                  stroke="#16f2a3"
-                  strokeWidth={2}
-                  fill="url(#colorPrice)"
-                  name="price"
-                />
-                <Line type="monotone" dataKey="ema20" stroke="#fbbf24" dot={false} strokeWidth={1} connectNulls name="ema20" />
-                <Line type="monotone" dataKey="ema50" stroke="#7c3aed" dot={false} strokeWidth={1} connectNulls name="ema50" />
-              </ComposedChart>
-            </ResponsiveContainer>
-          )}
-        </div>
-
-        {/* Mini RSI panel */}
-        <div className="h-16 border-t border-rldc-dark-border/40">
-          <div className="flex items-center justify-between px-2 pt-1">
-            <span className="text-[9px] text-slate-500 uppercase tracking-widest">RSI (14)</span>
-            {lastRsi != null && (
-              <span className={`text-[10px] font-mono font-bold ${
-                lastRsi < 30 ? 'text-rldc-green-primary' : lastRsi > 70 ? 'text-rldc-red-primary' : 'text-slate-300'
-              }`}>
-                {Math.round(lastRsi)}
-                {lastRsi < 30 ? ' (wyprzedanie)' : lastRsi > 70 ? ' (wykupienie)' : ''}
-              </span>
-            )}
-          </div>
-          {mounted && rsiData.length > 0 && (
-            <ResponsiveContainer width="100%" height={40} minWidth={0} minHeight={0}>
-              <LineChart data={rsiData} margin={{ top: 0, right: 8, bottom: 0, left: 0 }}>
-                <XAxis dataKey="time" hide />
-                <YAxis domain={[0, 100]} tick={{ fontSize: 8, fill: '#64748b' }} width={30} tickCount={3} ticks={[30, 50, 70]} />
-                <ReferenceLine y={70} stroke="#ef4444" strokeDasharray="2 2" strokeWidth={0.8} />
-                <ReferenceLine y={30} stroke="#22c55e" strokeDasharray="2 2" strokeWidth={0.8} />
-                <Line type="monotone" dataKey="rsi" stroke="#a78bfa" dot={false} strokeWidth={1.2} connectNulls name="rsi" />
-              </LineChart>
-            </ResponsiveContainer>
-          )}
-        </div>
+      <div className="rldc-chart bg-[#0b121a] border border-rldc-dark-border/60 rounded-lg p-3">
+        {loading && <div className="text-sm text-slate-400 px-2 py-2">Ładowanie świec, wolumenu i forecastu...</div>}
+        {error && <div className="text-sm text-rldc-red-primary px-2 py-2">{error}</div>}
+        {!loading && !error && (
+          <BinanceStyleChart
+            candles={data}
+            forecastPoints={forecastPoints}
+            range={range}
+            indicators={decisionView?.indicators as Record<string, number | string | null | undefined> | null}
+            horizons={decisionView?.horizons || null}
+            orderbook={orderbook}
+            chartHeight={320}
+            rsiHeight={74}
+            emptyMessage={`Brak danych świecowych dla ${fixedSymbol || symbol}`}
+          />
+        )}
       </div>
 
-      {/* Legenda wskaźników */}
-      <div className="flex items-center gap-3 mt-2 flex-wrap">
-        <span className="flex items-center gap-1 text-[9px] text-slate-500"><span className="inline-block w-3 h-0.5 bg-rldc-teal-primary"></span> Cena</span>
-        <span className="flex items-center gap-1 text-[9px] text-slate-500"><span className="inline-block w-3 h-0.5 bg-yellow-400"></span> EMA 20</span>
-        <span className="flex items-center gap-1 text-[9px] text-slate-500"><span className="inline-block w-3 h-0.5 bg-purple-600"></span> EMA 50</span>
-        <span className="flex items-center gap-1 text-[9px] text-slate-500"><span className="inline-block w-3 h-0.5 bg-purple-300"></span> RSI(14)</span>
+      <div className="mt-3 text-xs text-slate-500">
+        Źródło prawdy: Binance OHLC/orderbook + kanoniczny decision-view + backend forecast/ranges. Dane jakości: {decisionView?.data_quality || '--'}.
       </div>
-
     </div>
   )
 }
