@@ -1,15 +1,118 @@
 # PROJECT_AUDIT_MASTER.md — RLdC Trading BOT
 
-## AKTUALIZACJA: SESJA T-150 DO T-152 INFRASTRUKTURA DYNAMICZNEGO GRIDU (PHASE 1 — 18-05-2026)
+## AKTUALIZACJA: SESJA T-158.1 LEGACY EXIT GUARD (19-05-2026)
+
+### NOWY RAPORT ANALITYCZNY GRID BOTA
+- Dodano dokument: [docs/GRID_BOT_ANALYTICAL_REPORT.md](docs/GRID_BOT_ANALYTICAL_REPORT.md)
+- Zakres: analiza historii Spot Binance z 2026-05-18 do 2026-05-19
+- Wniosek główny: koszt transakcyjny niemal całkowicie zjada zysk brutto; strategia wymaga szerszego TP/step i filtrów reżimu
+- Backend exposes read-only endpoint: `/api/account/grid-report` with report payload + quicktunnel runtime snapshot
+
+### STATUS T-158.1 — COMPLETE ✅
+- **Implementation**: `is_dynamic_grid_position()` helper extracted to module level
+- **Guards**: All three legacy exit layers protected (SL, trailing, TP)
+- **Tests**: 19/19 PASSED (`test_trading_legacy_exit_guard.py`)
+- **Integration**: No regressions with T-152/T-154/T-157 (all 53 dynamic_grid tests PASSED)
+- **Quicktunnel**: network-change auto-restart added, new URL regenerated after service restart
+
+### AKTUALIZACJA: SESJA T-157 DYNAMIC GRID SAFETY GATES (18-05-2026)
 
 ### STATUS
-- Potwierdzony **CRITICAL BUG w risk.py dla live mode**: `initial_balance` był hardcoded na 0.0, co unieważniało exposure ratio gates dla multi-pair trading (CATASTROPHIC).
-- Potwierdzony paraliż live z 30-min monitoringu: **0 BUY fills** mimo wszystkich otworów progów w T-147 do T-149 → root cause: architektura pipeline'u opiera się na portfolio-based watchlist selection, która nie skaluje się dla multi-pair.
-- **Pivot na architecture**: zamiast dalszych threshold tweaków → pełna dynamiczna grid engine per grid.md specification.
+- **5 testów bezpieczeństwa (T-157) COMPLETE**: 12/12 passed ✅
+- **Kontrakt runtime dla dynamic_grid**: Zamknięty (storage, flow, blokady legacy)
+- **DECYZJA**: Nie wracamy do demo/shadow — kontynuujemy **live validation** z twardym monitoringiem
 
-### ZMIANY W KODZIE — FASE 1 INFRASTRUKTURA
+### TESTY BEZPIECZEŃSTWA (12/12 PASSED)
+1. ✅ `TestDynamicGridDisabledNoBuy::test_grid_plan_not_created_when_disabled` — Grid NIE tworzy plan gdy disabled
+2. ✅ `TestDynamicGridDisabledNoBuy::test_entry_candidate_not_created_when_disabled` — BUY NIE tworzony gdy disabled
+3. ✅ `TestDynamicGridLegacySystemNoBuy::test_legacy_system_blocks_grid_entry` — Grid NIE wchodzi przy legacy
+4. ✅ `TestDynamicGridLegacySystemNoBuy::test_entry_creation_requires_dynamic_grid_system` — Blokada legacy path na dynamic_grid
+5. ✅ `TestDynamicGridSinglePlanPerSymbol::test_grid_plans_deduplication` — Jeden plan per symbol
+6. ✅ `TestDynamicGridSinglePlanPerSymbol::test_multiple_symbols_have_separate_plans` — Każdy symbol ma własny plan
+7. ✅ `TestDynamicGridPlansCleanup::test_grid_plans_cleanup_on_symbol_removal` — Cleanup gdy symbol opuszcza universe
+8. ✅ `TestDynamicGridPlansCleanup::test_grid_plans_update_on_universe_change` — Update przy zmianie universe
+9. ✅ `TestLegacyPathBlockedOnDynamicGrid::test_legacy_best_opportunity_blocked` — Best-opportunity blokada na grid
+10. ✅ `TestLegacyPathBlockedOnDynamicGrid::test_pending_order_gate_checks_trading_system` — PendingOrder gate check
+11. ✅ `TestDynamicGridSafety::test_only_one_active_system_at_time` — Tylko jeden system aktywny
+12. ✅ `TestDynamicGridSafety::test_grid_safety_gates_summary` — Podsumowanie wszystkich gate'ów
 
-#### T-150: Fix risk.py + Market data helpers
+### SAFE GATES ZAVERIFIED
+- `dynamic_grid_enabled=False` → grid skipuje entry creation ✓
+- `trading_system=legacy` → grid entry NIE jest tworzone ✓
+- `trading_system=dynamic_grid` → legacy signal path jest blokowany ✓
+- `active_grid_plans` cleanup na symbol removal ✓
+- `active_grid_plans` deduplikacja per symbol ✓
+
+### RUNTIME DLA T-158 LIVE VALIDATION
+```
+trading_mode=live
+trading_system=dynamic_grid
+dynamic_grid_enabled=True
+dynamic_grid_reduce_only=False   (entries testowane live)
+dynamic_grid_shadow_mode=False   (realny trading)
+max_open_positions=5            (low)
+max_symbol_exposure_ratio=10%   (low)
+max_total_exposure_ratio=50%    (low)
+kill_switch_enabled=True
+```
+
+### TWARDE WARUNKI BEZPIECZEŃSTWA LIVE
+Live test można kontynuować TYLKO jeśli:
+- [ ] active_grid_plans nie jest pusty
+- [ ] plany obejmują wiele symboli, nie tylko BTC
+- [ ] legacy BUY entries są zablokowane
+- [ ] każdy PendingOrder ma strategy_name=dynamic_grid albo równoważny identyfikator
+- [ ] brak błędów typu invalid keyword argument for PendingOrder
+- [ ] brak ImportError dla get_grid_context
+- [ ] brak konfliktu active_grid_plans vs grid_plan#{symbol}
+- [ ] brak live BUY poza dynamic_grid
+- [ ] risk gate blokuje wejścia przy przekroczeniu ekspozycji
+- [ ] kill switch działa
+
+### MONITORING LIVE (GODZINA 1)
+Przez pierwsze godziny monitorować:
+- active_grid_plans count
+- liczba symboli w universe
+- liczba PendingOrder BUY/SELL per symbol
+- duplikaty orderów
+- total exposure
+- symbol exposure
+- unrealized PnL
+- realized PnL
+- grid PnL vs zmienny PnL
+- skip reasons
+- blocked_by_risk reasons
+- API errors Binance
+- timeouts collectora
+
+**KRYTYCZNE**: `grid PnL > 0, ale zmienny PnL << 0` → to był problem wcześniej. Dynamic grid ma to ograniczać.
+
+### ROLLBACK PLAN (INSTANT)
+Jeśli coś pójdzie nie tak:
+```
+trading_system=legacy
+dynamic_grid_enabled=False
+```
+
+Albo bezpieczniej:
+```
+dynamic_grid_enabled=False
+```
+
+Jeśli system wspiera reduce-only:
+```
+dynamic_grid_reduce_only=True
+```
+Wtedy bot przestaje otwierać nowe BUY, zarządza tylko wyjściami.
+
+### NASTĘPNY KROK: PHASE 2
+- T-155: Grid orchestration (entry/exit na buy_levels/sell_levels)
+- T-156: Smoke test live grid na testnet (N=3 pairs, ~100 EUR)
+- Po Phase 2: Pełna multi-pair grid production
+
+## AKTUALIZACJA: SESJA T-157 DYNAMIC GRID SAFETY GATES (18-05-2026)
+
+## AKTUALIZACJA: SESJA T-152 INFRASTRUKTURA DYNAMICZNEGO GRIDU (PHASE 1 — 18-05-2026)
 1. **backend/risk.py** (lines 695-707):
    - **FIXED**: `initial_balance` dla live mode teraz czyta z `risk_snapshot.live_balance` lub fallbackuje do `LIVE_INITIAL_BALANCE` env var
    - **Before**: `initial_balance = 0.0` dla live → `total_exposure_ratio = 0/0 = 0`, `symbol_exposure_ratio = 0/0 = 0` (gates ineffective)

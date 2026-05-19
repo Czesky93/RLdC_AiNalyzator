@@ -3,10 +3,12 @@ Account API Router - endpoints dla danych konta (demo i live)
 """
 
 import hashlib
+import json
 import os
 import re
 import socket
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any, Dict, Optional
 
 import requests
@@ -138,6 +140,52 @@ from backend.trading_effectiveness import (
 from backend.tuning_insights import generate_tuning_candidates, tuning_summary
 
 router = APIRouter()
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+_GRID_REPORT_PATH = _REPO_ROOT / "docs" / "GRID_BOT_ANALYTICAL_REPORT.md"
+_QUICKTUNNEL_RUNTIME_PATH = Path("/tmp/rldc_tunnel_runtime.json")
+
+
+def _load_grid_report_payload() -> Dict[str, Any]:
+    if not _GRID_REPORT_PATH.exists():
+        return {
+            "exists": False,
+            "path": str(_GRID_REPORT_PATH),
+            "content": None,
+            "updated_at": None,
+        }
+
+    content = _GRID_REPORT_PATH.read_text(encoding="utf-8")
+    preview_lines = content.splitlines()[:24]
+    return {
+        "exists": True,
+        "path": str(_GRID_REPORT_PATH),
+        "size_bytes": _GRID_REPORT_PATH.stat().st_size,
+        "updated_at": datetime.fromtimestamp(
+            _GRID_REPORT_PATH.stat().st_mtime, tz=timezone.utc
+        ).isoformat(),
+        "preview": "\n".join(preview_lines),
+        "content": content,
+    }
+
+
+def _load_quicktunnel_runtime_payload() -> Dict[str, Any]:
+    if not _QUICKTUNNEL_RUNTIME_PATH.exists():
+        return {
+            "exists": False,
+            "path": str(_QUICKTUNNEL_RUNTIME_PATH),
+            "data": {},
+        }
+
+    try:
+        data = json.loads(_QUICKTUNNEL_RUNTIME_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        data = {}
+
+    return {
+        "exists": True,
+        "path": str(_QUICKTUNNEL_RUNTIME_PATH),
+        "data": data,
+    }
 
 _openai_status_cache: dict = {"ts": None, "data": None}
 _demo_state_cache: dict = {"ts": None, "data": None}
@@ -1330,6 +1378,24 @@ def get_tunnel_status():
         return {"success": True, "data": status}
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Tunnel status error: {str(exc)}")
+
+
+@router.get("/grid-report")
+def get_grid_report():
+    """
+    Zwraca analityczny raport grid bota oraz aktualny stan quicktunnel.
+    Endpoint read-only, bez efektów ubocznych.
+    """
+    try:
+        return {
+            "success": True,
+            "data": {
+                "report": _load_grid_report_payload(),
+                "quicktunnel_runtime": _load_quicktunnel_runtime_payload(),
+            },
+        }
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Grid report error: {str(exc)}")
 
 
 @router.post("/tunnel-heal")

@@ -1,5 +1,58 @@
 # CHANGELOG_LIVE
 
+## 2026-05-19 — T-159: Quicktunnel auto-restart on network change (COMPLETE)
+
+### What changed?
+- `scripts/run_quicktunnel.sh` now fingerprints the network using default route, route-to-internet, global IPv4 list, and public IP
+- When the fingerprint changes, the script restarts both cloudflared processes and regenerates fresh frontend/overlay `trycloudflare.com` links
+- The new URLs are written back to `/tmp/rldc_tunnel_runtime.json` and `/home/rldc/.rldc_runtime/public_urls.txt`
+
+### Validation
+- `bash -n scripts/run_quicktunnel.sh` ✅
+- `systemctl --user restart rldc-quicktunnel.service` ✅
+- Runtime file and public URL cache show fresh links ✅
+
+## 2026-05-19 — T-158.1: Legacy Exit Guard for Dynamic Grid Positions (COMPLETE)
+
+### What was the problem?
+- Legacy exit engine (`_check_exits()`) had guards for dynamic_grid positions, but they were defined as nested local functions
+- Nested helper `is_dynamic_grid_position()` was not importable, making it untestable in test suite
+- Risk: Legacy exit layer could accidentally close positions managed by dynamic grid
+
+### What was implemented?
+1. **Extract helper to module level**: `is_dynamic_grid_position(position)` now at `backend/collector.py` line ~118
+   - Checks `exit_plan_json.strategy == "dynamic_grid"` or `entry_reason_code contains "dynamic_grid"`
+   - Gracefully handles `None` input and JSON parse errors
+   
+2. **Guards in `_check_exits()` method**:
+   - Stop Loss (hard exit): `if trading_system==dynamic_grid and is_dynamic_grid_position(pos): continue`
+   - Trailing Stop: Same guard, separate layer
+   - Take Profit: Same guard, separate layer
+   - All three log: `LEGACY_EXIT_GUARD: <layer> skipped for dynamic_grid position ...`
+   
+3. **Test coverage**: 19 comprehensive tests
+   - `TestLegacyExitGuard`: Helper logic, gate logic for all 3 layers
+   - `TestEmergencyKillSwitch`: Verify emergency exits NOT gated (can still kill grid positions)
+   - `TestGridExitLogic`: Verify grid can close its own positions
+   - `TestIntegration`: Mixed position scenarios
+   - `TestGuardCodePresence`: Verify guards visible in source
+   - Result: **19/19 PASSED** ✅
+
+### Impact
+- **Safety**: Dynamic_grid positions are no longer closed by legacy exit engine when `trading_system=dynamic_grid`
+- **No regressions**: All 53 dynamic_grid ecosystem tests PASSED (T-152 + T-154 + T-157 + T-158.1)
+- **Blocker removed**: T-158 can now proceed with live validation without risk of legacy engine interference
+
+### Files changed
+- `backend/collector.py`: Extract helper, fix guard indentation
+- `tests/test_trading_legacy_exit_guard.py`: 19 new tests
+- `TASK_QUEUE.md`: T-158.1 added as DONE
+- `CURRENT_STATE.md`: Updated checklist
+- `PROJECT_AUDIT_MASTER.md`: Status update
+- `CHANGELOG_LIVE.md`: This entry
+
+---
+
 ## 2026-05-18 — T-150 do T-152: Infrastruktura dynamicznego gridu (Phase 1 — grid.md implementation)
 
 ### Root cause T-150: Live trading paralysis despite T-149 bypass

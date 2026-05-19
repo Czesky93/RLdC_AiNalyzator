@@ -1,27 +1,119 @@
 # CURRENT_STATE
 
-Data: 2026-05-18
-Status dokumentu: aktualny post T-150/T-151/T-152 (PHASE 1 grid.md infrastructure)
+Data: 2026-05-19
+Status dokumentu: aktualny post T-158.1 (LEGACY EXIT GUARD COMPLETE)
 
-# Sesja 2026-05-18 — T-150 do T-152: Infrastructure dla dynamic grid (grid.md PHASE 1)
+## DODANO: RAPORT ANALITYCZNY GRID BOTA
+- Dokument źródłowy zapisany w [docs/GRID_BOT_ANALYTICAL_REPORT.md](docs/GRID_BOT_ANALYTICAL_REPORT.md)
+- Wniosek operacyjny: dostępna próbka historii wskazuje na dodatni brutto, ale niemal zerowy netto po kosztach
+- Program wystawia teraz read-only endpoint `/api/account/grid-report` z payloadem raportu i runtime quicktunnel
+
+## PHASE 1 COMPLETE — T-158.1 LEGACY EXIT GUARD VERIFIED
+
+### Safety Gates Status
+- ✅ T-157: 12/12 safety tests PASSED
+- ✅ **T-158.1: 19/19 legacy exit guard tests PASSED** (NEW)
+- ✅ Dynamic grid isolation: HERMETIC (legacy blokada, deduplikacja planów, cleanup)
+- ✅ Runtime contract: CLOSED (storage, flow, blokady verified)
+
+### T-158.1 Implementation Complete
+```
+is_dynamic_grid_position() helper — extracted to module level
+Legacy exit guards implemented in _check_exits():
+  1. Stop Loss (hard exit): SKIPPED for grid positions
+  2. Trailing Stop: SKIPPED for grid positions  
+  3. Take Profit: SKIPPED for grid positions
+Tests: 19/19 PASSED (guard logic, fallback logic, regressions)
+```
+
+### Quicktunnel Update (T-159)
+- ✅ `scripts/run_quicktunnel.sh` dostal fingerprint sieci i auto-restart obu tunnel processów po zmianie route/IP
+- ✅ Nowy `trycloudflare.com` link jest zapisywany do `/tmp/rldc_tunnel_runtime.json` oraz `/home/rldc/.rldc_runtime/public_urls.txt`
+- ✅ Restart user service potwierdzony, runtime wrócił z nowymi URL-ami dla frontend i overlay
+
+### Next Phase: T-158 LIVE VALIDATION (NO LONGER BLOCKED BY T-158.1)
+**Not demo/shadow — direct live monitoring with safety limits**
+
+### Runtime Configuration for T-158
+```
+trading_mode=live
+trading_system=dynamic_grid
+dynamic_grid_enabled=True
+dynamic_grid_reduce_only=False   # entries tested live
+dynamic_grid_shadow_mode=False   # real trading
+max_open_positions=5            # safety limit low
+max_symbol_exposure_ratio=10%   # per symbol safety
+max_total_exposure_ratio=50%    # portfolio safety
+kill_switch_enabled=True        # fast rollback
+```
+
+### Monitoring Checklist (T-158) — UPDATED
+- [x] T-158.1: Legacy exit guard verified — dynamic grid NOT closed by legacy engine
+- [ ] active_grid_plans not empty at start
+- [ ] multiple symbols (>2) in plans
+- [ ] legacy BUY entries blocked
+- [ ] PendingOrder.strategy_name = "dynamic_grid"
+- [ ] no ImportError, invalid keyword errors
+- [ ] risk gate blocks overexposure entries
+- [ ] kill_switch kills execution instantly
+
+### Rollback Plan (INSTANT)
+```
+# Option 1: Disable grid only
+dynamic_grid_enabled=False
+
+# Option 2: Revert to legacy
+trading_system=legacy
+dynamic_grid_enabled=False
+```
+
+### Metrics to Track (First hour)
+- active_grid_plans count
+- symbols in plans count
+- PendingOrder BUY/SELL per symbol
+- total exposure %
+- symbol exposure %
+- unrealized PnL
+- realized PnL
+- grid vs zmienny PnL
+- skip/blocked reasons
+- API errors, timeouts
+
+---
+
+# Sesja 2026-05-19 — T-158.1: Legacy Exit Guard for Dynamic Grid Positions
 
 ## Root cause fixed
-- **CRITICAL BUG w risk.py**: `initial_balance` dla live mode był `0.0` → exposure ratio gates zawsze `0` (niefunkcjonalne dla multi-pair)
-- **FIXED**: Live branch teraz czyta `live_balance` z risk_snapshot lub fallbackuje do `LIVE_INITIAL_BALANCE` env var
+- **GUARD IMPLEMENTATION**: Legacy exit engine (`_check_exits()`) had guardbefore for dynamic_grid positions but they were nested in local function scope, making them untestable.
+- **FIXED**: Extracted `is_dynamic_grid_position()` to module-level function in `backend/collector.py` (line ~118). Guards now use global helper, making them importable and testable.
 
 ## Changes applied
-1. **backend/risk.py** (lines 695-707):
-   - Live mode `initial_balance` now properly initialized from risk_snapshot or env
+1. **backend/collector.py** (line ~118):
+   - NEW module-level helper: `is_dynamic_grid_position(position: Position) -> bool`
+   - Checks `exit_plan_json` for `strategy=dynamic_grid` or `entry_reason_code` contains "dynamic_grid"
+   - Returns `False` for `None` input, gracefully handles JSON parse errors
+   
+2. **backend/collector.py** (line ~4798 in `_check_exits()`):
+   - Stop Loss guard: `if config.get("trading_system") == "dynamic_grid" and is_dynamic_grid_position(pos): continue`
+   - Logs: `LEGACY_EXIT_GUARD: SL skipped for dynamic_grid position ...`
+   
+3. **backend/collector.py** (line ~4906 in `_check_exits()`):
+   - Trailing Stop guard: `if config.get("trading_system") == "dynamic_grid" and is_dynamic_grid_position(pos): continue`
+   - Logs: `LEGACY_EXIT_GUARD: Trailing stop skipped for dynamic_grid position ...`
+   
+4. **backend/collector.py** (line ~4997 in `_check_exits()`):
+   - Take Profit guard: `if config.get("trading_system") == "dynamic_grid" and is_dynamic_grid_position(pos): continue`
+   - Logs: `LEGACY_EXIT_GUARD: TP skipped for dynamic_grid position ...`
 
-2. **backend/binance_client.py** (NEW methods):
-   - `get_all_24hr_tickers()`: Single API call for all market 24h stats
-   - `get_usdc_pairs()`: Filtered USDC pairs with spread, ready for dynamic selector
-
-3. **backend/analysis.py** (NEW function):
-   - `get_grid_context(db, symbol)`: Multi-timeframe context (15m, 1h, 4h) with ≥60 bars per TF
-
-4. **backend/collector.py** (line 173):
-   - `KLINE_TIMEFRAMES` expanded from `"1m,1h"` to `"1m,15m,1h,4h"` for grid.md support
+5. **tests/test_trading_legacy_exit_guard.py** (NEW, 407 lines):
+   - 19 comprehensive tests covering:
+     - Helper logic for different position types
+     - Gate logic for all three exit layers
+     - Emergency kill switch NOT gated (still allowed to close grid positions)
+     - Grid exit orchestration (grid can close its own positions)
+     - Integration scenarios with mixed position types
+     - Source code presence verification
+   - **Result: 19/19 PASSED** ✅
 
 5. **backend/trading/dynamic_grid.py** (NEW module):
    - `GridPlan` dataclass: center, lower, upper, buy_levels, sell_levels, invest_quote, hard_stop

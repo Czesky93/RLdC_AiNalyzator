@@ -17,6 +17,13 @@
       --yellow: #ffd966;
       --orange: #ff9d22;
       --blue: #50a7ff;
+      --news-height: 50px;
+      --top-height: 52px;
+      --portfolio-height: 42px;
+      --warning-height: 54px;
+      --ticker-height: 86px;
+      --bottom-height: 132px;
+      --footer-height: 32px;
     }
 
     * { box-sizing: border-box; }
@@ -33,6 +40,7 @@
     .app {
       width: 100vw;
       height: 100vh;
+      padding-bottom: var(--news-height);
       background:
         radial-gradient(circle at 10% 0%, rgba(0, 199, 129, .12), transparent 25%),
         radial-gradient(circle at 85% 25%, rgba(255, 157, 34, .10), transparent 25%),
@@ -42,13 +50,15 @@
     .main {
       flex: 1;
       min-width: 0;
+      height: 100%;
+      min-height: 0;
       display: flex;
       flex-direction: column;
       position: relative;
     }
 
     .top {
-      height: 54px;
+      height: var(--top-height);
       display: flex;
       align-items: center;
       justify-content: space-between;
@@ -101,6 +111,34 @@
       white-space: nowrap;
     }
 
+    .langSwitch {
+      display: inline-flex;
+      align-items: center;
+      gap: 3px;
+      padding: 2px;
+      border: 1px solid var(--border);
+      border-radius: 7px;
+      background: rgba(0, 0, 0, .20);
+    }
+
+    .langSwitch button {
+      min-width: 30px;
+      border: 0;
+      border-radius: 5px;
+      padding: 3px 6px;
+      background: transparent;
+      color: var(--muted);
+      cursor: pointer;
+      font-size: 11px;
+      font-weight: 900;
+      line-height: 1.2;
+    }
+
+    .langSwitch button.on {
+      background: var(--green);
+      color: #00150e;
+    }
+
     .badge {
       padding: 4px 8px;
       border-radius: 5px;
@@ -120,8 +158,74 @@
       box-shadow: 0 0 18px rgba(255, 51, 75, .5);
     }
 
+    .portfolioStrip {
+      height: var(--portfolio-height);
+      display: flex;
+      align-items: stretch;
+      border-bottom: 1px solid rgba(80, 167, 255, .24);
+      background: linear-gradient(90deg, rgba(7, 11, 18, .98), rgba(18, 26, 39, .98));
+      overflow: hidden;
+    }
+
+    .portfolioLabel {
+      width: 118px;
+      flex: 0 0 118px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: linear-gradient(90deg, #123c69, #0f2338);
+      color: #d9ebff;
+      font-size: 12px;
+      font-weight: 1000;
+      letter-spacing: .08em;
+      text-transform: uppercase;
+      border-right: 1px solid rgba(255, 255, 255, .12);
+    }
+
+    .portfolioCells {
+      flex: 1;
+      min-width: 0;
+      display: grid;
+      grid-template-columns: repeat(5, minmax(0, 1fr));
+    }
+
+    .portfolioCell {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      padding: 0 12px;
+      border-right: 1px solid rgba(255, 255, 255, .07);
+      min-width: 0;
+    }
+
+    .portfolioCell span {
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 800;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .portfolioCell b {
+      color: var(--txt);
+      font-size: clamp(12px, .82vw, 16px);
+      font-weight: 1000;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      min-width: 0;
+    }
+
+    .portfolioCell b span {
+      display: block;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
     .warning {
-      min-height: 66px;
+      min-height: var(--warning-height);
       padding: 8px 16px;
       display: flex;
       align-items: center;
@@ -151,7 +255,7 @@
     }
 
     .ticker {
-      height: 103px;
+      height: var(--ticker-height);
       display: flex;
       overflow: hidden;
       border-bottom: 1px solid var(--border);
@@ -236,8 +340,8 @@
       flex: 1;
       min-height: 0;
       display: flex;
-      gap: 14px;
-      padding: 14px 18px 12px;
+      gap: clamp(8px, .8vw, 14px);
+      padding: clamp(8px, .8vw, 12px) 18px 10px;
     }
 
     .chartCard {
@@ -249,6 +353,7 @@
       padding: 11px;
       display: flex;
       flex-direction: column;
+      min-height: 0;
     }
 
     .chartHead {
@@ -293,7 +398,7 @@
 
     .chartGrid {
       flex: 1;
-      min-height: 360px;
+      min-height: 0;
       display: grid;
       grid-template-columns: repeat(3, minmax(0, 1fr));
       grid-template-rows: 1fr;
@@ -307,7 +412,7 @@
       background: #161c26;
       display: flex;
       flex-direction: column;
-      min-height: 320px;
+      min-height: 0;
       overflow: hidden;
       transition: border-color .2s ease, box-shadow .2s ease;
       cursor: default;
@@ -372,13 +477,61 @@
     .miniCanvasWrap {
       position: relative;
       flex: 1;
-      min-height: 270px;
+      min-height: 0;
+      overflow: hidden;
     }
 
     .miniCanvasWrap canvas {
       width: 100%;
       height: 100%;
       display: block;
+    }
+
+    .gridTableOverlay {
+      position: absolute;
+      right: 8px;
+      top: 8px;
+      width: min(210px, calc(100% - 16px));
+      border: 1px solid rgba(80, 167, 255, .34);
+      border-radius: 7px;
+      background: rgba(6, 10, 17, .86);
+      box-shadow: 0 10px 24px rgba(0, 0, 0, .35);
+      overflow: hidden;
+      z-index: 2;
+      backdrop-filter: blur(4px);
+    }
+
+    .gridTableTitle {
+      padding: 5px 7px;
+      background: rgba(80, 167, 255, .14);
+      color: #d9ebff;
+      font-size: 10px;
+      font-weight: 1000;
+      letter-spacing: .04em;
+      text-transform: uppercase;
+    }
+
+    .gridTableRow {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 8px;
+      padding: 4px 7px;
+      border-top: 1px solid rgba(255, 255, 255, .06);
+      font-size: 10px;
+      line-height: 1.2;
+    }
+
+    .gridTableRow span {
+      color: var(--muted);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .gridTableRow b {
+      color: var(--txt);
+      font-weight: 900;
+      white-space: nowrap;
     }
 
     .miniForecast {
@@ -483,7 +636,7 @@
     .pill.sell { background: var(--red); color: #fff; }
 
     .bottom {
-      height: 166px;
+      height: var(--bottom-height);
       display: grid;
       grid-template-columns: 1.15fr 1fr 1fr 1.15fr;
       gap: 14px;
@@ -551,7 +704,7 @@
     }
 
     .footer {
-      height: 36px;
+      height: var(--footer-height);
       display: flex;
       align-items: center;
       justify-content: center;
@@ -564,11 +717,122 @@
       text-align: center;
     }
 
+    .newsTicker {
+      position: fixed;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      z-index: 45;
+      height: var(--news-height);
+      display: flex;
+      align-items: stretch;
+      background: #070b12;
+      border-top: 1px solid rgba(80, 167, 255, .36);
+      color: #f3f7ff;
+      overflow: hidden;
+      box-shadow: 0 -14px 30px rgba(0, 0, 0, .42);
+    }
+
+    .newsLabel {
+      width: 124px;
+      flex: 0 0 124px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: linear-gradient(90deg, #d71920, #8c1118);
+      color: #fff;
+      font-size: 13px;
+      font-weight: 1000;
+      letter-spacing: .08em;
+      text-transform: uppercase;
+      box-shadow: 10px 0 24px rgba(0, 0, 0, .35);
+      z-index: 2;
+    }
+
+    .newsViewport {
+      flex: 1;
+      min-width: 0;
+      position: relative;
+      overflow: hidden;
+    }
+
+    .newsViewport::before,
+    .newsViewport::after {
+      content: "";
+      position: absolute;
+      top: 0;
+      bottom: 0;
+      width: 44px;
+      z-index: 1;
+      pointer-events: none;
+    }
+
+    .newsViewport::before {
+      left: 0;
+      background: linear-gradient(90deg, #070b12, transparent);
+    }
+
+    .newsViewport::after {
+      right: 0;
+      background: linear-gradient(270deg, #070b12, transparent);
+    }
+
+    .newsTrack {
+      position: absolute;
+      left: 100%;
+      top: 0;
+      display: inline-flex;
+      align-items: center;
+      gap: 36px;
+      height: 100%;
+      white-space: nowrap;
+      will-change: transform;
+      transform: translateX(0);
+      opacity: 0;
+      transition: opacity .28s ease;
+      padding-left: 0;
+    }
+
+    .newsTicker:hover .newsTrack {
+      animation-play-state: paused;
+    }
+
+    .newsItem {
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+      max-width: none;
+      font-size: clamp(13px, .95vw, 17px);
+      font-weight: 800;
+      line-height: 1.25;
+      color: #e8eef8;
+      text-shadow: 0 1px 2px rgba(0, 0, 0, .75);
+    }
+
+    .newsItem strong {
+      color: var(--yellow);
+      font-weight: 1000;
+    }
+
+    .newsDot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--green);
+      box-shadow: 0 0 14px rgba(0, 199, 129, .75);
+      flex: 0 0 auto;
+    }
+
+    @keyframes newsScroll {
+      from { transform: translateX(0); }
+      to { transform: translateX(calc(-1 * var(--news-distance, 100vw))); }
+    }
+
     .apiErr {
       position: fixed;
       left: 18px;
       right: 18px;
-      bottom: 47px;
+      bottom: calc(var(--news-height) + 51px);
       display: none;
       z-index: 30;
       background: rgba(120, 0, 15, .94);
@@ -582,10 +846,10 @@
     }
 
     .drawer {
-      position: absolute;
+      position: fixed;
       right: 18px;
       top: 68px;
-      bottom: 58px;
+      bottom: calc(var(--news-height) + 58px);
       width: min(520px, calc(100vw - 36px));
       border: 1px solid var(--border);
       border-radius: 12px;
@@ -713,16 +977,31 @@
     }
 
     @media (max-width: 1280px), (max-height: 760px) {
+      :root {
+        --top-height: 48px;
+        --portfolio-height: 38px;
+        --warning-height: 46px;
+        --ticker-height: 76px;
+        --bottom-height: 112px;
+        --footer-height: 28px;
+      }
+
       .ai { width: 300px; min-width: 280px; }
-      .bottom { grid-template-columns: repeat(2, 1fr); height: 210px; }
+      .bottom { grid-template-columns: repeat(4, minmax(0, 1fr)); height: var(--bottom-height); }
       .pair { min-width: 150px; }
-      .warning { min-height: 56px; }
+      .warning { min-height: var(--warning-height); }
       .drawer { width: min(480px, calc(100vw - 36px)); }
-      .chartGrid { grid-template-columns: repeat(2, minmax(0, 1fr)); grid-template-rows: none; min-height: 280px; }
-      .miniChart { min-height: 260px; }
+      .chartGrid { grid-template-columns: repeat(3, minmax(0, 1fr)); grid-template-rows: none; min-height: 0; }
+      .portfolioCells { grid-template-columns: repeat(5, minmax(0, 1fr)); }
+      .portfolioCell { padding: 0 8px; }
     }
 
     @media (max-width: 900px) {
+      :root {
+        --news-height: 44px;
+        --portfolio-height: auto;
+      }
+
       html, body {
         height: auto;
         overflow: auto;
@@ -743,6 +1022,26 @@
         flex-wrap: wrap;
         gap: 8px;
         padding: 10px 12px;
+      }
+
+      .portfolioStrip {
+        height: auto;
+        min-height: 44px;
+        flex-direction: column;
+      }
+
+      .portfolioLabel {
+        width: 100%;
+        flex-basis: auto;
+        height: 28px;
+      }
+
+      .portfolioCells {
+        grid-template-columns: 1fr;
+      }
+
+      .portfolioCell {
+        min-height: 30px;
       }
 
       .headline {
@@ -805,6 +1104,17 @@
         height: auto;
         min-height: 36px;
       }
+
+      .newsLabel {
+        width: 84px;
+        flex-basis: 84px;
+        font-size: 11px;
+      }
+
+      .newsItem {
+        max-width: 760px;
+        font-size: 13px;
+      }
     }
   </style>
 </head>
@@ -814,20 +1124,37 @@
       <header class="top">
         <div class="brand">
           <div class="logo">RLdC</div>
-          <div class="sub">LIVE TRADING AI — SYNCHRONIZACJA Z BOTEM</div>
+          <div class="sub" data-i18n="brandSub">LIVE TRADING AI — SYNCHRONIZACJA Z BOTEM</div>
         </div>
-        <div class="headline" id="headline">Rynek → decyzja → pozycja → wyjaśnienie</div>
+        <div class="headline" id="headline" data-i18n="headlineDefault">Rynek → decyzja → pozycja → wyjaśnienie</div>
         <div class="topRight">
+          <div class="langSwitch" id="langSwitch" aria-label="Language">
+            <button type="button" data-lang="pl" aria-pressed="true">PL</button>
+            <button type="button" data-lang="de" aria-pressed="false">DE</button>
+            <button type="button" data-lang="en" aria-pressed="false">EN</button>
+            <button type="button" data-lang="bg" aria-pressed="false">BG</button>
+          </div>
           <div id="clock" class="muted">--:--</div>
-          <div id="focusMeta">Brak focusu</div>
-          <div class="badge" id="apiStatus">ŁADOWANIE</div>
+          <div id="focusMeta" data-i18n="noFocus">Brak focusu</div>
+          <div class="badge" id="apiStatus" data-i18n="loading">ŁADOWANIE</div>
         </div>
       </header>
 
+      <section class="portfolioStrip" id="portfolioStrip">
+        <div class="portfolioLabel" data-i18n="portfolioStripLabel">PORTFEL</div>
+        <div class="portfolioCells">
+          <div class="portfolioCell"><span data-i18n="topPortfolioValue">Wartość portfela</span><b id="topPortfolioValue">--</b></div>
+          <div class="portfolioCell"><span data-i18n="topFocusPnl">Wynik tej pozycji</span><b id="topFocusPnl">--</b></div>
+          <div class="portfolioCell"><span data-i18n="topTotalPnl">Wynik całości</span><b id="topTotalPnl">--</b></div>
+          <div class="portfolioCell"><span data-i18n="topOpenPositions">Otwarte pozycje</span><b id="topOpenPositions">--</b></div>
+          <div class="portfolioCell"><span data-i18n="topPortfolioMode">Tryb</span><b id="topPortfolioMode">--</b></div>
+        </div>
+      </section>
+
       <div class="warning">
         <div>
-          ⚠ FAZA TESTÓW I DOSTRAJANIA — AKTUALNE DANE MOGĄ BYĆ NIEKOMPLETNE LUB BŁĘDNE ⚠
-          <small>Overlay pokazuje stan zwrócony przez bota. To nie jest porada inwestycyjna ani gwarancja zysku.</small>
+          <span data-i18n="warningMain">⚠ FAZA TESTÓW I DOSTRAJANIA — AKTUALNE DANE MOGĄ BYĆ NIEKOMPLETNE LUB BŁĘDNE ⚠</span>
+          <small data-i18n="warningSub">Overlay pokazuje stan zwrócony przez bota. To nie jest porada inwestycyjna ani gwarancja zysku.</small>
         </div>
       </div>
 
@@ -837,14 +1164,14 @@
         <div class="chartCard">
           <div class="chartHead">
             <div class="symbolWrap">
-              <div class="symbol" id="symbol">BRAK DANYCH</div>
-              <button class="pin" id="pinSymbol" title="Dodaj/usuń z ulubionych">☆</button>
+              <div class="symbol" id="symbol" data-i18n="noDataUpper">BRAK DANYCH</div>
+              <button class="pin" id="pinSymbol" title="Dodaj/usuń z ulubionych" data-i18n-title="favoriteToggle">☆</button>
             </div>
-            <div class="priceInfo" id="priceInfo">Oczekuję na dane z backendu RLdC...</div>
+            <div class="priceInfo" id="priceInfo" data-i18n="waitingBackend">Oczekuję na dane z backendu RLdC...</div>
           </div>
 
           <div class="chartGrid" id="chartGrid"></div>
-          <div class="chartNote" id="chartNote">6 wykresów świecowych: 1m, 5m, 15m, 1h, 4h, 1d. Kliknij panel, aby ustawić główny horyzont analizy.</div>
+          <div class="chartNote" id="chartNote" data-i18n="chartNoteInitial">6 wykresów świecowych: 1m, 5m, 15m, 1h, 4h, 1d. Kliknij panel, aby ustawić główny horyzont analizy.</div>
 
           <div class="levels">
             <div class="lvl">ENTRY: <b id="entry">--</b></div>
@@ -855,79 +1182,88 @@
           </div>
 
           <div class="inds" id="chips">
-            <div>ŚWIECE</div>
+            <div data-i18n="chipCandles">ŚWIECE</div>
             <div>EMA 9/21/50/200</div>
             <div>BOLL</div>
             <div>RSI</div>
             <div>MACD</div>
             <div>VWAP</div>
-            <div>FORECAST 15–20m</div>
-            <div>WHALE</div>
+            <div data-i18n="chipForecast">FORECAST 15–20m</div>
+            <div data-i18n="chipWhale">WHALE</div>
           </div>
         </div>
 
         <aside class="ai">
-          <h3>Analiza AI / stan bota</h3>
+          <h3 data-i18n="aiTitle">Analiza AI / stan bota</h3>
           <div class="sec">
-            <div class="st">DECYZJA</div>
-            <div class="sx"><span class="pill" id="decision">CZEKAJ</span></div>
+            <div class="st" data-i18n="decisionLabel">DECYZJA</div>
+            <div class="sx"><span class="pill" id="decision" data-i18n="actionWait">CZEKAJ</span></div>
           </div>
           <div class="sec">
-            <div class="st">TREND</div>
-            <div class="sx" id="trend">Brak potwierdzonego trendu z bota.</div>
+            <div class="st" data-i18n="trendLabel">TREND</div>
+            <div class="sx" id="trend" data-i18n="trendInitial">Brak potwierdzonego trendu z bota.</div>
           </div>
           <div class="sec">
-            <div class="st">CZY WARTO INWESTOWAĆ?</div>
-            <div class="sx" id="invest">Bot nie zwrócił jeszcze kanonicznej oceny opłacalności.</div>
+            <div class="st" data-i18n="investLabel">CZY WARTO INWESTOWAĆ?</div>
+            <div class="sx" id="invest" data-i18n="investInitial">Bot nie zwrócił jeszcze kanonicznej oceny opłacalności.</div>
           </div>
           <div class="sec">
-            <div class="st">CO SIĘ DZIEJE?</div>
-            <div class="sx" id="explain">Czekam na zsynchronizowany stan RLdC.</div>
+            <div class="st" data-i18n="explainLabel">CO SIĘ DZIEJE?</div>
+            <div class="sx" id="explain" data-i18n="explainInitial">Czekam na zsynchronizowany stan RLdC.</div>
           </div>
           <div class="sec">
-            <div class="st">RUCHY GRUBYCH GRACZY</div>
-            <div class="sx" id="whale">Brak potwierdzonej anomalii z bota.</div>
+            <div class="st" data-i18n="whaleLabel">RUCHY GRUBYCH GRACZY</div>
+            <div class="sx" id="whale" data-i18n="whaleInitial">Brak potwierdzonej anomalii z bota.</div>
           </div>
           <div class="sec">
-            <div class="st">ILE ZAINWESTOWAĆ?</div>
-            <div class="sx" id="capital">Minimalna sensowna kwota: --</div>
+            <div class="st" data-i18n="capitalLabel">ILE ZAINWESTOWAĆ?</div>
+            <div class="sx" id="capital" data-i18n="capitalInitial">Minimalna sensowna kwota: --</div>
           </div>
         </aside>
       </section>
 
       <section class="bottom">
         <div class="card">
-          <h4>Watchlist / kolejka bota</h4>
-          <div id="queue"><div class="row"><span>Brak danych</span><b>--</b></div></div>
+          <h4 data-i18n="watchlistTitle">Watchlist / kolejka bota</h4>
+          <div id="queue"><div class="row"><span data-i18n="noData">Brak danych</span><b>--</b></div></div>
         </div>
         <div class="card">
-          <h4>Portfel / wynik</h4>
-          <div class="row"><span>Wartość</span><b id="value">--</b></div>
-          <div class="row"><span>Wynik netto</span><b id="pnl">--</b></div>
-          <div class="row"><span>Pozycje</span><b id="count">--</b></div>
-          <div class="row"><span>Tryb</span><b id="mode">--</b></div>
-          <div class="row"><span>Status bota</span><b id="botStatus">--</b></div>
+          <h4 data-i18n="portfolioTitle">Portfel / wynik</h4>
+          <div class="row"><span data-i18n="valueLabel">Wartość</span><b id="value">--</b></div>
+          <div class="row"><span data-i18n="netResultLabel">Wynik netto</span><b id="pnl">--</b></div>
+          <div class="row"><span data-i18n="positionsLabel">Pozycje</span><b id="count">--</b></div>
+          <div class="row"><span data-i18n="modeLabel">Tryb</span><b id="mode">--</b></div>
+          <div class="row"><span data-i18n="botStatusLabel">Status bota</span><b id="botStatus">--</b></div>
         </div>
         <div class="card">
-          <h4>Lektor / komentarz prosty</h4>
+          <h4 data-i18n="narratorTitle">Lektor / komentarz prosty</h4>
           <div class="wave"></div>
-          <div class="narr" id="narr">Bot czeka na dane. Komentarz pojawi się po synchronizacji.</div>
+          <div class="narr" id="narr" data-i18n="narrInitial">Bot czeka na dane. Komentarz pojawi się po synchronizacji.</div>
         </div>
         <div class="card">
-          <h4>Status źródeł</h4>
-          <div class="narr" id="sourceHealth">Ładowanie diagnostyki źródeł...</div>
+          <h4 data-i18n="sourceStatusTitle">Status źródeł</h4>
+          <div class="narr" id="sourceHealth" data-i18n="sourceLoading">Ładowanie diagnostyki źródeł...</div>
         </div>
       </section>
 
-      <div class="footer">⚠ Analizy RLdC nie gwarantują zysku. Rynek jest zmienny. Kopiowanie działań odbywa się na własne ryzyko.</div>
+      <div class="footer" data-i18n="footerRisk">⚠ Analizy RLdC nie gwarantują zysku. Rynek jest zmienny. Kopiowanie działań odbywa się na własne ryzyko.</div>
+
+      <div class="newsTicker" aria-live="polite">
+        <div class="newsLabel" data-i18n="newsLabel">NA ŻYWO</div>
+        <div class="newsViewport">
+          <div class="newsTrack" id="newsTrack">
+            <span class="newsItem"><span class="newsDot"></span><strong>RLdC</strong><span data-i18n="newsFallback">Bot zbiera dane i przygotowuje prosty opis tego, co robi.</span></span>
+          </div>
+        </div>
+      </div>
 
       <aside class="drawer" id="drawer">
         <div class="drawerHead">
           <div>
-            <div class="drawerTitle" id="drawerTitle">Panel</div>
+            <div class="drawerTitle" id="drawerTitle" data-i18n="panelTitle">Panel</div>
             <div class="drawerSub" id="drawerSub">Overlay RLdC</div>
           </div>
-          <button class="closeBtn" id="closeDrawer">Zamknij</button>
+          <button class="closeBtn" id="closeDrawer" data-i18n="close">Zamknij</button>
         </div>
         <div class="drawerBody" id="drawerBody"></div>
       </aside>
@@ -941,18 +1277,818 @@
     const BACKEND_URL = window.location.origin;
     const OVERLAY_API = `${window.location.origin}/overlay/api/live-state`;
     const refreshMs = 3000;
-    const rotateMs = 6500;
     const TF_LIST = ['1m', '5m', '15m', '1h', '4h', '1d'];
     const $ = (id) => document.getElementById(id);
+    const DEFAULT_LANG = 'pl';
+    const SUPPORTED_LANGS = ['pl', 'de', 'en', 'bg'];
+    const LANG_STORAGE_KEY = 'rldc_overlay_lang';
+    const LANG_MANUAL_KEY = 'rldc_overlay_lang_manual';
+    const LANG_CHANGES_PER_FOCUS = 3;
+    const NEWS_MIN_DURATION_MS = 18000;
+    const NEWS_MAX_DURATION_MS = 90000;
+    const NEWS_PIXELS_PER_SECOND = 82;
+    const I18N = {
+      pl: {
+        locale: 'pl-PL',
+        htmlLang: 'pl',
+        title: 'RLdC LIVE Trading Overlay — Bot Sync',
+        brandSub: 'LIVE TRADING AI — SYNCHRONIZACJA Z BOTEM',
+        headlineDefault: 'Rynek → decyzja → pozycja → wyjaśnienie',
+        warningMain: '⚠ FAZA TESTÓW I DOSTRAJANIA — AKTUALNE DANE MOGĄ BYĆ NIEKOMPLETNE LUB BŁĘDNE ⚠',
+        warningSub: 'Overlay pokazuje stan zwrócony przez bota. To nie jest porada inwestycyjna ani gwarancja zysku.',
+        noFocus: 'Brak focusu',
+        loading: 'ŁADOWANIE',
+        noDataUpper: 'BRAK DANYCH',
+        noData: 'Brak danych',
+        favoriteToggle: 'Dodaj/usuń z ulubionych',
+        waitingBackend: 'Oczekuję na dane z backendu RLdC...',
+        chartNoteInitial: '6 wykresów świecowych: 1m, 5m, 15m, 1h, 4h, 1d. Kliknij panel, aby ustawić główny horyzont analizy.',
+        chartNoteActive: 'Każdy panel pokazuje świece OHLC, wolumen, EMA20/EMA50, pasma BUY/SELL, poziomy ENTRY/TP/SL, spread orderbooku i forecast ceny bota.',
+        chipCandles: 'ŚWIECE',
+        chipForecast: 'FORECAST 15–20m',
+        chipWhale: 'WHALE',
+        aiTitle: 'Analiza AI / stan bota',
+        decisionLabel: 'DECYZJA',
+        trendLabel: 'TREND',
+        investLabel: 'CZY WARTO INWESTOWAĆ?',
+        explainLabel: 'CO SIĘ DZIEJE?',
+        whaleLabel: 'RUCHY GRUBYCH GRACZY',
+        capitalLabel: 'ILE ZAINWESTOWAĆ?',
+        actionBuy: 'KUP',
+        actionSell: 'SPRZEDAJ',
+        actionHold: 'TRZYMAJ',
+        actionWatch: 'OBSERWUJ',
+        actionWait: 'CZEKAJ',
+        actionBlocked: 'BLOKADA',
+        trendInitial: 'Brak potwierdzonego trendu z bota.',
+        investInitial: 'Bot nie zwrócił jeszcze kanonicznej oceny opłacalności.',
+        explainInitial: 'Czekam na zsynchronizowany stan RLdC.',
+        whaleInitial: 'Brak potwierdzonej anomalii z bota.',
+        capitalInitial: 'Minimalna sensowna kwota: --',
+        watchlistTitle: 'Watchlist / kolejka bota',
+        portfolioTitle: 'Portfel / wynik',
+        portfolioStripLabel: 'PORTFEL',
+        topPortfolioValue: 'Wartość portfela',
+        topFocusPnl: 'Wynik tej pozycji',
+        topTotalPnl: 'Wynik całości',
+        topOpenPositions: 'Otwarte pozycje',
+        topPortfolioMode: 'Tryb',
+        gridTableTitle: 'Tabela grid',
+        gridTableNow: 'Teraz',
+        gridTableEntry: 'Wejście',
+        gridTableTp: 'Cel',
+        gridTableSl: 'Stop',
+        gridTableLower: 'Dolna granica',
+        gridTableUpper: 'Górna granica',
+        gridTableStep: 'Krok',
+        gridTableCount: 'Liczba siatek',
+        gridTableBuyZone: 'Strefa kupna',
+        gridTableSellZone: 'Strefa sprzedaży',
+        valueLabel: 'Wartość',
+        netResultLabel: 'Wynik netto',
+        positionsLabel: 'Pozycje',
+        modeLabel: 'Tryb',
+        botStatusLabel: 'Status bota',
+        narratorTitle: 'Lektor / komentarz prosty',
+        narrInitial: 'Bot czeka na dane. Komentarz pojawi się po synchronizacji.',
+        sourceStatusTitle: 'Status źródeł',
+        sourceLoading: 'Ładowanie diagnostyki źródeł...',
+        footerRisk: '⚠ Analizy RLdC nie gwarantują zysku. Rynek jest zmienny. Kopiowanie działań odbywa się na własne ryzyko.',
+        panelTitle: 'Panel',
+        close: 'Zamknij',
+        dataSourcesOk: 'Źródła OK: {ok}/{total}',
+        adapterComplete: 'Adapter ma komplet odpowiedzi dla głównych endpointów.',
+        tf1h: '1 GODZ',
+        tf4h: '4 GODZ',
+        tf1d: '1 DZIEŃ',
+        noCandleData: 'Brak danych świecowych',
+        tickerNoPairs: 'Backend nie zwrócił par',
+        tickerCheckBot: 'Sprawdź bota :8000',
+        tickerNoFake: 'Overlay nie zmyśla wyników',
+        buyLabel: 'Kupno',
+        targetLabel: 'Cel',
+        noBotDataUpper: 'BRAK DANYCH Z BOTA',
+        noActivePair: 'Backend nie zwrócił aktywnej pary ani pozycji.',
+        noTrendData: 'Brak danych trendu.',
+        cannotAssessProfitability: 'Nie można ocenić opłacalności bez danych z bota.',
+        waitingCanonical: 'Overlay czeka na kanoniczny stan RLdC.',
+        noDataShort: 'Brak danych.',
+        noActiveSymbolChart: 'Brak aktywnego symbolu. Po pojawieniu się par dane świec i prognoza uzupełnią się automatycznie.',
+        chartFocusMeta: '{symbol} | wykres {chart} | TF {tf}',
+        priceInfo: 'Cena teraz: {price} | Spread: {spread} | Wynik pozycji: {pnl} | Bot mówi: {decision}',
+        trendUp: 'cena ma teraz przewagę w górę',
+        trendDown: 'cena ma teraz przewagę w dół',
+        trendSideways: 'cena idzie bardziej bokiem',
+        trendUnknown: 'bot nie ma jeszcze pewnej oceny kierunku',
+        botConfidence: 'pewność bota',
+        positionAlreadyOpen: 'Pozycja jest już otwarta. Bot zarządza wyjściem, więc nowe wejście nie jest teraz wymagane.',
+        profitabilityAfterCosts: 'Ocena opłacalności po kosztach: {edge}. {details}',
+        blockers: 'Blokery: {items}.',
+        noCriticalEntryBlocks: 'Brak krytycznych blokad wejścia.',
+        bestReady: 'Najbliższy sensowny kandydat wejścia teraz: {symbol}{score}.',
+        bestReadyScore: ' (score {score})',
+        noFullProfitability: 'Bot nie podał jeszcze pełnej oceny opłacalności po kosztach dla tego symbolu.',
+        noSimpleExplanation: 'Bot nie zwrócił jeszcze prostego wyjaśnienia dla tej pary.',
+        noWhaleSignal: 'Brak mocnego sygnału, że duzi gracze teraz pchają cenę.',
+        currentExposure: 'Aktualna ekspozycja tej pozycji: {amount}',
+        capitalMakesSense: 'Kwota, od której taki ruch zaczyna mieć sens: {amount}',
+        activePositionFallback: 'Pozycja jest aktywna. Bot monitoruje zarządzanie wyjściem i ryzykiem zamiast proponować nowe wejście.',
+        dataQuality: 'Jakość danych',
+        freshSignal: 'Bot ma świeży sygnał',
+        rawSignal: 'Surowy sygnał',
+        inHorizon: 'Za {horizon}',
+        staleCache: '⚠ dane z cache',
+        botWaitingFallback: 'Bot czeka. Dane są testowe i mogą być niekompletne albo błędne.',
+        queueEmpty: 'Brak kolejki z bota',
+        connected: 'POŁĄCZONO',
+        partialData: 'DANE NIEPEŁNE',
+        dataError: 'BŁĄD DANYCH',
+        backendPartial: 'Backend odpowiada, ale część danych jest niekompletna.',
+        backendNoConnection: 'Brak połączenia z backendem RLdC. Overlay nie pokazuje zmyślonych danych.',
+        cannotFetchLiveState: 'Nie można pobrać /overlay/api/live-state: {message}',
+        headlineSource: 'Źródło: {source} | backend: {backend}',
+        queueInPosition: 'pozycja już jest otwarta',
+        queueEntryReady: 'prawie gotowe do wejścia',
+        queueWatch: 'bot obserwuje',
+        queueSetup: 'układa się okazja',
+        queueBlocked: 'wejście zablokowane',
+        queueFullPosition: 'pełna pozycja do pilnowania',
+        queueOrphan: 'pozycja znaleziona, ale bez pełnej historii',
+        favoritesTitle: 'Ulubione pary',
+        favoritesFallbackTitle: 'Brak zapisanych ulubionych — proponowane focusy',
+        noPairsToShow: 'Brak par do pokazania.',
+        howItWorks: 'Jak to działa',
+        favoritesHelp: 'Kliknij gwiazdkę przy fokusie lub na kafelku w tickerze. Zakładka „Ulub.” przechowuje wybór lokalnie w przeglądarce/OBS.',
+        historyTitle: 'Historia equity (24h)',
+        noLiveSnapshots: 'Brak snapshotów live w ostatnich 24h.',
+        canonicalDecision: 'Kanoniczna decyzja — {symbol}',
+        noFocusLower: 'brak focusu',
+        botSays: 'Co mówi bot',
+        dataState: 'Stan danych',
+        priceNow: 'Cena teraz',
+        dataAge: 'Wiek danych',
+        buyRange: 'BUY zakres',
+        sellRange: 'SELL zakres',
+        noPlainExplanation: 'Brak prostego wyjaśnienia.',
+        noActiveBlocks: 'Brak aktywnych blokad dla tej pary.',
+        selectPair: 'Wybierz parę z tickeru.',
+        forecastHorizons: 'Forecast / horyzonty',
+        noFocusAnalysis: 'Brak focusu dla analizy.',
+        runtimeExecution: 'Runtime / execution',
+        yes: 'TAK',
+        no: 'NIE',
+        runtimeSettingsFailed: 'Nie udało się pobrać ustawień runtime.',
+        streamSources: 'Źródła streamu / publiczny dostęp',
+        tunnelActive: 'Tunel aktywny',
+        noneLower: 'brak',
+        streamDiagnosticsFailed: 'Nie udało się pobrać diagnostyki stream/tunnel.',
+        drawerFavoritesTitle: 'Ulubione / szybki focus',
+        drawerFavoritesSub: 'Lokalne zapisane symbole do OBS i operatora',
+        drawerHistoryTitle: 'Historia / equity',
+        drawerHistorySub: 'Ostatnie snapshoty portfela live z backendu',
+        drawerAnalysisTitle: 'Analizy / decyzja',
+        drawerAnalysisSub: 'Kanoniczny decision-view i forecast dla focusu',
+        drawerSettingsTitle: 'Ustawienia runtime',
+        drawerSettingsSub: 'Flagi live/execution/watchlist z backendu',
+        drawerStreamTitle: 'Stream / tunele / adresy',
+        drawerStreamSub: 'Status tunelu, IP i źródeł overlayu',
+        panelLoading: 'Ładowanie danych panelu...',
+        panelNoData: 'Brak danych panelu.',
+        newsLabel: 'NA ŻYWO',
+        newsFallback: 'Bot zbiera dane i przygotowuje prosty opis tego, co robi.',
+        newsBotStatus: 'Po ludzku: bot pracuje w trybie {mode}, a stan wejść to {status}. {guard}',
+        newsGuardNormal: 'Może szukać nowych okazji, ale nadal sprawdza ryzyko przed każdym ruchem.',
+        newsGuardReduceOnly: 'Nie powinien dokładać nowych zakupów; pilnuje głównie wyjść i zmniejszania ryzyka.',
+        newsGuardNoTrade: 'Nowe wejścia są zablokowane, więc bot patrzy i czeka zamiast kupować.',
+        newsPortfolio: 'Portfel: {positions} pozycji, wynik {pnl}. To jak kontrola pola: bot patrzy, gdzie rośnie plon, a gdzie trzeba szybko zamknąć stratę.',
+        newsFocus: 'Teraz bot patrzy na {symbol}. Decyzja: {decision}. Dlaczego: {reason}',
+        newsTelegramLead: 'Telegram: {category}. {text}',
+        newsTelegramEmpty: 'Telegram nie ma świeżych wiadomości do pokazania; pasek używa aktualnego stanu bota.',
+        newsReasonFallback: 'bot nie podał jeszcze pełnego powodu, więc overlay pokazuje tylko bezpieczny stan z danych.',
+        telegramBuyFilledPlain: 'Po ludzku: bot już kupił {symbol}; pieniądze zostały zamienione na monetę i teraz trzeba pilnować, czy cena idzie do celu, czy trzeba uciekać ze stratą.',
+        telegramLiveBuyPlain: 'Po ludzku: bot znalazł możliwe wejście na {symbol}; podał cenę kupna, cel zysku i stop-loss, czyli granicę, gdzie ma przestać ryzykować.',
+        telegramSellFilledPlain: 'Po ludzku: bot sprzedał {symbol}; pozycja została zamknięta albo zmniejszona i wynik trzeba traktować jako rozliczony ruch.',
+        telegramSellRejectedPlain: 'Po ludzku: bot próbował sprzedać {symbol}, ale giełda odrzuciła zlecenie. To znaczy, że trzeba patrzeć, czy pozycja nadal jest w portfelu i czy nie wymaga ręcznej kontroli.',
+        telegramRotationPlain: 'Po ludzku: bot próbuje przesunąć kapitał tam, gdzie widzi lepszą szansę. Jeżeli brakuje wolnej gotówki, najpierw szuka pozycji, którą można zamknąć albo zmniejszyć.',
+        telegramRiskPlain: 'Po ludzku: to komunikat bezpieczeństwa; bot mówi, co go blokuje albo dlaczego nie chce teraz ryzykować nowych pieniędzy.',
+        botStatusWorking: 'pracuje',
+        botStatusBlocked: 'blokada',
+        botStatusReduceOnly: 'tylko wyjścia',
+        botStatusUnknown: 'nieznany',
+        focusReasonInPosition: 'ta pozycja jest już otwarta, więc bot nie powinien dokupować bez powodu; teraz pilnuje wyniku, celu zysku i granicy straty.',
+        focusReasonBuy: 'bot widzi możliwą okazję wejścia, ale przed zakupem musi jeszcze sprawdzić koszty, ryzyko i czy portfel ma wolną gotówkę.',
+        focusReasonSell: 'bot widzi powód, żeby zamknąć albo zmniejszyć pozycję; zwykle chodzi o ochronę wyniku, stop-loss albo realizację zysku.',
+        focusReasonHold: 'bot nie robi gwałtownego ruchu; trzyma pozycję albo obserwuje rynek, bo sygnał nie jest wystarczająco mocny.',
+        focusReasonWait: 'bot czeka, bo dane albo układ rynku nie dają jeszcze prostego, bezpiecznego ruchu.',
+        telegramCategorySignal: 'sygnał',
+        telegramCategoryExecution: 'wykonanie zlecenia',
+        telegramCategoryBlocker: 'blokada',
+        telegramCategoryRisk: 'ryzyko',
+        telegramCategoryStatus: 'status systemu',
+        telegramCategoryOperator: 'operator',
+        telegramCategoryTarget: 'cel',
+        telegramCategoryUnknown: 'wiadomość',
+      },
+      de: {
+        locale: 'de-DE',
+        htmlLang: 'de',
+        title: 'RLdC LIVE Trading Overlay — Bot-Sync',
+        brandSub: 'LIVE TRADING AI — BOT-SYNCHRONISIERUNG',
+        headlineDefault: 'Markt → Entscheidung → Position → Erklärung',
+        warningMain: '⚠ TEST- UND ABSTIMMUNGSPHASE — AKTUELLE DATEN KÖNNEN UNVOLLSTÄNDIG ODER FEHLERHAFT SEIN ⚠',
+        warningSub: 'Das Overlay zeigt den vom Bot gelieferten Zustand. Das ist keine Anlageberatung und keine Gewinngarantie.',
+        noFocus: 'Kein Fokus',
+        loading: 'LÄDT',
+        noDataUpper: 'KEINE DATEN',
+        noData: 'Keine Daten',
+        favoriteToggle: 'Zu Favoriten hinzufügen/entfernen',
+        waitingBackend: 'Warte auf Daten aus dem RLdC-Backend...',
+        chartNoteInitial: '6 Candlestick-Charts: 1m, 5m, 15m, 1h, 4h, 1d. Klicke auf ein Panel, um den Haupthorizont der Analyse zu setzen.',
+        chartNoteActive: 'Jedes Panel zeigt OHLC-Kerzen, Volumen, EMA20/EMA50, BUY/SELL-Zonen, ENTRY/TP/SL-Level, Orderbuch-Spread und Bot-Preisforecast.',
+        chipCandles: 'KERZEN',
+        chipForecast: 'PROGNOSE 15–20m',
+        chipWhale: 'WHALE',
+        aiTitle: 'KI-Analyse / Bot-Status',
+        decisionLabel: 'ENTSCHEIDUNG',
+        trendLabel: 'TREND',
+        investLabel: 'LOHNT SICH EIN INVESTMENT?',
+        explainLabel: 'WAS PASSIERT?',
+        whaleLabel: 'BEWEGUNGEN GROSSER AKTEURE',
+        capitalLabel: 'WIE VIEL INVESTIEREN?',
+        actionBuy: 'KAUFEN',
+        actionSell: 'VERKAUFEN',
+        actionHold: 'HALTEN',
+        actionWatch: 'BEOBACHTEN',
+        actionWait: 'WARTEN',
+        actionBlocked: 'BLOCKIERT',
+        trendInitial: 'Kein bestätigter Trend vom Bot.',
+        investInitial: 'Der Bot hat noch keine kanonische Rentabilitätsbewertung geliefert.',
+        explainInitial: 'Warte auf den synchronisierten RLdC-Zustand.',
+        whaleInitial: 'Keine bestätigte Anomalie vom Bot.',
+        capitalInitial: 'Minimal sinnvoller Betrag: --',
+        watchlistTitle: 'Watchlist / Bot-Warteschlange',
+        portfolioTitle: 'Portfolio / Ergebnis',
+        portfolioStripLabel: 'Portfolio',
+        topPortfolioValue: 'Portfoliowert',
+        topFocusPnl: 'Ergebnis dieser Position',
+        topTotalPnl: 'Gesamtergebnis',
+        topOpenPositions: 'Offene Positionen',
+        topPortfolioMode: 'Modus',
+        gridTableTitle: 'Grid-Tabelle',
+        gridTableNow: 'Jetzt',
+        gridTableEntry: 'Einstieg',
+        gridTableTp: 'Ziel',
+        gridTableSl: 'Stop',
+        gridTableLower: 'Untere Grenze',
+        gridTableUpper: 'Obere Grenze',
+        gridTableStep: 'Schritt',
+        gridTableCount: 'Grid-Anzahl',
+        gridTableBuyZone: 'Kaufzone',
+        gridTableSellZone: 'Verkaufszone',
+        valueLabel: 'Wert',
+        netResultLabel: 'Nettoergebnis',
+        positionsLabel: 'Positionen',
+        modeLabel: 'Modus',
+        botStatusLabel: 'Bot-Status',
+        narratorTitle: 'Sprecher / einfache Zusammenfassung',
+        narrInitial: 'Der Bot wartet auf Daten. Der Kommentar erscheint nach der Synchronisierung.',
+        sourceStatusTitle: 'Quellenstatus',
+        sourceLoading: 'Lade Quellendiagnostik...',
+        footerRisk: '⚠ RLdC-Analysen garantieren keinen Gewinn. Der Markt ist volatil. Das Kopieren von Aktionen erfolgt auf eigenes Risiko.',
+        panelTitle: 'Panel',
+        close: 'Schließen',
+        dataSourcesOk: 'Quellen OK: {ok}/{total}',
+        adapterComplete: 'Der Adapter hat vollständige Antworten der Hauptendpunkte.',
+        tf1h: '1 STD',
+        tf4h: '4 STD',
+        tf1d: '1 TAG',
+        noCandleData: 'Keine Kerzendaten',
+        tickerNoPairs: 'Backend hat keine Paare geliefert',
+        tickerCheckBot: 'Bot :8000 prüfen',
+        tickerNoFake: 'Overlay erfindet keine Ergebnisse',
+        buyLabel: 'Kauf',
+        targetLabel: 'Ziel',
+        noBotDataUpper: 'KEINE BOT-DATEN',
+        noActivePair: 'Backend hat kein aktives Paar und keine Position geliefert.',
+        noTrendData: 'Keine Trenddaten.',
+        cannotAssessProfitability: 'Ohne Bot-Daten kann die Rentabilität nicht bewertet werden.',
+        waitingCanonical: 'Overlay wartet auf den kanonischen RLdC-Zustand.',
+        noDataShort: 'Keine Daten.',
+        noActiveSymbolChart: 'Kein aktives Symbol. Sobald Paare erscheinen, werden Kerzen und Forecast automatisch ergänzt.',
+        chartFocusMeta: '{symbol} | Chart {chart} | TF {tf}',
+        priceInfo: 'Aktueller Preis: {price} | Spread: {spread} | Positionsresultat: {pnl} | Bot sagt: {decision}',
+        trendUp: 'der Preis hat aktuell Aufwärtsvorteil',
+        trendDown: 'der Preis hat aktuell Abwärtsvorteil',
+        trendSideways: 'der Preis läuft eher seitwärts',
+        trendUnknown: 'der Bot hat noch keine sichere Richtungsbewertung',
+        botConfidence: 'Bot-Sicherheit',
+        positionAlreadyOpen: 'Die Position ist bereits offen. Der Bot verwaltet den Ausstieg, daher ist jetzt kein neuer Einstieg nötig.',
+        profitabilityAfterCosts: 'Rentabilität nach Kosten: {edge}. {details}',
+        blockers: 'Blocker: {items}.',
+        noCriticalEntryBlocks: 'Keine kritischen Einstiegsblockaden.',
+        bestReady: 'Nächster sinnvoller Einstiegskandidat: {symbol}{score}.',
+        bestReadyScore: ' (Score {score})',
+        noFullProfitability: 'Der Bot hat für dieses Symbol noch keine vollständige Rentabilitätsbewertung nach Kosten geliefert.',
+        noSimpleExplanation: 'Der Bot hat für dieses Paar noch keine einfache Erklärung geliefert.',
+        noWhaleSignal: 'Kein starkes Signal, dass große Akteure den Preis gerade treiben.',
+        currentExposure: 'Aktuelle Exposition dieser Position: {amount}',
+        capitalMakesSense: 'Betrag, ab dem diese Bewegung sinnvoll wird: {amount}',
+        activePositionFallback: 'Die Position ist aktiv. Der Bot überwacht Ausstieg und Risiko statt einen neuen Einstieg vorzuschlagen.',
+        dataQuality: 'Datenqualität',
+        freshSignal: 'Der Bot hat ein frisches Signal',
+        rawSignal: 'Rohsignal',
+        inHorizon: 'In {horizon}',
+        staleCache: '⚠ Daten aus Cache',
+        botWaitingFallback: 'Der Bot wartet. Die Daten sind Testdaten und können unvollständig oder fehlerhaft sein.',
+        queueEmpty: 'Keine Bot-Warteschlange',
+        connected: 'VERBUNDEN',
+        partialData: 'DATEN UNVOLLSTÄNDIG',
+        dataError: 'DATENFEHLER',
+        backendPartial: 'Backend antwortet, aber ein Teil der Daten ist unvollständig.',
+        backendNoConnection: 'Keine Verbindung zum RLdC-Backend. Das Overlay zeigt keine erfundenen Daten.',
+        cannotFetchLiveState: '/overlay/api/live-state kann nicht geladen werden: {message}',
+        headlineSource: 'Quelle: {source} | Backend: {backend}',
+        queueInPosition: 'Position ist bereits offen',
+        queueEntryReady: 'fast bereit für Einstieg',
+        queueWatch: 'Bot beobachtet',
+        queueSetup: 'Setup bildet sich',
+        queueBlocked: 'Einstieg blockiert',
+        queueFullPosition: 'volle Position zu überwachen',
+        queueOrphan: 'Position gefunden, aber ohne vollständige Historie',
+        favoritesTitle: 'Favorisierte Paare',
+        favoritesFallbackTitle: 'Keine Favoriten gespeichert — vorgeschlagene Fokusse',
+        noPairsToShow: 'Keine Paare zum Anzeigen.',
+        howItWorks: 'So funktioniert es',
+        favoritesHelp: 'Klicke auf den Stern am Fokus oder auf eine Kachel im Ticker. Der Tab „Favoriten“ speichert die Auswahl lokal im Browser/OBS.',
+        historyTitle: 'Equity-Historie (24h)',
+        noLiveSnapshots: 'Keine Live-Snapshots der letzten 24h.',
+        canonicalDecision: 'Kanonische Entscheidung — {symbol}',
+        noFocusLower: 'kein Fokus',
+        botSays: 'Bot sagt',
+        dataState: 'Datenstatus',
+        priceNow: 'Aktueller Preis',
+        dataAge: 'Datenalter',
+        buyRange: 'BUY-Bereich',
+        sellRange: 'SELL-Bereich',
+        noPlainExplanation: 'Keine einfache Erklärung.',
+        noActiveBlocks: 'Keine aktiven Blockaden für dieses Paar.',
+        selectPair: 'Wähle ein Paar im Ticker.',
+        forecastHorizons: 'Forecast / Horizonte',
+        noFocusAnalysis: 'Kein Fokus für Analyse.',
+        runtimeExecution: 'Runtime / Execution',
+        yes: 'JA',
+        no: 'NEIN',
+        runtimeSettingsFailed: 'Runtime-Einstellungen konnten nicht geladen werden.',
+        streamSources: 'Stream-Quellen / öffentlicher Zugriff',
+        tunnelActive: 'Tunnel aktiv',
+        noneLower: 'keine',
+        streamDiagnosticsFailed: 'Stream-/Tunnel-Diagnostik konnte nicht geladen werden.',
+        drawerFavoritesTitle: 'Favoriten / schneller Fokus',
+        drawerFavoritesSub: 'Lokal gespeicherte Symbole für OBS und Operator',
+        drawerHistoryTitle: 'Historie / Equity',
+        drawerHistorySub: 'Letzte Live-Portfolio-Snapshots aus dem Backend',
+        drawerAnalysisTitle: 'Analysen / Entscheidung',
+        drawerAnalysisSub: 'Kanonischer Decision-View und Forecast für den Fokus',
+        drawerSettingsTitle: 'Runtime-Einstellungen',
+        drawerSettingsSub: 'Live-/Execution-/Watchlist-Flags aus dem Backend',
+        drawerStreamTitle: 'Stream / Tunnel / Adressen',
+        drawerStreamSub: 'Status von Tunnel, IP und Overlay-Quellen',
+        panelLoading: 'Paneldaten werden geladen...',
+        panelNoData: 'Keine Paneldaten.',
+        newsLabel: 'LIVE',
+        newsFallback: 'Der Bot sammelt Daten und bereitet eine einfache Erklärung vor, was er gerade tut.',
+        newsBotStatus: 'Einfach gesagt: Der Bot arbeitet im Modus {mode}, und der Einstiegszustand ist {status}. {guard}',
+        newsGuardNormal: 'Er darf neue Chancen suchen, prüft aber vor jedem Schritt weiter das Risiko.',
+        newsGuardReduceOnly: 'Er soll keine neuen Käufe hinzufügen; er achtet vor allem auf Ausstiege und weniger Risiko.',
+        newsGuardNoTrade: 'Neue Einstiege sind blockiert, also schaut der Bot nur zu und wartet statt zu kaufen.',
+        newsPortfolio: 'Portfolio: {positions} Positionen, Ergebnis {pnl}. Wie bei einer Feldkontrolle: Der Bot schaut, wo der Ertrag wächst und wo ein Verlust schnell beendet werden muss.',
+        newsFocus: 'Jetzt schaut der Bot auf {symbol}. Entscheidung: {decision}. Warum: {reason}',
+        newsTelegramLead: 'Telegram: {category}. {text}',
+        newsTelegramEmpty: 'Telegram hat keine frischen Nachrichten zum Anzeigen; der Ticker nutzt den aktuellen Bot-Zustand.',
+        newsReasonFallback: 'der Bot hat noch keinen vollständigen Grund geliefert, daher zeigt das Overlay nur den sicheren Datenzustand.',
+        telegramBuyFilledPlain: 'Einfach gesagt: Der Bot hat {symbol} bereits gekauft; Geld wurde in den Coin getauscht und jetzt muss er prüfen, ob der Preis zum Ziel läuft oder der Verlust begrenzt werden muss.',
+        telegramLiveBuyPlain: 'Einfach gesagt: Der Bot hat einen möglichen Einstieg bei {symbol} gefunden; er nennt Kaufpreis, Gewinnziel und Stop-Loss, also die Grenze, an der er das Risiko beendet.',
+        telegramSellFilledPlain: 'Einfach gesagt: Der Bot hat {symbol} verkauft; die Position wurde geschlossen oder verkleinert und der Zug ist damit abgerechnet.',
+        telegramSellRejectedPlain: 'Einfach gesagt: Der Bot wollte {symbol} verkaufen, aber die Börse hat den Auftrag abgelehnt. Das heißt: prüfen, ob die Position noch im Portfolio liegt und ob sie manuell kontrolliert werden muss.',
+        telegramRotationPlain: 'Einfach gesagt: Der Bot versucht Kapital dorthin zu schieben, wo er eine bessere Chance sieht. Wenn freies Geld fehlt, sucht er zuerst eine Position, die geschlossen oder verkleinert werden kann.',
+        telegramRiskPlain: 'Einfach gesagt: Das ist eine Sicherheitsmeldung; der Bot erklärt, was ihn blockiert oder warum er gerade kein neues Geld riskieren will.',
+        botStatusWorking: 'arbeitet',
+        botStatusBlocked: 'blockiert',
+        botStatusReduceOnly: 'nur Ausstiege',
+        botStatusUnknown: 'unbekannt',
+        focusReasonInPosition: 'diese Position ist bereits offen, daher sollte der Bot nicht ohne Grund nachkaufen; jetzt überwacht er Ergebnis, Gewinnziel und Verlustgrenze.',
+        focusReasonBuy: 'der Bot sieht einen möglichen Einstieg, muss vor dem Kauf aber noch Kosten, Risiko und freie Mittel prüfen.',
+        focusReasonSell: 'der Bot sieht einen Grund zum Schließen oder Reduzieren; meistens geht es um Gewinnsicherung, Stop-Loss oder Risikobegrenzung.',
+        focusReasonHold: 'der Bot macht keinen hektischen Schritt; er hält die Position oder beobachtet den Markt, weil das Signal noch nicht stark genug ist.',
+        focusReasonWait: 'der Bot wartet, weil Daten oder Marktbild noch keinen einfachen, sicheren Schritt erlauben.',
+        telegramCategorySignal: 'Signal',
+        telegramCategoryExecution: 'Orderausführung',
+        telegramCategoryBlocker: 'Blockade',
+        telegramCategoryRisk: 'Risiko',
+        telegramCategoryStatus: 'Systemstatus',
+        telegramCategoryOperator: 'Operator',
+        telegramCategoryTarget: 'Ziel',
+        telegramCategoryUnknown: 'Nachricht',
+      },
+      en: {
+        locale: 'en-US',
+        htmlLang: 'en',
+        title: 'RLdC LIVE Trading Overlay — Bot Sync',
+        brandSub: 'LIVE TRADING AI — BOT SYNC',
+        headlineDefault: 'Market → decision → position → explanation',
+        warningMain: '⚠ TESTING AND TUNING PHASE — CURRENT DATA MAY BE INCOMPLETE OR WRONG ⚠',
+        warningSub: 'The overlay shows the state returned by the bot. This is not investment advice or a profit guarantee.',
+        noFocus: 'No focus',
+        loading: 'LOADING',
+        noDataUpper: 'NO DATA',
+        noData: 'No data',
+        favoriteToggle: 'Add/remove favorite',
+        waitingBackend: 'Waiting for data from the RLdC backend...',
+        chartNoteInitial: '6 candlestick charts: 1m, 5m, 15m, 1h, 4h, 1d. Click a panel to set the main analysis horizon.',
+        chartNoteActive: 'Each panel shows OHLC candles, volume, EMA20/EMA50, BUY/SELL zones, ENTRY/TP/SL levels, order book spread, and the bot price forecast.',
+        chipCandles: 'CANDLES',
+        chipForecast: 'FORECAST 15–20m',
+        chipWhale: 'WHALE',
+        aiTitle: 'AI analysis / bot status',
+        decisionLabel: 'DECISION',
+        trendLabel: 'TREND',
+        investLabel: 'IS IT WORTH INVESTING?',
+        explainLabel: 'WHAT IS HAPPENING?',
+        whaleLabel: 'LARGE PLAYER MOVES',
+        capitalLabel: 'HOW MUCH TO INVEST?',
+        actionBuy: 'BUY',
+        actionSell: 'SELL',
+        actionHold: 'HOLD',
+        actionWatch: 'WATCH',
+        actionWait: 'WAIT',
+        actionBlocked: 'BLOCKED',
+        trendInitial: 'No confirmed trend from the bot.',
+        investInitial: 'The bot has not returned a canonical profitability assessment yet.',
+        explainInitial: 'Waiting for the synchronized RLdC state.',
+        whaleInitial: 'No confirmed anomaly from the bot.',
+        capitalInitial: 'Minimum sensible amount: --',
+        watchlistTitle: 'Watchlist / bot queue',
+        portfolioTitle: 'Portfolio / result',
+        portfolioStripLabel: 'Portfolio',
+        topPortfolioValue: 'Portfolio value',
+        topFocusPnl: 'This position result',
+        topTotalPnl: 'Total result',
+        topOpenPositions: 'Open positions',
+        topPortfolioMode: 'Mode',
+        gridTableTitle: 'Grid table',
+        gridTableNow: 'Now',
+        gridTableEntry: 'Entry',
+        gridTableTp: 'Target',
+        gridTableSl: 'Stop',
+        gridTableLower: 'Lower bound',
+        gridTableUpper: 'Upper bound',
+        gridTableStep: 'Step',
+        gridTableCount: 'Grid count',
+        gridTableBuyZone: 'Buy zone',
+        gridTableSellZone: 'Sell zone',
+        valueLabel: 'Value',
+        netResultLabel: 'Net result',
+        positionsLabel: 'Positions',
+        modeLabel: 'Mode',
+        botStatusLabel: 'Bot status',
+        narratorTitle: 'Narrator / plain comment',
+        narrInitial: 'The bot is waiting for data. A comment will appear after synchronization.',
+        sourceStatusTitle: 'Source status',
+        sourceLoading: 'Loading source diagnostics...',
+        footerRisk: '⚠ RLdC analyses do not guarantee profit. The market is volatile. Copying actions is at your own risk.',
+        panelTitle: 'Panel',
+        close: 'Close',
+        dataSourcesOk: 'Sources OK: {ok}/{total}',
+        adapterComplete: 'The adapter has complete responses from the main endpoints.',
+        tf1h: '1 HR',
+        tf4h: '4 HR',
+        tf1d: '1 DAY',
+        noCandleData: 'No candle data',
+        tickerNoPairs: 'Backend returned no pairs',
+        tickerCheckBot: 'Check bot :8000',
+        tickerNoFake: 'Overlay does not invent results',
+        buyLabel: 'Buy',
+        targetLabel: 'Target',
+        noBotDataUpper: 'NO BOT DATA',
+        noActivePair: 'Backend returned no active pair or position.',
+        noTrendData: 'No trend data.',
+        cannotAssessProfitability: 'Profitability cannot be assessed without bot data.',
+        waitingCanonical: 'Overlay is waiting for the canonical RLdC state.',
+        noDataShort: 'No data.',
+        noActiveSymbolChart: 'No active symbol. Once pairs appear, candles and forecast will fill in automatically.',
+        chartFocusMeta: '{symbol} | chart {chart} | TF {tf}',
+        priceInfo: 'Current price: {price} | Spread: {spread} | Position result: {pnl} | Bot says: {decision}',
+        trendUp: 'price currently has upward bias',
+        trendDown: 'price currently has downward bias',
+        trendSideways: 'price is moving more sideways',
+        trendUnknown: 'the bot does not yet have a firm direction assessment',
+        botConfidence: 'bot confidence',
+        positionAlreadyOpen: 'The position is already open. The bot is managing the exit, so no new entry is needed now.',
+        profitabilityAfterCosts: 'Profitability after costs: {edge}. {details}',
+        blockers: 'Blockers: {items}.',
+        noCriticalEntryBlocks: 'No critical entry blocks.',
+        bestReady: 'Nearest sensible entry candidate now: {symbol}{score}.',
+        bestReadyScore: ' (score {score})',
+        noFullProfitability: 'The bot has not yet provided a full after-cost profitability assessment for this symbol.',
+        noSimpleExplanation: 'The bot has not returned a simple explanation for this pair yet.',
+        noWhaleSignal: 'No strong signal that large players are pushing price right now.',
+        currentExposure: 'Current exposure of this position: {amount}',
+        capitalMakesSense: 'Amount from which this move starts to make sense: {amount}',
+        activePositionFallback: 'The position is active. The bot is monitoring exit and risk management instead of proposing a new entry.',
+        dataQuality: 'Data quality',
+        freshSignal: 'The bot has a fresh signal',
+        rawSignal: 'Raw signal',
+        inHorizon: 'In {horizon}',
+        staleCache: '⚠ cached data',
+        botWaitingFallback: 'The bot is waiting. Data is test data and may be incomplete or wrong.',
+        queueEmpty: 'No bot queue',
+        connected: 'CONNECTED',
+        partialData: 'PARTIAL DATA',
+        dataError: 'DATA ERROR',
+        backendPartial: 'Backend responds, but some data is incomplete.',
+        backendNoConnection: 'No connection to the RLdC backend. The overlay does not show invented data.',
+        cannotFetchLiveState: 'Cannot fetch /overlay/api/live-state: {message}',
+        headlineSource: 'Source: {source} | backend: {backend}',
+        queueInPosition: 'position is already open',
+        queueEntryReady: 'almost ready for entry',
+        queueWatch: 'bot is watching',
+        queueSetup: 'setup is forming',
+        queueBlocked: 'entry blocked',
+        queueFullPosition: 'full position to monitor',
+        queueOrphan: 'position found, but without full history',
+        favoritesTitle: 'Favorite pairs',
+        favoritesFallbackTitle: 'No saved favorites — suggested focuses',
+        noPairsToShow: 'No pairs to show.',
+        howItWorks: 'How it works',
+        favoritesHelp: 'Click the star next to the focus or on a ticker tile. The Favorites tab stores the choice locally in the browser/OBS.',
+        historyTitle: 'Equity history (24h)',
+        noLiveSnapshots: 'No live snapshots in the last 24h.',
+        canonicalDecision: 'Canonical decision — {symbol}',
+        noFocusLower: 'no focus',
+        botSays: 'Bot says',
+        dataState: 'Data state',
+        priceNow: 'Current price',
+        dataAge: 'Data age',
+        buyRange: 'BUY range',
+        sellRange: 'SELL range',
+        noPlainExplanation: 'No plain explanation.',
+        noActiveBlocks: 'No active blocks for this pair.',
+        selectPair: 'Select a pair from the ticker.',
+        forecastHorizons: 'Forecast / horizons',
+        noFocusAnalysis: 'No focus for analysis.',
+        runtimeExecution: 'Runtime / execution',
+        yes: 'YES',
+        no: 'NO',
+        runtimeSettingsFailed: 'Could not fetch runtime settings.',
+        streamSources: 'Stream sources / public access',
+        tunnelActive: 'Tunnel active',
+        noneLower: 'none',
+        streamDiagnosticsFailed: 'Could not fetch stream/tunnel diagnostics.',
+        drawerFavoritesTitle: 'Favorites / quick focus',
+        drawerFavoritesSub: 'Locally saved symbols for OBS and operator',
+        drawerHistoryTitle: 'History / equity',
+        drawerHistorySub: 'Recent live portfolio snapshots from backend',
+        drawerAnalysisTitle: 'Analysis / decision',
+        drawerAnalysisSub: 'Canonical decision view and forecast for focus',
+        drawerSettingsTitle: 'Runtime settings',
+        drawerSettingsSub: 'Live/execution/watchlist flags from backend',
+        drawerStreamTitle: 'Stream / tunnels / addresses',
+        drawerStreamSub: 'Status of tunnel, IP, and overlay sources',
+        panelLoading: 'Loading panel data...',
+        panelNoData: 'No panel data.',
+        newsLabel: 'LIVE',
+        newsFallback: 'The bot is collecting data and preparing a plain explanation of what it is doing.',
+        newsBotStatus: 'In plain words: the bot runs in {mode} mode, and the entry state is {status}. {guard}',
+        newsGuardNormal: 'It may look for new opportunities, but it still checks risk before every move.',
+        newsGuardReduceOnly: 'It should not add new buys; it mainly watches exits and reduces risk.',
+        newsGuardNoTrade: 'New entries are blocked, so the bot watches and waits instead of buying.',
+        newsPortfolio: 'Portfolio: {positions} positions, result {pnl}. Like checking a field: the bot watches where the crop grows and where a loss must be closed quickly.',
+        newsFocus: 'The bot is watching {symbol} now. Decision: {decision}. Why: {reason}',
+        newsTelegramLead: 'Telegram: {category}. {text}',
+        newsTelegramEmpty: 'Telegram has no fresh messages to show; the ticker uses the current bot state.',
+        newsReasonFallback: 'the bot has not given a full reason yet, so the overlay shows only the safe data state.',
+        telegramBuyFilledPlain: 'In plain words: the bot has already bought {symbol}; cash was turned into the coin and now it must watch whether price reaches the target or the loss must be cut.',
+        telegramLiveBuyPlain: 'In plain words: the bot found a possible entry on {symbol}; it gave the buy price, profit target, and stop-loss, meaning the line where risk should stop.',
+        telegramSellFilledPlain: 'In plain words: the bot sold {symbol}; the position was closed or reduced and that move should be treated as settled.',
+        telegramSellRejectedPlain: 'In plain words: the bot tried to sell {symbol}, but the exchange rejected the order. That means the position may still be in the portfolio and may need manual checking.',
+        telegramRotationPlain: 'In plain words: the bot is trying to move capital toward a better opportunity. If free cash is missing, it first looks for a position that can be closed or reduced.',
+        telegramRiskPlain: 'In plain words: this is a safety message; the bot explains what blocks it or why it does not want to risk new money right now.',
+        botStatusWorking: 'working',
+        botStatusBlocked: 'blocked',
+        botStatusReduceOnly: 'exits only',
+        botStatusUnknown: 'unknown',
+        focusReasonInPosition: 'this position is already open, so the bot should not add more without a reason; it is now watching profit, target, and loss limit.',
+        focusReasonBuy: 'the bot sees a possible entry, but before buying it still has to check costs, risk, and free cash.',
+        focusReasonSell: 'the bot sees a reason to close or reduce the position; usually this protects profit, stop-loss, or risk.',
+        focusReasonHold: 'the bot is not making a rushed move; it holds the position or watches the market because the signal is not strong enough yet.',
+        focusReasonWait: 'the bot is waiting because the data or market setup does not yet give a simple, safe move.',
+        telegramCategorySignal: 'signal',
+        telegramCategoryExecution: 'order execution',
+        telegramCategoryBlocker: 'blocker',
+        telegramCategoryRisk: 'risk',
+        telegramCategoryStatus: 'system status',
+        telegramCategoryOperator: 'operator',
+        telegramCategoryTarget: 'target',
+        telegramCategoryUnknown: 'message',
+      },
+    };
+
+    I18N.bg = {
+      ...I18N.en,
+      locale: 'bg-BG',
+      htmlLang: 'bg',
+      title: 'RLdC LIVE Trading Overlay — синхрон с бота',
+      brandSub: 'LIVE TRADING AI — СИНХРОН С БОТА',
+      headlineDefault: 'Пазар → решение → позиция → обяснение',
+      warningMain: '⚠ ФАЗА НА ТЕСТВАНЕ И НАСТРОЙКА — ДАННИТЕ МОЖЕ ДА СА НЕПЪЛНИ ИЛИ ГРЕШНИ ⚠',
+      warningSub: 'Овърлеят показва състоянието, върнато от бота. Това не е инвестиционен съвет и не е гаранция за печалба.',
+      noFocus: 'Няма фокус',
+      loading: 'ЗАРЕЖДАНЕ',
+      noDataUpper: 'НЯМА ДАННИ',
+      noData: 'Няма данни',
+      favoriteToggle: 'Добави/премахни от любими',
+      waitingBackend: 'Изчаквам данни от RLdC backend...',
+      chartNoteInitial: '6 свещни графики: 1m, 5m, 15m, 1h, 4h, 1d. Натисни панел, за да зададеш основния хоризонт.',
+      chartNoteActive: 'Всеки панел показва OHLC свещи, обем, EMA20/EMA50, BUY/SELL зони, ENTRY/TP/SL нива, спред и прогнозата на бота.',
+      chipCandles: 'СВЕЩИ',
+      chipForecast: 'ПРОГНОЗА 15–20m',
+      aiTitle: 'AI анализ / състояние на бота',
+      decisionLabel: 'РЕШЕНИЕ',
+      trendLabel: 'ТРЕНД',
+      investLabel: 'СТРУВА ЛИ СИ ВХОД?',
+      explainLabel: 'КАКВО СТАВА?',
+      whaleLabel: 'ДВИЖЕНИЯ НА ГОЛЕМИ ИГРАЧИ',
+      capitalLabel: 'КОЛКО ДА СЕ ВЛОЖИ?',
+      actionBuy: 'КУПИ',
+      actionSell: 'ПРОДАЙ',
+      actionHold: 'ДРЪЖ',
+      actionWatch: 'НАБЛЮДАВАЙ',
+      actionWait: 'ИЗЧАКАЙ',
+      actionBlocked: 'БЛОКИРАНО',
+      trendInitial: 'Няма потвърден тренд от бота.',
+      investInitial: 'Ботът още не е върнал оценка за изгодност.',
+      explainInitial: 'Чакам синхронизираното състояние на RLdC.',
+      whaleInitial: 'Няма потвърдена аномалия от бота.',
+      capitalInitial: 'Минимална разумна сума: --',
+      watchlistTitle: 'Списък / опашка на бота',
+      portfolioTitle: 'Портфейл / резултат',
+      portfolioStripLabel: 'Портфейл',
+      topPortfolioValue: 'Стойност на портфейла',
+      topFocusPnl: 'Резултат на тази позиция',
+      topTotalPnl: 'Общ резултат',
+      topOpenPositions: 'Отворени позиции',
+      topPortfolioMode: 'Режим',
+      gridTableTitle: 'Grid таблица',
+      gridTableNow: 'Сега',
+      gridTableEntry: 'Вход',
+      gridTableTp: 'Цел',
+      gridTableSl: 'Стоп',
+      gridTableLower: 'Долна граница',
+      gridTableUpper: 'Горна граница',
+      gridTableStep: 'Стъпка',
+      gridTableCount: 'Брой grid нива',
+      gridTableBuyZone: 'Зона за покупка',
+      gridTableSellZone: 'Зона за продажба',
+      valueLabel: 'Стойност',
+      netResultLabel: 'Нетен резултат',
+      positionsLabel: 'Позиции',
+      modeLabel: 'Режим',
+      botStatusLabel: 'Статус на бота',
+      narratorTitle: 'Говорител / просто обяснение',
+      narrInitial: 'Ботът чака данни. Коментарът ще се появи след синхронизация.',
+      sourceStatusTitle: 'Състояние на източниците',
+      sourceLoading: 'Зареждам диагностика на източниците...',
+      footerRisk: '⚠ Анализите на RLdC не гарантират печалба. Пазарът е променлив. Копирането на действия е на собствен риск.',
+      panelTitle: 'Панел',
+      close: 'Затвори',
+      dataSourcesOk: 'Източници OK: {ok}/{total}',
+      adapterComplete: 'Адаптерът има пълни отговори от основните endpoint-и.',
+      noCandleData: 'Няма данни за свещи',
+      tickerNoPairs: 'Backend не върна двойки',
+      tickerCheckBot: 'Провери бота :8000',
+      tickerNoFake: 'Овърлеят не измисля резултати',
+      buyLabel: 'Покупка',
+      targetLabel: 'Цел',
+      noBotDataUpper: 'НЯМА ДАННИ ОТ БОТА',
+      noActivePair: 'Backend не върна активна двойка или позиция.',
+      noTrendData: 'Няма данни за тренд.',
+      cannotAssessProfitability: 'Не може да се оцени изгодност без данни от бота.',
+      waitingCanonical: 'Овърлеят чака каноничното състояние на RLdC.',
+      noDataShort: 'Няма данни.',
+      noActiveSymbolChart: 'Няма активен символ. Когато се появят двойки, свещите и прогнозата ще се попълнят автоматично.',
+      chartFocusMeta: '{symbol} | графика {chart} | TF {tf}',
+      priceInfo: 'Текуща цена: {price} | Спред: {spread} | Резултат на позицията: {pnl} | Ботът казва: {decision}',
+      trendUp: 'цената има предимство нагоре',
+      trendDown: 'цената има предимство надолу',
+      trendSideways: 'цената се движи повече странично',
+      trendUnknown: 'ботът още няма сигурна оценка за посоката',
+      botConfidence: 'увереност на бота',
+      positionAlreadyOpen: 'Позицията вече е отворена. Ботът управлява изхода, затова сега не трябва нов вход.',
+      noFullProfitability: 'Ботът още не е дал пълна оценка на изгодността след разходи за този символ.',
+      noSimpleExplanation: 'Ботът още не е дал просто обяснение за тази двойка.',
+      noWhaleSignal: 'Няма силен сигнал, че големи играчи бутат цената сега.',
+      currentExposure: 'Текуща експозиция на тази позиция: {amount}',
+      capitalMakesSense: 'Сума, от която този ход започва да има смисъл: {amount}',
+      dataQuality: 'Качество на данните',
+      freshSignal: 'Ботът има свеж сигнал',
+      rawSignal: 'Суров сигнал',
+      inHorizon: 'След {horizon}',
+      staleCache: '⚠ данни от кеш',
+      botWaitingFallback: 'Ботът чака. Данните са тестови и може да са непълни или грешни.',
+      queueEmpty: 'Няма опашка от бота',
+      connected: 'СВЪРЗАНО',
+      partialData: 'НЕПЪЛНИ ДАННИ',
+      dataError: 'ГРЕШКА В ДАННИТЕ',
+      backendPartial: 'Backend отговаря, но част от данните са непълни.',
+      backendNoConnection: 'Няма връзка с RLdC backend. Овърлеят не показва измислени данни.',
+      cannotFetchLiveState: 'Не може да се зареди /overlay/api/live-state: {message}',
+      headlineSource: 'Източник: {source} | backend: {backend}',
+      queueInPosition: 'позицията вече е отворена',
+      queueEntryReady: 'почти готово за вход',
+      queueWatch: 'ботът наблюдава',
+      queueSetup: 'оформя се setup',
+      queueBlocked: 'входът е блокиран',
+      favoritesTitle: 'Любими двойки',
+      favoritesFallbackTitle: 'Няма записани любими — предложени фокуси',
+      noPairsToShow: 'Няма двойки за показване.',
+      howItWorks: 'Как работи',
+      favoritesHelp: 'Натисни звездата до фокуса или върху тикер карта. Любимите се пазят локално в браузъра/OBS.',
+      historyTitle: 'История на equity (24h)',
+      noLiveSnapshots: 'Няма live snapshots за последните 24h.',
+      canonicalDecision: 'Канонично решение — {symbol}',
+      noFocusLower: 'няма фокус',
+      botSays: 'Ботът казва',
+      dataState: 'Състояние на данните',
+      priceNow: 'Текуща цена',
+      dataAge: 'Възраст на данните',
+      buyRange: 'BUY диапазон',
+      sellRange: 'SELL диапазон',
+      noPlainExplanation: 'Няма просто обяснение.',
+      noActiveBlocks: 'Няма активни блокади за тази двойка.',
+      selectPair: 'Избери двойка от тикера.',
+      forecastHorizons: 'Прогноза / хоризонти',
+      noFocusAnalysis: 'Няма фокус за анализ.',
+      runtimeExecution: 'Runtime / execution',
+      yes: 'ДА',
+      no: 'НЕ',
+      runtimeSettingsFailed: 'Неуспешно зареждане на runtime настройките.',
+      streamSources: 'Stream източници / публичен достъп',
+      tunnelActive: 'Активен тунел',
+      noneLower: 'няма',
+      streamDiagnosticsFailed: 'Неуспешно зареждане на stream/tunnel диагностика.',
+      drawerFavoritesTitle: 'Любими / бърз фокус',
+      drawerHistoryTitle: 'История / equity',
+      drawerAnalysisTitle: 'Анализи / решение',
+      drawerSettingsTitle: 'Runtime настройки',
+      drawerStreamTitle: 'Stream / тунели / адреси',
+      panelLoading: 'Зареждам данни на панела...',
+      panelNoData: 'Няма данни за панела.',
+      newsLabel: 'НА ЖИВО',
+      newsFallback: 'Ботът събира данни и подготвя просто обяснение какво прави.',
+      newsBotStatus: 'Просто казано: ботът работи в режим {mode}, а състоянието за вход е {status}. {guard}',
+      newsGuardNormal: 'Може да търси нови възможности, но проверява риска преди всяко действие.',
+      newsGuardReduceOnly: 'Не трябва да добавя нови покупки; основно следи изходи и намалява риск.',
+      newsGuardNoTrade: 'Новите входове са блокирани, така че ботът гледа и чака вместо да купува.',
+      newsPortfolio: 'Портфейл: {positions} позиции, резултат {pnl}. Като оглед на поле: ботът гледа къде расте добивът и къде загубата трябва да се отреже.',
+      newsFocus: 'Сега ботът гледа {symbol}. Решение: {decision}. Защо: {reason}',
+      newsTelegramLead: 'Telegram: {category}. {text}',
+      newsTelegramEmpty: 'Telegram няма свежи съобщения; лентата използва текущото състояние на бота.',
+      newsReasonFallback: 'ботът още не е дал пълна причина, затова овърлеят показва само безопасното състояние от данните.',
+      telegramBuyFilledPlain: 'Просто казано: ботът вече купи {symbol}; пари бяха обърнати в монета и сега трябва да се следи дали цената стига целта или загубата трябва да се отреже.',
+      telegramLiveBuyPlain: 'Просто казано: ботът намери възможен вход за {symbol}; даде цена за купуване, цел за печалба и stop-loss.',
+      telegramSellFilledPlain: 'Просто казано: ботът продаде {symbol}; позицията е затворена или намалена и този ход е отчетен.',
+      telegramSellRejectedPlain: 'Просто казано: ботът опита да продаде {symbol}, но борсата отхвърли поръчката. Позицията може още да е в портфейла и трябва проверка.',
+      telegramRotationPlain: 'Просто казано: ботът се опитва да премести капитал към по-добра възможност. Ако няма свободни пари, търси позиция за затваряне или намаляване.',
+      telegramRiskPlain: 'Просто казано: това е съобщение за безопасност; ботът обяснява какво го блокира или защо не иска да рискува нови пари.',
+      botStatusWorking: 'работи',
+      botStatusBlocked: 'блокиран',
+      botStatusReduceOnly: 'само изходи',
+      botStatusUnknown: 'неизвестно',
+      focusReasonInPosition: 'тази позиция вече е отворена, затова ботът не трябва да добавя без причина; сега следи печалба, цел и граница на загуба.',
+      focusReasonBuy: 'ботът вижда възможен вход, но преди покупка трябва да провери разходи, риск и свободни средства.',
+      focusReasonSell: 'ботът вижда причина да затвори или намали позицията; обикновено това пази печалба или ограничава загуба.',
+      focusReasonHold: 'ботът не прави прибързан ход; държи позицията или наблюдава пазара.',
+      focusReasonWait: 'ботът чака, защото данните или пазарът още не дават прост и безопасен ход.',
+      telegramCategorySignal: 'сигнал',
+      telegramCategoryExecution: 'изпълнение',
+      telegramCategoryBlocker: 'блокада',
+      telegramCategoryRisk: 'риск',
+      telegramCategoryStatus: 'системен статус',
+      telegramCategoryOperator: 'оператор',
+      telegramCategoryTarget: 'цел',
+      telegramCategoryUnknown: 'съобщение',
+    };
 
     const appState = {
       nav: 'live',
+      lang: normalizeLang(localStorage.getItem(LANG_STORAGE_KEY)),
+      langManual: localStorage.getItem(LANG_MANUAL_KEY) === '1' || localStorage.getItem(LANG_STORAGE_KEY) !== null,
       selectedTf: '15m',
       activeTfs: ['15m', '4h', '1d'],
       focusSymbol: null,
       focusIndex: 0,
-      lastRotate: 0,
       manualFocusUntil: 0,
+      focusAdvanceReady: false,
       overlay: null,
       cache: {
         klines: new Map(),
@@ -964,15 +2100,93 @@
         runtime: null,
         settings: null,
         stream: null,
+        telegramMessages: [],
+        telegramMessagesTs: 0,
+      },
+      news: {
+        scrolling: false,
+        currentKey: '',
+        langChangesForFocus: 0,
       },
       favorites: new Set(JSON.parse(localStorage.getItem('rldc_overlay_favorites') || '[]')),
     };
+
+    function normalizeLang(lang) {
+      return SUPPORTED_LANGS.includes(String(lang || '').toLowerCase())
+        ? String(lang).toLowerCase()
+        : DEFAULT_LANG;
+    }
+
+    function t(key, params = {}) {
+      const dict = I18N[appState.lang] || I18N[DEFAULT_LANG];
+      const fallback = I18N[DEFAULT_LANG] || {};
+      const value = dict[key] ?? fallback[key] ?? key;
+      return String(value).replace(/\{([a-zA-Z0-9_]+)\}/g, (_, name) => params[name] ?? '');
+    }
+
+    function locale() {
+      return (I18N[appState.lang] || I18N[DEFAULT_LANG]).locale;
+    }
+
+    function applyLanguage() {
+      const dict = I18N[appState.lang] || I18N[DEFAULT_LANG];
+      document.documentElement.lang = dict.htmlLang;
+      document.title = t('title');
+      document.querySelectorAll('[data-i18n]').forEach((node) => {
+        node.textContent = t(node.dataset.i18n);
+      });
+      document.querySelectorAll('[data-i18n-title]').forEach((node) => {
+        node.setAttribute('title', t(node.dataset.i18nTitle));
+      });
+      document.querySelectorAll('[data-lang]').forEach((node) => {
+        const active = node.dataset.lang === appState.lang;
+        node.classList.toggle('on', active);
+        node.setAttribute('aria-pressed', active ? 'true' : 'false');
+      });
+    }
+
+    function setLanguage(lang, manual = true) {
+      const next = normalizeLang(lang);
+      if (manual) {
+        appState.langManual = true;
+        appState.news.langChangesForFocus = 0;
+        appState.news.currentKey = '';
+        localStorage.setItem(LANG_MANUAL_KEY, '1');
+        localStorage.setItem(LANG_STORAGE_KEY, next);
+      }
+      if (next === appState.lang) {
+        applyLanguage();
+        renderTopPortfolio();
+        renderInfoTicker(manual);
+        return;
+      }
+      appState.lang = next;
+      const grid = $('chartGrid');
+      if (grid) grid.dataset.renderedTfs = '';
+      applyLanguage();
+      clock();
+      if (appState.overlay) statusBadge(appState.overlay);
+      else $('apiStatus').textContent = t('loading');
+      renderTicker();
+      renderFocus();
+      renderBottom();
+      renderTopPortfolio();
+      renderInfoTicker(manual);
+      renderDrawer();
+    }
+
+    function cycleAutoLanguage() {
+      if (appState.langManual) return;
+      const currentIndex = SUPPORTED_LANGS.indexOf(appState.lang);
+      const next = SUPPORTED_LANGS[(currentIndex + 1 + SUPPORTED_LANGS.length) % SUPPORTED_LANGS.length];
+      setLanguage(next, false);
+    }
 
     function clock() {
       const d = new Date();
       const node = $('clock');
       if (!node) return;
-      node.textContent = d.toLocaleTimeString('pl-PL', { hour: '2-digit', minute: '2-digit' }) + ' ' + d.toLocaleDateString('pl-PL');
+      node.textContent = d.toLocaleTimeString(locale(), { hour: '2-digit', minute: '2-digit' }) + ' ' + d.toLocaleDateString(locale());
     }
 
     function n(v) {
@@ -982,14 +2196,14 @@
 
     function fmt(v, d = 2) {
       const x = n(v);
-      return x === null ? '--' : x.toLocaleString('pl-PL', { minimumFractionDigits: d, maximumFractionDigits: d });
+      return x === null ? '--' : x.toLocaleString(locale(), { minimumFractionDigits: d, maximumFractionDigits: d });
     }
 
     function price(v) {
       const x = n(v);
       if (x === null) return '--';
       const d = Math.abs(x) < 0.01 ? 8 : Math.abs(x) < 1 ? 5 : 2;
-      return x.toLocaleString('pl-PL', { minimumFractionDigits: Math.min(2, d), maximumFractionDigits: d });
+      return x.toLocaleString(locale(), { minimumFractionDigits: Math.min(2, d), maximumFractionDigits: d });
     }
 
     function pct(v) {
@@ -1013,33 +2227,57 @@
 
     function action(a) {
       a = String(a || 'wait').toLowerCase();
-      if (['buy', 'kup', 'kupno', 'entry', 'enter'].includes(a)) return ['KUP', 'buy'];
-      if (['sell', 'sprzedaj', 'sprzedaż', 'exit', 'close', 'blokada'].includes(a)) return ['SPRZEDAJ', 'sell'];
-      if (['hold', 'trzymaj'].includes(a)) return ['TRZYMAJ', ''];
-      if (['watch', 'observe', 'obserwuj', 'none'].includes(a)) return ['OBSERWUJ', ''];
-      if (['wait', 'czekaj', 'no_trade'].includes(a)) return ['CZEKAJ', ''];
-      if (['skip', 'blocked', 'block', 'zablokowane', 'brak danych'].includes(a)) return ['BLOKADA', 'sell'];
-      return ['CZEKAJ', ''];
+      if (['buy', 'kup', 'kupno', 'entry', 'enter', 'kaufen'].includes(a)) return [t('actionBuy'), 'buy'];
+      if (['sell', 'sprzedaj', 'sprzedaż', 'exit', 'close', 'blokada', 'verkaufen'].includes(a)) return [t('actionSell'), 'sell'];
+      if (['hold', 'trzymaj', 'halten'].includes(a)) return [t('actionHold'), ''];
+      if (['watch', 'observe', 'obserwuj', 'none', 'beobachten'].includes(a)) return [t('actionWatch'), ''];
+      if (['wait', 'czekaj', 'no_trade', 'warten'].includes(a)) return [t('actionWait'), ''];
+      if (['skip', 'blocked', 'block', 'zablokowane', 'brak danych', 'blockiert'].includes(a)) return [t('actionBlocked'), 'sell'];
+      return [t('actionWait'), ''];
     }
 
     function simpleTrendLabel(value) {
       const trend = String(value || '').toUpperCase();
-      if (trend.includes('WZROST')) return 'cena ma teraz przewagę w górę';
-      if (trend.includes('SPAD')) return 'cena ma teraz przewagę w dół';
-      if (trend.includes('BOCZ')) return 'cena idzie bardziej bokiem';
-      return 'bot nie ma jeszcze pewnej oceny kierunku';
+      if (trend.includes('WZROST') || trend.includes('UP') || trend.includes('BULL')) return t('trendUp');
+      if (trend.includes('SPAD') || trend.includes('DOWN') || trend.includes('BEAR')) return t('trendDown');
+      if (trend.includes('BOCZ') || trend.includes('SIDE') || trend.includes('FLAT')) return t('trendSideways');
+      return t('trendUnknown');
     }
 
     function queueLabel(value) {
       const state = String(value || '').toUpperCase();
-      if (state.includes('IN_POSITION')) return 'pozycja już jest otwarta';
-      if (state.includes('ENTRY_READY')) return 'prawie gotowe do wejścia';
-      if (state.includes('WATCH')) return 'bot obserwuje';
-      if (state.includes('SETUP')) return 'układa się okazja';
-      if (state.includes('BLOCK')) return 'wejście zablokowane';
-      if (state.includes('FULL_TRADING_POSITION')) return 'pełna pozycja do pilnowania';
-      if (state.includes('ORPHAN')) return 'pozycja znaleziona, ale bez pełnej historii';
-      return String(value || 'bot obserwuje').toLowerCase();
+      if (state.includes('IN_POSITION')) return t('queueInPosition');
+      if (state.includes('ENTRY_READY')) return t('queueEntryReady');
+      if (state.includes('WATCH')) return t('queueWatch');
+      if (state.includes('SETUP')) return t('queueSetup');
+      if (state.includes('BLOCK')) return t('queueBlocked');
+      if (state.includes('FULL_TRADING_POSITION')) return t('queueFullPosition');
+      if (state.includes('ORPHAN')) return t('queueOrphan');
+      return String(value || t('queueWatch')).toLowerCase();
+    }
+
+    function botStatusText(value) {
+      const status = String(value || '').toUpperCase();
+      if (status.includes('PRAC') || status.includes('WORK')) return t('botStatusWorking');
+      if (status.includes('BLOK') || status.includes('BLOCK')) return t('botStatusBlocked');
+      if (status.includes('TYLKO') || status.includes('REDUCE') || status.includes('EXIT')) return t('botStatusReduceOnly');
+      return value ? String(value).toLowerCase() : t('botStatusUnknown');
+    }
+
+    function focusReasonText(row) {
+      if (!row) return t('newsReasonFallback');
+      if (appState.lang === 'pl') {
+        const raw = cleanTelegramText(row.plain_summary || row.reason || row.plan);
+        if (raw) return raw;
+      }
+      const state = String(row.queue_state || '').toUpperCase();
+      if (state.includes('IN_POSITION') || state.includes('POSITION')) return t('focusReasonInPosition');
+      const actionValue = String(row.action || '').toLowerCase();
+      if (['buy', 'kup', 'kupno', 'entry', 'enter'].includes(actionValue)) return t('focusReasonBuy');
+      if (['sell', 'sprzedaj', 'sprzedaż', 'exit', 'close'].includes(actionValue)) return t('focusReasonSell');
+      if (['hold', 'trzymaj'].includes(actionValue)) return t('focusReasonHold');
+      if (['watch', 'observe', 'obserwuj', 'wait', 'czekaj', 'none', 'no_trade'].includes(actionValue)) return t('focusReasonWait');
+      return t('newsReasonFallback');
     }
 
     function saveFavorites() {
@@ -1098,9 +2336,16 @@
     function setFocus(symbol, manual = true) {
       if (!symbol) return;
       appState.focusSymbol = symbol;
+      const rows = getRows();
+      const idx = rows.findIndex((row) => row.symbol === symbol);
+      if (idx >= 0) appState.focusIndex = idx;
+      appState.focusAdvanceReady = false;
+      appState.news.langChangesForFocus = 0;
       if (manual) appState.manualFocusUntil = Date.now() + 45_000;
       renderTicker();
       renderFocus();
+      renderTopPortfolio();
+      renderInfoTicker(true);
       renderDrawer();
       prefetchFocusData(symbol);
     }
@@ -1112,21 +2357,35 @@
       saveFavorites();
       renderTicker();
       renderFocus();
+      renderTopPortfolio();
       renderDrawer();
     }
 
     function focusRowByRotation(rows) {
       if (!rows.length) return null;
+      if (appState.focusSymbol && !appState.focusAdvanceReady) {
+        const explicit = getRow(appState.focusSymbol);
+        if (explicit) return explicit;
+      }
       if (Date.now() < appState.manualFocusUntil) {
         const explicit = getRow(appState.focusSymbol);
         if (explicit) return explicit;
       }
       const urgent = rows.find((row) => ['buy', 'sell', 'kup', 'sprzedaj', 'entry', 'exit'].includes(String(row.action || '').toLowerCase()));
-      if (Date.now() - appState.lastRotate > rotateMs) {
-        appState.focusIndex = (appState.focusIndex + 1) % rows.length;
-        appState.lastRotate = Date.now();
+      if (!appState.focusSymbol) {
+        const first = urgent || rows[0];
+        appState.focusIndex = Math.max(0, rows.findIndex((row) => row.symbol === first.symbol));
+        appState.focusAdvanceReady = false;
+        return first;
       }
-      return rows[appState.focusIndex % rows.length] || urgent || rows[0];
+      const currentIndex = rows.findIndex((row) => row.symbol === appState.focusSymbol);
+      if (appState.focusAdvanceReady) {
+        appState.focusIndex = currentIndex >= 0 ? (currentIndex + 1) % rows.length : 0;
+        appState.focusSymbol = rows[appState.focusIndex]?.symbol || rows[0].symbol;
+        appState.focusAdvanceReady = false;
+        appState.news.langChangesForFocus = 0;
+      }
+      return rows[appState.focusIndex % rows.length] || rows[0];
     }
 
     function getSourceHealthText(st) {
@@ -1135,8 +2394,8 @@
       const total = Object.keys(statuses).length;
       const bad = total - ok;
       const lines = [
-        `Źródła OK: ${ok}/${total || 0}`,
-        st.warning || 'Adapter ma komplet odpowiedzi dla głównych endpointów.',
+        t('dataSourcesOk', { ok, total: total || 0 }),
+        st.warning || t('adapterComplete'),
       ];
       if (bad > 0) {
         const failed = Object.entries(statuses)
@@ -1177,20 +2436,20 @@
       if (tf === '1m') return '1 MIN';
       if (tf === '5m') return '5 MIN';
       if (tf === '15m') return '15 MIN';
-      if (tf === '1h') return '1 GODZ';
-      if (tf === '4h') return '4 GODZ';
-      if (tf === '1d') return '1 DZIEŃ';
+      if (tf === '1h') return t('tf1h');
+      if (tf === '4h') return t('tf4h');
+      if (tf === '1d') return t('tf1d');
       return String(tf || '').toUpperCase();
     }
 
     function formatTime(ts, tf) {
       const d = new Date(ts);
       if (!Number.isFinite(d.getTime())) return '--:--';
-      if (tf === '1d') return d.toLocaleDateString('pl-PL', { day: '2-digit', month: '2-digit' });
+      if (tf === '1d') return d.toLocaleDateString(locale(), { day: '2-digit', month: '2-digit' });
       if (tf === '4h' || tf === '1h') {
-        return d.toLocaleString('pl-PL', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
+        return d.toLocaleString(locale(), { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
       }
-      return d.toLocaleTimeString('pl-PL', { hour: '2-digit', minute: '2-digit' });
+      return d.toLocaleTimeString(locale(), { hour: '2-digit', minute: '2-digit' });
     }
 
     function renderChartGridSkeleton() {
@@ -1199,7 +2458,7 @@
       const currentKey = appState.activeTfs.join(',');
       if (grid.dataset.renderedTfs === currentKey) return;
       grid.dataset.renderedTfs = currentKey;
-      grid.innerHTML = appState.activeTfs.map((tf) => `
+      grid.innerHTML = appState.activeTfs.map((tf, index) => `
         <article class="miniChart" data-tf-card="${tf}">
           <div class="miniHead">
             <span class="miniTf">${prettyTf(tf)}</span>
@@ -1210,6 +2469,7 @@
           </div>
           <div class="miniCanvasWrap">
             <canvas id="chart-${tf}"></canvas>
+            ${index === 0 ? `<div class="gridTableOverlay" id="gridTable-${tf}"></div>` : ''}
           </div>
         </article>
       `).join('');
@@ -1421,7 +2681,7 @@
         ctx.fillStyle = 'rgba(255,217,102,.8)';
         ctx.font = 'bold 12px Arial';
         ctx.textAlign = 'center';
-        ctx.fillText('Brak danych świecowych', w / 2, h / 2);
+        ctx.fillText(t('noCandleData'), w / 2, h / 2);
         return;
       }
 
@@ -1690,15 +2950,61 @@
           priceNode.textContent = Number.isFinite(lastClose) ? price(lastClose) : '--';
         }
 
+        if (tf === appState.activeTfs[0]) {
+          renderGridTable(tf, row, range, decision, lastClose);
+        }
         drawMiniChart(tf, usable, pred, { range, decision, row, orderbook });
       });
+    }
+
+    function renderGridTable(tf, row, range, decision, lastClose) {
+      const node = $(`gridTable-${tf}`);
+      if (!node) return;
+      const grid = row?.grid_plan
+        || row?.grid
+        || row?.dynamic_grid
+        || decision?.grid_plan
+        || decision?.grid
+        || decision?.dynamic_grid
+        || appState.overlay?.active_grid_plans?.[row?.symbol]
+        || appState.overlay?.grid_plans?.[row?.symbol]
+        || {};
+      const lower = n(grid.lower_price ?? grid.lower ?? grid.lower_bound ?? grid.min_price ?? row?.grid_lower ?? row?.lower_price);
+      const upper = n(grid.upper_price ?? grid.upper ?? grid.upper_bound ?? grid.max_price ?? row?.grid_upper ?? row?.upper_price);
+      const stepPct = n(grid.step_pct ?? grid.grid_step_pct ?? row?.grid_step_pct);
+      const stepPrice = n(grid.step_price ?? grid.step ?? grid.grid_step ?? row?.grid_step);
+      const gridCount = n(grid.grid_count ?? grid.level_count ?? grid.count ?? row?.grid_count);
+      const rows = [
+        [t('gridTableNow'), price(lastClose ?? row?.price)],
+        [t('gridTableEntry'), price(row?.entry ?? decision?.cta?.entry_price ?? range?.buy_low)],
+        [t('gridTableTp'), price(row?.target ?? decision?.cta?.take_profit ?? range?.buy_target ?? range?.sell_target)],
+        [t('gridTableSl'), price(row?.stop ?? decision?.cta?.stop_loss ?? range?.sell_low)],
+      ];
+      if (lower !== null) rows.push([t('gridTableLower'), price(lower)]);
+      if (upper !== null) rows.push([t('gridTableUpper'), price(upper)]);
+      if (stepPct !== null || stepPrice !== null) {
+        rows.push([t('gridTableStep'), stepPct !== null ? `${fmt(stepPct, 2)}%` : price(stepPrice)]);
+      }
+      if (gridCount !== null) rows.push([t('gridTableCount'), fmt(gridCount, 0)]);
+      if (range?.buy_low !== undefined && range?.buy_high !== undefined) {
+        rows.push([t('gridTableBuyZone'), `${price(range.buy_low)} - ${price(range.buy_high)}`]);
+      }
+      if (range?.sell_low !== undefined && range?.sell_high !== undefined) {
+        rows.push([t('gridTableSellZone'), `${price(range.sell_low)} - ${price(range.sell_high)}`]);
+      }
+      node.innerHTML = `
+        <div class="gridTableTitle">${escapeHtml(t('gridTableTitle'))} ${escapeHtml(sym(row?.symbol || ''))}</div>
+        ${rows.map(([label, value]) => `
+          <div class="gridTableRow"><span>${escapeHtml(label)}</span><b>${escapeHtml(value)}</b></div>
+        `).join('')}
+      `;
     }
 
     function renderTicker() {
       const rows = getRows();
       const focus = getFocusRow();
       if (!rows.length) {
-        $('ticker').innerHTML = '<div class="pair focus"><div class="dot">!</div><div><div class="pname">BRAK DANYCH</div><div class="pprice">Backend nie zwrócił par</div><div class="pline wait">Sprawdź bota :8000</div><div class="pline muted">Overlay nie zmyśla wyników</div></div></div>';
+        $('ticker').innerHTML = `<div class="pair focus"><div class="dot">!</div><div><div class="pname">${t('noDataUpper')}</div><div class="pprice">${t('tickerNoPairs')}</div><div class="pline wait">${t('tickerCheckBot')}</div><div class="pline muted">${t('tickerNoFake')}</div></div></div>`;
         return;
       }
       $('ticker').innerHTML = rows.slice(0, 8).map((row) => {
@@ -1718,10 +3024,10 @@
               <div class="pname">${sym(row.symbol)}</div>
               <div class="pprice">${price(row.price)} ${row.quote || ''}</div>
               <div class="pline ${color}">${pct(change)} | ${label}</div>
-              <div class="pline muted">Kupno: ${price(row.entry)} | Cel: ${price(row.target)}</div>
+              <div class="pline muted">${t('buyLabel')}: ${price(row.entry)} | ${t('targetLabel')}: ${price(row.target)}</div>
               ${spark ? `<div style="grid-column:1/-1;margin-top:3px;opacity:.8;">${spark}</div>` : ''}
             </div>
-            <button class="favBtn${isFav}" data-fav="${escapeHtml(row.symbol)}" title="Ulubione">★</button>
+            <button class="favBtn${isFav}" data-fav="${escapeHtml(row.symbol)}" title="${t('favoritesTitle')}">★</button>
           </div>
         `;
       }).join('');
@@ -1763,20 +3069,20 @@
       const book = orderbookMeta(appState.cache.orderbook.get(requestSymbol) || appState.cache.orderbook.get(row?.symbol || '') || {});
 
       if (!row) {
-        $('symbol').textContent = 'BRAK DANYCH Z BOTA';
-        $('priceInfo').textContent = 'Backend nie zwrócił aktywnej pary ani pozycji.';
-        $('decision').textContent = 'BRAK DANYCH';
+        $('symbol').textContent = t('noBotDataUpper');
+        $('priceInfo').textContent = t('noActivePair');
+        $('decision').textContent = t('noDataUpper');
         $('decision').className = 'pill sell';
-        $('trend').textContent = 'Brak danych trendu.';
-        $('invest').textContent = 'Nie można ocenić opłacalności bez danych z bota.';
-        $('explain').textContent = 'Overlay czeka na kanoniczny stan RLdC.';
-        $('whale').textContent = 'Brak danych.';
-        $('capital').textContent = 'Minimalna sensowna kwota: --';
-        $('focusMeta').textContent = 'Brak focusu';
+        $('trend').textContent = t('noTrendData');
+        $('invest').textContent = t('cannotAssessProfitability');
+        $('explain').textContent = t('waitingCanonical');
+        $('whale').textContent = t('noDataShort');
+        $('capital').textContent = t('capitalInitial');
+        $('focusMeta').textContent = t('noFocus');
         $('pinSymbol').className = 'pin';
         $('pinSymbol').textContent = '☆';
         ['entry', 'tp', 'sl', 'conf', 'upd'].forEach((id) => { $(id).textContent = '--'; });
-        $('chartNote').textContent = 'Brak aktywnego symbolu. Po pojawieniu się par dane świec i prognoza uzupełnią się automatycznie.';
+        $('chartNote').textContent = t('noActiveSymbolChart');
         drawAllCharts(null, null);
         return;
       }
@@ -1785,20 +3091,25 @@
       const rawSignal = decision.final_signal || row.action;
       const [decisionLabel, pillClass] = action(publicAction);
       $('symbol').textContent = sym(row.symbol);
-      $('focusMeta').textContent = `${sym(row.symbol)} | wykres ${sym(requestSymbol || row.symbol)} | TF ${appState.selectedTf}`;
+      $('focusMeta').textContent = t('chartFocusMeta', { symbol: sym(row.symbol), chart: sym(requestSymbol || row.symbol), tf: appState.selectedTf });
       $('pinSymbol').className = 'pin' + (appState.favorites.has(row.symbol) ? ' on' : '');
       $('pinSymbol').textContent = appState.favorites.has(row.symbol) ? '★' : '☆';
-      $('priceInfo').innerHTML = `Cena teraz: <span class="${cls(row.change_pct)}">${price(row.price)} ${row.quote || ''}</span> | Spread: <span class="wait">${n(book.spreadBps) !== null ? fmt(book.spreadBps, 1) + ' bps' : '--'}</span> | Wynik pozycji: <span class="${cls(row.pnl_pct)}">${pct(row.pnl_pct)}</span> | Bot mówi: <span class="wait">${decisionLabel}</span>`;
+      $('priceInfo').innerHTML = t('priceInfo', {
+        price: `<span class="${cls(row.change_pct)}">${price(row.price)} ${row.quote || ''}</span>`,
+        spread: `<span class="wait">${n(book.spreadBps) !== null ? fmt(book.spreadBps, 1) + ' bps' : '--'}</span>`,
+        pnl: `<span class="${cls(row.pnl_pct)}">${pct(row.pnl_pct)}</span>`,
+        decision: `<span class="wait">${decisionLabel}</span>`,
+      });
       $('decision').textContent = decisionLabel;
       $('decision').className = 'pill ' + pillClass;
 
       let conf = decision.final_confidence ?? row.confidence ?? row.overall_decision_confidence ?? row.direction_confidence;
       if (n(conf) !== null && Number(conf) <= 1) conf = Number(conf) * 100;
-      $('trend').textContent = `${simpleTrendLabel(decision.indicators?.trend || decision.market_context?.trend || row.trend)}${n(conf) !== null ? ` | pewność bota: ${pct(conf)}` : ''}`;
+      $('trend').textContent = `${simpleTrendLabel(decision.indicators?.trend || decision.market_context?.trend || row.trend)}${n(conf) !== null ? ` | ${t('botConfidence')}: ${pct(conf)}` : ''}`;
       const blockers = Array.isArray(decision.blockers) ? decision.blockers : [];
       const summary = appState.overlay?.summary || {};
       const actionUpper = String(decision.recommended_action_label || row.action || '').toUpperCase();
-      const isExitAction = ['SPRZEDAJ', 'SELL', 'PREPARE_EXIT', 'BLOKADA'].includes(actionUpper);
+      const isExitAction = ['SPRZEDAJ', 'SELL', 'VERKAUFEN', 'PREPARE_EXIT', 'BLOKADA', 'BLOCKED', 'BLOCKIERT'].includes(actionUpper);
       const queueState = String(row.queue_state || '').toLowerCase();
       const hasPositionLike = decision.has_position === true || (
         n(row.entry) !== null &&
@@ -1806,30 +3117,36 @@
         (queueState.includes('binance_spot') || queueState.includes('in_position') || queueState.includes('position'))
       );
       if (hasPositionLike && (isExitAction || n(row.pnl_pct) !== null)) {
-        $('invest').textContent = 'Pozycja jest już otwarta. Bot zarządza wyjściem, więc nowe wejście nie jest teraz wymagane.';
+        $('invest').textContent = t('positionAlreadyOpen');
       } else if (n(row.edge) !== null || n(row.profitability_score) !== null) {
         const edge = n(row.edge) !== null ? fmt(row.edge, 2) : fmt(row.profitability_score, 0);
-        $('invest').textContent = `Ocena opłacalności po kosztach: ${edge}. ${blockers.length ? `Blokery: ${blockers.join(', ')}.` : 'Brak krytycznych blokad wejścia.'}`;
+        $('invest').textContent = t('profitabilityAfterCosts', {
+          edge,
+          details: blockers.length ? t('blockers', { items: blockers.join(', ') }) : t('noCriticalEntryBlocks'),
+        });
       } else if (summary.best_ready_symbol) {
-        $('invest').textContent = `Najbliższy sensowny kandydat wejścia teraz: ${summary.best_ready_symbol}${n(summary.best_ready_score) !== null ? ` (score ${fmt(summary.best_ready_score, 0)})` : ''}.`;
+        $('invest').textContent = t('bestReady', {
+          symbol: summary.best_ready_symbol,
+          score: n(summary.best_ready_score) !== null ? t('bestReadyScore', { score: fmt(summary.best_ready_score, 0) }) : '',
+        });
       } else {
-        $('invest').textContent = 'Bot nie podał jeszcze pełnej oceny opłacalności po kosztach dla tego symbolu.';
+        $('invest').textContent = t('noFullProfitability');
       }
-      $('explain').textContent = decision.explanation?.plain || decision.plain_explanation || row.plain_summary || row.reason || row.plan || 'Bot nie zwrócił jeszcze prostego wyjaśnienia dla tej pary.';
-      $('whale').textContent = row.whale || row.whale_state || row.anomaly || 'Brak mocnego sygnału, że duzi gracze teraz pchają cenę.';
+      $('explain').textContent = decision.explanation?.plain || decision.plain_explanation || row.plain_summary || row.reason || row.plan || t('noSimpleExplanation');
+      $('whale').textContent = row.whale || row.whale_state || row.anomaly || t('noWhaleSignal');
       const minCapital = row.min_capital ?? summary.min_buy_eur;
       const positionQty = n(decision.position?.quantity ?? row.quantity ?? row.qty);
       const entryPx = n(decision.position?.entry_price ?? row.entry);
       const positionValue = (positionQty !== null && entryPx !== null) ? positionQty * entryPx : null;
       if (hasPositionLike && n(positionValue) !== null) {
-        $('capital').textContent = 'Aktualna ekspozycja tej pozycji: ' + money(positionValue, row.capital_ccy || '€');
+        $('capital').textContent = t('currentExposure', { amount: money(positionValue, row.capital_ccy || '€') });
       } else {
-        $('capital').textContent = 'Kwota, od której taki ruch zaczyna mieć sens: ' + (minCapital ? money(minCapital, row.capital_ccy || '€') : '--');
+        $('capital').textContent = t('capitalMakesSense', { amount: minCapital ? money(minCapital, row.capital_ccy || '€') : '--' });
       }
       // Ostatni fallback: jeśli decision-view timeoutuje, ale mamy otwartą pozycję z kanonicznego live-state,
       // nie pokazuj pustego komunikatu o braku opłacalności.
-      if (hasPositionLike && String($('invest').textContent || '').includes('Bot nie podał')) {
-        $('invest').textContent = 'Pozycja jest aktywna. Bot monitoruje zarządzanie wyjściem i ryzykiem zamiast proponować nowe wejście.';
+      if (hasPositionLike && String($('invest').textContent || '').includes(t('noFullProfitability'))) {
+        $('invest').textContent = t('activePositionFallback');
       }
       $('entry').textContent = price(row.entry ?? decision.cta?.entry_price ?? range?.buy_low);
       $('tp').textContent = price(row.target ?? decision.cta?.take_profit ?? range?.buy_target ?? range?.sell_target);
@@ -1839,9 +3156,9 @@
 
       const chips = [
         `TF ${appState.selectedTf}`,
-        decision.data_quality ? `Jakość danych: ${String(decision.data_quality).toUpperCase()}` : null,
-        decision.ai_available === true ? 'Bot ma świeży sygnał' : null,
-        rawSignal && rawSignal !== publicAction ? `Surowy sygnał: ${rawSignal}` : null,
+        decision.data_quality ? `${t('dataQuality')}: ${String(decision.data_quality).toUpperCase()}` : null,
+        decision.ai_available === true ? t('freshSignal') : null,
+        rawSignal && rawSignal !== publicAction ? `${t('rawSignal')}: ${rawSignal}` : null,
         // RSI ze wskaźników decyzji lub z row
         n(decision.indicators?.rsi ?? row.rsi) !== null ? `RSI: ${fmt(decision.indicators?.rsi ?? row.rsi, 1)}` : null,
         // EMA cross signal
@@ -1859,16 +3176,75 @@
         n(book.imbalance) !== null ? `Orderbook: ${fmt(book.imbalance, 2)}` : null,
         range?.buy_low !== undefined && range?.buy_high !== undefined ? `BUY: ${price(range.buy_low)}-${price(range.buy_high)}` : null,
         range?.sell_low !== undefined && range?.sell_high !== undefined ? `SELL: ${price(range.sell_low)}-${price(range.sell_high)}` : null,
-        forecast?.forecast_1h?.direction ? `Za 1h: ${String(forecast.forecast_1h.direction).toLowerCase()}` : null,
-        forecast?.forecast_4h?.direction ? `Za 4h: ${String(forecast.forecast_4h.direction).toLowerCase()}` : null,
-        forecast?.forecast_24h?.direction ? `Za 24h: ${String(forecast.forecast_24h.direction).toLowerCase()}` : null,
+        forecast?.forecast_1h?.direction ? `${t('inHorizon', { horizon: '1h' })}: ${String(forecast.forecast_1h.direction).toLowerCase()}` : null,
+        forecast?.forecast_4h?.direction ? `${t('inHorizon', { horizon: '4h' })}: ${String(forecast.forecast_4h.direction).toLowerCase()}` : null,
+        forecast?.forecast_24h?.direction ? `${t('inHorizon', { horizon: '24h' })}: ${String(forecast.forecast_24h.direction).toLowerCase()}` : null,
         // Stale data indicator
-        appState.overlay?.stale ? '⚠ dane z cache' : null,
+        appState.overlay?.stale ? t('staleCache') : null,
       ].filter(Boolean);
       $('chips').innerHTML = chips.map((chip) => `<div>${escapeHtml(chip)}</div>`).join('');
 
-      $('chartNote').textContent = 'Każdy panel pokazuje świece OHLC, wolumen, EMA20/EMA50, pasma BUY/SELL, poziomy ENTRY/TP/SL, spread orderbooku i forecast ceny bota.';
+      $('chartNote').textContent = t('chartNoteActive');
       drawAllCharts(row, forecast);
+    }
+
+    function positionPnlValue(row) {
+      if (!row) return null;
+      const direct = n(
+        row.position_pnl_eur
+        ?? row.pnl_value_eur
+        ?? row.profit_eur
+        ?? row.profit_loss_eur
+        ?? row.realized_pnl_eur
+        ?? row.unrealized_pnl_eur
+        ?? row.net_pnl_eur
+        ?? row.pnl_eur
+        ?? row.pnl
+      );
+      if (direct !== null) return direct;
+      const current = n(row.price ?? row.current_price ?? row.mark_price);
+      const entry = n(row.entry ?? row.entry_price ?? row.avg_entry_price);
+      const qty = n(row.quantity ?? row.qty ?? row.base_qty ?? row.amount);
+      if (current !== null && entry !== null && qty !== null) return (current - entry) * qty;
+      return null;
+    }
+
+    function totalPnlValue(summary = {}, rows = getRows()) {
+      const direct = n(summary.total_pnl_eur ?? summary.pnl_eur ?? summary.net_pnl_eur);
+      if (direct !== null) return direct;
+      const values = rows.map(positionPnlValue).filter((value) => value !== null);
+      if (values.length) return values.reduce((sum, value) => sum + value, 0);
+      const totalValue = n(summary.total_value_eur ?? summary.portfolio_value_eur ?? summary.total_value);
+      const pctValue = n(summary.total_pnl_pct ?? summary.pnl_pct);
+      if (totalValue !== null && pctValue !== null && pctValue > -100) {
+        const startingValue = totalValue / (1 + pctValue / 100);
+        return totalValue - startingValue;
+      }
+      return null;
+    }
+
+    function renderTopPortfolio() {
+      const st = appState.overlay || {};
+      const summary = st.summary || {};
+      const rows = getRows();
+      const row = getFocusRow();
+      const totalValue = summary.total_value_eur ?? summary.portfolio_value_eur ?? summary.total_value;
+      const totalPnl = totalPnlValue(summary, rows);
+      const totalPnlPct = summary.total_pnl_pct ?? summary.pnl_pct;
+      const focusPnl = positionPnlValue(row);
+
+      const topValue = $('topPortfolioValue');
+      const topFocus = $('topFocusPnl');
+      const topTotal = $('topTotalPnl');
+      const topOpen = $('topOpenPositions');
+      const topMode = $('topPortfolioMode');
+      if (!topValue || !topFocus || !topTotal || !topOpen || !topMode) return;
+
+      topValue.textContent = money(totalValue, '€');
+      topFocus.innerHTML = `<span class="${cls(focusPnl ?? row?.pnl_pct)}">${row ? `${sym(row.symbol)} ${money(focusPnl, '€')} / ${pct(row.pnl_pct)}` : '--'}</span>`;
+      topTotal.innerHTML = `<span class="${cls(totalPnl ?? totalPnlPct)}">${money(totalPnl, '€')} / ${pct(totalPnlPct)}</span>`;
+      topOpen.textContent = summary.positions_count ?? summary.valid_positions_count ?? getRows().length ?? '--';
+      topMode.textContent = summary.mode || summary.trading_mode || st.mode || '--';
     }
 
     function renderBottom() {
@@ -1876,14 +3252,14 @@
       const summary = st.summary || {};
       const rows = getRows();
       $('value').textContent = money(summary.total_value_eur ?? summary.portfolio_value_eur ?? summary.total_value, summary.currency || '€');
-      const pnlValue = summary.total_pnl_eur ?? summary.pnl_eur ?? summary.net_pnl_eur;
+      const pnlValue = totalPnlValue(summary, rows);
       const pnlPct = summary.total_pnl_pct ?? summary.pnl_pct;
       $('pnl').innerHTML = `<span class="${cls(pnlValue ?? pnlPct)}">${money(pnlValue, summary.currency || '€')} / ${pct(pnlPct)}</span>`;
       $('count').textContent = summary.positions_count ?? summary.valid_positions_count ?? rows.length ?? '--';
       $('mode').textContent = summary.mode || summary.trading_mode || st.mode || '--';
-      $('botStatus').textContent = summary.bot_status || '--';
+      $('botStatus').textContent = summary.bot_status ? botStatusText(summary.bot_status) : '--';
       $('sourceHealth').textContent = getSourceHealthText(st);
-      $('narr').textContent = st.narration || st.explanation || 'Bot czeka. Dane są testowe i mogą być niekompletne albo błędne.';
+      $('narr').textContent = st.narration || st.explanation || t('botWaitingFallback');
 
       const queue = (Array.isArray(st.queue) && st.queue.length ? st.queue : rows).slice(0, 7);
       $('queue').innerHTML = queue.length
@@ -1893,7 +3269,196 @@
               <b class="${cls(row.opportunity_score ?? row.pnl_pct ?? row.change_pct)}">${n(row.opportunity_score ?? row.pnl_pct ?? row.change_pct) !== null ? fmt(row.opportunity_score ?? row.pnl_pct ?? row.change_pct, 2) : '--'}</b>
             </div>
           `).join('')
-        : '<div class="row"><span>Brak kolejki z bota</span><b>--</b></div>';
+        : `<div class="row"><span>${t('queueEmpty')}</span><b>--</b></div>`;
+    }
+
+    function guardPlainText(summary = {}, guard = {}) {
+      const noTrade = guard.no_trade_mode === true || summary.no_trade_mode === true;
+      const reduceOnly = guard.reduce_only_mode === true || summary.reduce_only_mode === true;
+      const allow = guard.allow_new_entries ?? summary.allow_new_entries;
+      if (noTrade || allow === false) return t('newsGuardNoTrade');
+      if (reduceOnly) return t('newsGuardReduceOnly');
+      return t('newsGuardNormal');
+    }
+
+    function cleanTelegramText(value) {
+      const raw = String(value || '').replace(/[━─═]+/g, ' ');
+      const lines = raw
+        .split(/\r?\n/)
+        .map((line) => line.replace(/\s+/g, ' ').trim())
+        .filter(Boolean)
+        .slice(0, 7);
+      const textValue = lines.join(' / ');
+      return textValue.length > 420 ? textValue.slice(0, 417) + '...' : textValue;
+    }
+
+    function telegramCategoryLabel(message) {
+      const category = String(message?.category || message?.msg_category || message?.message_type || 'status').toUpperCase();
+      let label = t('telegramCategoryUnknown');
+      if (category.includes('SIGNAL')) label = t('telegramCategorySignal');
+      else if (category.includes('EXECUTION')) label = t('telegramCategoryExecution');
+      else if (category.includes('BLOCK')) label = t('telegramCategoryBlocker');
+      else if (category.includes('RISK')) label = t('telegramCategoryRisk');
+      else if (category.includes('STATUS')) label = t('telegramCategoryStatus');
+      else if (category.includes('OPERATOR')) label = t('telegramCategoryOperator');
+      else if (category.includes('TARGET')) label = t('telegramCategoryTarget');
+      const source = message?.source_module ? ` / ${message.source_module}` : '';
+      return `${label}${source}`;
+    }
+
+    function inferTelegramSymbol(message, textValue) {
+      const direct = message?.symbol || message?.parsed_symbol;
+      if (direct) return sym(direct);
+      const match = String(textValue || '').match(/\b([A-Z0-9]{2,12}(?:USDC|USDT|EUR|BTC|ETH))\b/);
+      return match ? sym(match[1]) : '--';
+    }
+
+    function telegramPlainExplanation(message) {
+      const textValue = cleanTelegramText(message?.text || message?.message);
+      const upper = textValue.toUpperCase();
+      const symbol = inferTelegramSymbol(message, textValue);
+      let plain = '';
+      if (upper.includes('BUY FILLED')) {
+        plain = t('telegramBuyFilledPlain', { symbol });
+      } else if (upper.includes('LIVE BUY') || upper.includes('WEJŚCIE') || upper.includes('ENTRY')) {
+        plain = t('telegramLiveBuyPlain', { symbol });
+      } else if (upper.includes('SELL FILLED')) {
+        plain = t('telegramSellFilledPlain', { symbol });
+      } else if (upper.includes('SELL ODRZUCONE') || upper.includes('SELL REJECTED')) {
+        plain = t('telegramSellRejectedPlain', { symbol });
+      } else if (upper.includes('ROTACJA') || upper.includes('ROTATION')) {
+        plain = t('telegramRotationPlain');
+      } else if (String(message?.category || '').toUpperCase().includes('RISK') || upper.includes('BLOK') || upper.includes('RISK')) {
+        plain = t('telegramRiskPlain');
+      }
+      if (!plain) return textValue;
+      return appState.lang === 'pl' ? `${plain} ${textValue}` : plain;
+    }
+
+    function buildInfoTickerItems() {
+      const st = appState.overlay || {};
+      const summary = st.summary || {};
+      const guard = st.trading_guard || {};
+      const row = getFocusRow();
+      const items = [];
+
+      items.push(t('newsBotStatus', {
+        mode: summary.mode || summary.trading_mode || st.mode || '--',
+        status: botStatusText(summary.bot_status),
+        guard: guardPlainText(summary, guard),
+      }));
+
+      items.push(t('newsPortfolio', {
+        positions: summary.positions_count ?? summary.valid_positions_count ?? getRows().length ?? '--',
+        pnl: pct(summary.total_pnl_pct ?? summary.pnl_pct),
+      }));
+
+      if (row) {
+        items.push(t('newsFocus', {
+          symbol: sym(row.symbol),
+          decision: action(row.action)[0],
+          reason: focusReasonText(row),
+        }));
+      }
+
+      const messages = Array.isArray(appState.cache.telegramMessages)
+        ? appState.cache.telegramMessages.slice(0, 5)
+        : [];
+      if (messages.length) {
+        messages.forEach((message) => {
+          const msgText = telegramPlainExplanation(message);
+          if (!msgText) return;
+          items.push(t('newsTelegramLead', {
+            category: telegramCategoryLabel(message),
+            text: msgText,
+          }));
+        });
+      } else {
+        items.push(t('newsTelegramEmpty'));
+      }
+
+      return items.filter(Boolean);
+    }
+
+    function renderInfoTicker(force = false) {
+      const track = $('newsTrack');
+      if (!track) return;
+      const items = buildInfoTickerItems();
+      const key = `${appState.lang}|${appState.focusSymbol || ''}|${items.join('|')}`;
+      if (appState.news.scrolling && !force) return;
+      const html = items.map((item) => `
+        <span class="newsItem">
+          <span class="newsDot"></span>
+          <strong>RLdC</strong>
+          <span>${escapeHtml(item)}</span>
+        </span>
+      `).join('');
+      const renderedHtml = html || `
+        <span class="newsItem">
+          <span class="newsDot"></span>
+          <strong>RLdC</strong>
+          <span>${t('newsFallback')}</span>
+        </span>
+      `;
+      track.innerHTML = renderedHtml;
+      startNewsTicker(track, renderedHtml, key);
+    }
+
+    function startNewsTicker(track, html, key) {
+      appState.news.currentKey = key;
+      appState.news.scrolling = true;
+      track.style.animation = 'none';
+      track.style.opacity = '0';
+      track.innerHTML = html;
+      requestAnimationFrame(() => {
+        if (appState.news.currentKey !== key) return;
+        const viewport = track.parentElement?.clientWidth || window.innerWidth || 1200;
+        const distance = Math.ceil(track.scrollWidth + viewport + 80);
+        const duration = Math.max(
+          NEWS_MIN_DURATION_MS,
+          Math.min(NEWS_MAX_DURATION_MS, Math.round((distance / NEWS_PIXELS_PER_SECOND) * 1000))
+        );
+        track.style.setProperty('--news-distance', `${distance}px`);
+        track.style.animationName = 'newsScroll';
+        track.style.animationDuration = `${duration}ms`;
+        track.style.animationTimingFunction = 'linear';
+        track.style.animationIterationCount = '1';
+        track.style.animationFillMode = 'forwards';
+        track.style.opacity = '1';
+      });
+    }
+
+    function advanceFocusAfterTicker() {
+      const rows = getRows();
+      if (!rows.length) {
+        appState.focusAdvanceReady = false;
+        renderInfoTicker(true);
+        return;
+      }
+      const currentIndex = rows.findIndex((row) => row.symbol === appState.focusSymbol);
+      appState.focusIndex = currentIndex >= 0 ? (currentIndex + 1) % rows.length : 0;
+      appState.focusSymbol = rows[appState.focusIndex]?.symbol || rows[0].symbol;
+      appState.focusAdvanceReady = false;
+      appState.news.langChangesForFocus = 0;
+      renderTicker();
+      renderFocus();
+      renderBottom();
+      renderTopPortfolio();
+      renderDrawer();
+      if (appState.focusSymbol) prefetchFocusData(appState.focusSymbol);
+      renderInfoTicker(true);
+    }
+
+    function handleNewsAnimationEnd(event) {
+      if (event.target?.id !== 'newsTrack') return;
+      appState.news.scrolling = false;
+      if (!appState.langManual && appState.news.langChangesForFocus < LANG_CHANGES_PER_FOCUS) {
+        appState.news.langChangesForFocus += 1;
+        cycleAutoLanguage();
+        return;
+      }
+      appState.news.langChangesForFocus = 0;
+      advanceFocusAfterTicker();
     }
 
     function statusBadge(st) {
@@ -1901,17 +3466,17 @@
       const error = $('apiErr');
       badge.className = 'badge';
       if (st.ok && !st.partial) {
-        badge.textContent = 'POŁĄCZONO';
+        badge.textContent = t('connected');
         badge.classList.add('ok');
         error.style.display = 'none';
       } else if (st.ok && st.partial) {
-        badge.textContent = 'DANE NIEPEŁNE';
-        error.textContent = st.warning || 'Backend odpowiada, ale część danych jest niekompletna.';
+        badge.textContent = t('partialData');
+        error.textContent = st.warning || t('backendPartial');
         error.style.display = 'block';
       } else {
-        badge.textContent = 'BŁĄD DANYCH';
+        badge.textContent = t('dataError');
         badge.classList.add('bad');
-        error.textContent = st.warning || st.error || 'Brak połączenia z backendem RLdC. Overlay nie pokazuje zmyślonych danych.';
+        error.textContent = st.warning || st.error || t('backendNoConnection');
         error.style.display = 'block';
       }
     }
@@ -1922,21 +3487,26 @@
       try {
         overlay = await apiJson(OVERLAY_API);
       } catch (error) {
-        overlay = { ok: false, warning: 'Nie można pobrać /overlay/api/live-state: ' + error.message, active_pairs: [], summary: {} };
+        overlay = { ok: false, warning: t('cannotFetchLiveState', { message: error.message }), active_pairs: [], summary: {} };
       }
       const rows = Array.isArray(overlay.active_pairs) ? overlay.active_pairs : [];
       if (appState.focusIndex >= Math.max(1, rows.length)) appState.focusIndex = 0;
       const focus = focusRowByRotation(rows);
       if (focus?.symbol) appState.focusSymbol = focus.symbol;
-      overlay.fetched_at_local = new Date().toLocaleTimeString('pl-PL');
+      overlay.fetched_at_local = new Date().toLocaleTimeString(locale());
       appState.overlay = overlay;
       statusBadge(overlay);
-      $('headline').textContent = overlay.source ? `Źródło: ${overlay.source} | backend: ${overlay.backend_url || 'local'}` : 'Rynek → decyzja → pozycja → wyjaśnienie';
+      $('headline').textContent = overlay.source
+        ? t('headlineSource', { source: overlay.source, backend: overlay.backend_url || 'local' })
+        : t('headlineDefault');
       renderTicker();
       renderFocus();
       renderBottom();
+      renderTopPortfolio();
+      renderInfoTicker();
       renderDrawer();
       if (appState.focusSymbol) prefetchFocusData(appState.focusSymbol);
+      ensureTelegramMessages().then(() => renderInfoTicker());
     }
 
     function prefetchAllTickerKlines(rows) {
@@ -2062,6 +3632,20 @@
       return appState.cache.stream;
     }
 
+    async function ensureTelegramMessages() {
+      const age = Date.now() - (appState.cache.telegramMessagesTs || 0);
+      if (age > 0 && age < 30_000) return appState.cache.telegramMessages;
+      appState.cache.telegramMessagesTs = Date.now();
+      try {
+        const payload = await apiJson('/api/telegram-intel/messages?limit=8&since_minutes=720');
+        const messages = payload?.data?.messages ?? payload?.messages ?? [];
+        appState.cache.telegramMessages = Array.isArray(messages) ? messages : [];
+      } catch {
+        appState.cache.telegramMessages = [];
+      }
+      return appState.cache.telegramMessages;
+    }
+
     async function prefetchFocusData(symbol) {
       if (!symbol) return;
       const row = getRow(symbol) || { symbol };
@@ -2096,7 +3680,7 @@
       const favorites = favRows();
       const fallback = getRows().slice(0, 10);
       const list = favorites.length ? favorites : fallback;
-      const title = favorites.length ? 'Ulubione pary' : 'Brak zapisanych ulubionych — proponowane focusy';
+      const title = favorites.length ? t('favoritesTitle') : t('favoritesFallbackTitle');
       return `
         <div class="panelCard">
           <h5>${title}</h5>
@@ -2105,12 +3689,12 @@
               <button class="miniBtn" data-focus="${escapeHtml(row.symbol)}">
                 ${sym(row.symbol)} — ${action(row.action)[0]} — ${price(row.price)} ${row.quote || ''}
               </button>
-            `).join('') : '<div class="empty">Brak par do pokazania.</div>'}
+            `).join('') : `<div class="empty">${t('noPairsToShow')}</div>`}
           </div>
         </div>
         <div class="panelCard">
-          <h5>Jak to działa</h5>
-          <div class="empty">Kliknij gwiazdkę przy fokusie lub na kafelku w tickerze. Zakładka „Ulub.” przechowuje wybór lokalnie w przeglądarce/OBS.</div>
+          <h5>${t('howItWorks')}</h5>
+          <div class="empty">${t('favoritesHelp')}</div>
         </div>
       `;
     }
@@ -2120,13 +3704,13 @@
       const rows = Array.isArray(history?.data) ? history.data.slice(-12).reverse() : [];
       return `
         <div class="panelCard">
-          <h5>Historia equity (24h)</h5>
+          <h5>${t('historyTitle')}</h5>
           ${rows.length ? rows.map((row) => `
             <div class="kv">
-              <span>${new Date(row.timestamp).toLocaleString('pl-PL')}</span>
+              <span>${new Date(row.timestamp).toLocaleString(locale())}</span>
               <b>${money(row.equity)}</b>
             </div>
-          `).join('') : '<div class="empty">Brak snapshotów live w ostatnich 24h.</div>'}
+          `).join('') : `<div class="empty">${t('noLiveSnapshots')}</div>`}
         </div>
       `;
     }
@@ -2142,26 +3726,26 @@
       const horizons = decision.horizons || {};
       return `
         <div class="panelCard">
-          <h5>Kanoniczna decyzja — ${row ? sym(row.symbol) : 'brak focusu'}</h5>
+          <h5>${t('canonicalDecision', { symbol: row ? sym(row.symbol) : t('noFocusLower') })}</h5>
           ${row ? `
             <div class="grid2">
-              <div class="kv"><span>Co mówi bot</span><b>${decision.recommended_action_label || row.action || '--'}</b></div>
-              <div class="kv"><span>Stan danych</span><b>${decision.data_quality || '--'}</b></div>
-              <div class="kv"><span>Cena teraz</span><b>${price(decision.market_context?.current_price ?? decision.current_price ?? row.price)}</b></div>
-              <div class="kv"><span>Wiek danych</span><b>${decision.market_context?.data_age_s ?? decision.data_age_seconds ?? '--'} s</b></div>
+              <div class="kv"><span>${t('botSays')}</span><b>${action(decision.recommended_action_label || row.action)[0] || '--'}</b></div>
+              <div class="kv"><span>${t('dataState')}</span><b>${decision.data_quality || '--'}</b></div>
+              <div class="kv"><span>${t('priceNow')}</span><b>${price(decision.market_context?.current_price ?? decision.current_price ?? row.price)}</b></div>
+              <div class="kv"><span>${t('dataAge')}</span><b>${decision.market_context?.data_age_s ?? decision.data_age_seconds ?? '--'} s</b></div>
               <div class="kv"><span>Spread</span><b>${n(book.spreadBps) !== null ? `${fmt(book.spreadBps, 1)} bps` : '--'}</b></div>
               <div class="kv"><span>Orderbook</span><b>${n(book.imbalance) !== null ? fmt(book.imbalance, 2) : '--'}</b></div>
-              <div class="kv"><span>BUY zakres</span><b>${range ? `${price(range.buy_low)} - ${price(range.buy_high)}` : '--'}</b></div>
-              <div class="kv"><span>SELL zakres</span><b>${range ? `${price(range.sell_low)} - ${price(range.sell_high)}` : '--'}</b></div>
+              <div class="kv"><span>${t('buyRange')}</span><b>${range ? `${price(range.buy_low)} - ${price(range.buy_high)}` : '--'}</b></div>
+              <div class="kv"><span>${t('sellRange')}</span><b>${range ? `${price(range.sell_low)} - ${price(range.sell_high)}` : '--'}</b></div>
             </div>
-            <div class="narr">${escapeHtml(decision.explanation?.plain || decision.plain_explanation || row.plain_summary || decision.final_signal_reason || row.reason || 'Brak prostego wyjaśnienia.')}</div>
+            <div class="narr">${escapeHtml(decision.explanation?.plain || decision.plain_explanation || row.plain_summary || decision.final_signal_reason || row.reason || t('noPlainExplanation'))}</div>
             <div style="margin-top:8px;">
-              ${(blockers.length ? blockers : ['Brak aktywnych blokad dla tej pary.']).map((item) => `<span class="tag">${escapeHtml(item)}</span>`).join('')}
+              ${(blockers.length ? blockers : [t('noActiveBlocks')]).map((item) => `<span class="tag">${escapeHtml(item)}</span>`).join('')}
             </div>
-          ` : '<div class="empty">Wybierz parę z tickeru.</div>'}
+          ` : `<div class="empty">${t('selectPair')}</div>`}
         </div>
         <div class="panelCard">
-          <h5>Forecast / horyzonty</h5>
+          <h5>${t('forecastHorizons')}</h5>
           ${row ? `
             <div class="grid2">
               <div class="kv"><span>1h</span><b>${forecast?.forecast_1h?.direction || horizons['1h']?.direction || '--'} ${forecast?.forecast_1h?.projected_pct ? `(${pct(forecast.forecast_1h.projected_pct)})` : ''}</b></div>
@@ -2169,7 +3753,7 @@
               <div class="kv"><span>24h</span><b>${forecast?.forecast_24h?.direction || horizons['24h']?.direction || '--'} ${forecast?.forecast_24h?.projected_pct ? `(${pct(forecast.forecast_24h.projected_pct)})` : ''}</b></div>
               <div class="kv"><span>Trend</span><b>${decision.indicators?.trend || decision.market_context?.trend || row?.trend || '--'}</b></div>
             </div>
-          ` : '<div class="empty">Brak focusu dla analizy.</div>'}
+          ` : `<div class="empty">${t('noFocusAnalysis')}</div>`}
         </div>
       `;
     }
@@ -2181,20 +3765,20 @@
       const control = settings?.control?.data || {};
       return `
         <div class="panelCard">
-          <h5>Runtime / execution</h5>
+          <h5>${t('runtimeExecution')}</h5>
           ${settings ? `
             <div class="grid2">
               <div class="kv"><span>Trading mode</span><b>${config.trading_mode || '--'}</b></div>
-              <div class="kv"><span>Live trading</span><b>${config.allow_live_trading ? 'TAK' : 'NIE'}</b></div>
-              <div class="kv"><span>Execution</span><b>${config.execution_enabled ? 'TAK' : 'NIE'}</b></div>
-              <div class="kv"><span>Auto execute</span><b>${config.enable_auto_execute ? 'TAK' : 'NIE'}</b></div>
-              <div class="kv"><span>WS enabled</span><b>${control.ws_enabled ? 'TAK' : 'NIE'}</b></div>
+              <div class="kv"><span>Live trading</span><b>${config.allow_live_trading ? t('yes') : t('no')}</b></div>
+              <div class="kv"><span>Execution</span><b>${config.execution_enabled ? t('yes') : t('no')}</b></div>
+              <div class="kv"><span>Auto execute</span><b>${config.enable_auto_execute ? t('yes') : t('no')}</b></div>
+              <div class="kv"><span>WS enabled</span><b>${control.ws_enabled ? t('yes') : t('no')}</b></div>
               <div class="kv"><span>Watchlist</span><b>${Array.isArray(control.watchlist) ? control.watchlist.length : 0}</b></div>
             </div>
             <div style="margin-top:8px;">
               ${Object.entries(runtime).slice(0, 12).map(([key, value]) => `<span class="tag">${escapeHtml(key)}=${escapeHtml(typeof value === 'object' ? JSON.stringify(value) : value)}</span>`).join('')}
             </div>
-          ` : '<div class="empty">Nie udało się pobrać ustawień runtime.</div>'}
+          ` : `<div class="empty">${t('runtimeSettingsFailed')}</div>`}
         </div>
       `;
     }
@@ -2207,14 +3791,14 @@
       const overlayUrl = `${window.location.origin}/index.html`;
       return `
         <div class="panelCard">
-          <h5>Źródła streamu / publiczny dostęp</h5>
+          <h5>${t('streamSources')}</h5>
           ${data ? `
             <div class="kv"><span>Overlay URL</span><b>${escapeHtml(overlayUrl)}</b></div>
-            <div class="kv"><span>Tunel aktywny</span><b>${tunnel.active_url || tunnel.frontend_url || 'brak'}</b></div>
-            <div class="kv"><span>Backend live execution</span><b>${system.live_execution_ok ? 'TAK' : 'NIE'}</b></div>
-            <div class="kv"><span>Local IP</span><b>${ip.local?.ip || ip.local_ip || 'brak'}</b></div>
-            <div class="kv"><span>Public egress IP</span><b>${ip.public?.ip || ip.public_ip || 'brak'}</b></div>
-          ` : '<div class="empty">Nie udało się pobrać diagnostyki stream/tunnel.</div>'}
+            <div class="kv"><span>${t('tunnelActive')}</span><b>${tunnel.active_url || tunnel.frontend_url || t('noneLower')}</b></div>
+            <div class="kv"><span>Backend live execution</span><b>${system.live_execution_ok ? t('yes') : t('no')}</b></div>
+            <div class="kv"><span>Local IP</span><b>${ip.local?.ip || ip.local_ip || t('noneLower')}</b></div>
+            <div class="kv"><span>Public egress IP</span><b>${ip.public?.ip || ip.public_ip || t('noneLower')}</b></div>
+          ` : `<div class="empty">${t('streamDiagnosticsFailed')}</div>`}
         </div>
       `;
     }
@@ -2228,16 +3812,16 @@
       drawer.classList.add('visible');
 
       const titles = {
-        favorites: ['Ulubione / szybki focus', 'Lokalne zapisane symbole do OBS i operatora'],
-        history: ['Historia / equity', 'Ostatnie snapshoty portfela live z backendu'],
-        analysis: ['Analizy / decyzja', 'Kanoniczny decision-view i forecast dla focusu'],
-        settings: ['Ustawienia runtime', 'Flagi live/execution/watchlist z backendu'],
-        stream: ['Stream / tunele / adresy', 'Status tunelu, IP i źródeł overlayu'],
+        favorites: [t('drawerFavoritesTitle'), t('drawerFavoritesSub')],
+        history: [t('drawerHistoryTitle'), t('drawerHistorySub')],
+        analysis: [t('drawerAnalysisTitle'), t('drawerAnalysisSub')],
+        settings: [t('drawerSettingsTitle'), t('drawerSettingsSub')],
+        stream: [t('drawerStreamTitle'), t('drawerStreamSub')],
       };
 
-      $('drawerTitle').textContent = titles[appState.nav]?.[0] || 'Panel';
+      $('drawerTitle').textContent = titles[appState.nav]?.[0] || t('panelTitle');
       $('drawerSub').textContent = titles[appState.nav]?.[1] || 'Overlay RLdC';
-      $('drawerBody').innerHTML = '<div class="panelCard"><div class="empty">Ładowanie danych panelu...</div></div>';
+      $('drawerBody').innerHTML = `<div class="panelCard"><div class="empty">${t('panelLoading')}</div></div>`;
 
       if (appState.nav === 'history') await ensureHistory();
       if (appState.nav === 'analysis' && appState.focusSymbol) {
@@ -2254,7 +3838,7 @@
       if (appState.nav === 'analysis') html = renderAnalysisPanel();
       if (appState.nav === 'settings') html = renderSettingsPanel();
       if (appState.nav === 'stream') html = renderStreamPanel();
-      $('drawerBody').innerHTML = html || '<div class="panelCard"><div class="empty">Brak danych panelu.</div></div>';
+      $('drawerBody').innerHTML = html || `<div class="panelCard"><div class="empty">${t('panelNoData')}</div></div>`;
 
       document.querySelectorAll('[data-focus]').forEach((node) => {
         node.addEventListener('click', () => {
@@ -2268,6 +3852,10 @@
       document.querySelectorAll('.nav[data-view]').forEach((node) => {
         node.addEventListener('click', () => setNav(node.dataset.view));
       });
+      document.querySelectorAll('[data-lang]').forEach((node) => {
+        node.addEventListener('click', () => setLanguage(node.dataset.lang));
+      });
+      $('newsTrack')?.addEventListener('animationend', handleNewsAnimationEnd);
       $('closeDrawer').addEventListener('click', () => setNav('live'));
       $('pinSymbol').addEventListener('click', () => toggleFavorite(appState.focusSymbol));
       window.addEventListener('resize', () => {
@@ -2276,6 +3864,8 @@
     }
 
     bindStaticEvents();
+    applyLanguage();
+    renderInfoTicker();
     clock();
     loadOverlayState();
     setInterval(loadOverlayState, refreshMs);

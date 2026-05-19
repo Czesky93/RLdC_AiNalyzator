@@ -17,6 +17,8 @@ OVERLAY_PARSER_PID=""
 FRONTEND_URL=""
 OVERLAY_URL=""
 LAST_ERROR="null"
+NETWORK_SIGNATURE=""
+NETWORK_MONITOR_INTERVAL_SECONDS="${NETWORK_MONITOR_INTERVAL_SECONDS:-20}"
 
 mkdir -p "$(dirname "$LOG_FILE")"
 mkdir -p "$(dirname "$PUBLIC_URLS_FILE")"
@@ -83,18 +85,85 @@ parse_tunnel_output() {
     done < "$pipe"
 }
 
+detect_network_signature() {
+    local default_route=""
+    local route_to_internet=""
+    local global_addrs=""
+    local public_ip=""
+
+    default_route="$(ip -o route show default 2>/dev/null | head -1 | tr -s ' ' ' ' || true)"
+    route_to_internet="$(ip route get 1.1.1.1 2>/dev/null | head -1 | tr -s ' ' ' ' || true)"
+    global_addrs="$(ip -o -4 addr show scope global 2>/dev/null | awk '{print $2"="$4}' | sort | paste -sd ',' - || true)"
+    if command -v curl >/dev/null 2>&1; then
+        public_ip="$(curl -fsS --max-time 4 https://api.ipify.org 2>/dev/null || true)"
+    fi
+
+    printf '%s|%s|%s|%s' "$default_route" "$route_to_internet" "$global_addrs" "$public_ip"
+}
+
+kill_pid_if_running() {
+    local pid="${1:-}"
+    if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+        kill "$pid" 2>/dev/null || true
+        wait "$pid" 2>/dev/null || true
+    fi
+}
+
+stop_tunnel_pair() {
+    kill_pid_if_running "$FRONTEND_PARSER_PID"
+    kill_pid_if_running "$OVERLAY_PARSER_PID"
+    kill_pid_if_running "$FRONTEND_CLOUDFLARED_PID"
+    kill_pid_if_running "$OVERLAY_CLOUDFLARED_PID"
+    if [[ -n "${FRONTEND_PIPE:-}" ]]; then
+        rm -f "$FRONTEND_PIPE" 2>/dev/null || true
+    fi
+    if [[ -n "${OVERLAY_PIPE:-}" ]]; then
+        rm -f "$OVERLAY_PIPE" 2>/dev/null || true
+    fi
+    FRONTEND_CLOUDFLARED_PID=""
+    OVERLAY_CLOUDFLARED_PID=""
+    FRONTEND_PARSER_PID=""
+    OVERLAY_PARSER_PID=""
+    FRONTEND_PIPE=""
+    OVERLAY_PIPE=""
+}
+
+start_tunnel_pair() {
+    FRONTEND_PIPE="$(mktemp -u /tmp/rldc-quicktunnel.frontend.XXXXXX)"
+    OVERLAY_PIPE="$(mktemp -u /tmp/rldc-quicktunnel.overlay.XXXXXX)"
+    mkfifo "$FRONTEND_PIPE" "$OVERLAY_PIPE"
+
+    cloudflared tunnel --config /dev/null --no-autoupdate --url "http://localhost:$FRONTEND_PORT" > "$FRONTEND_PIPE" 2>&1 &
+    FRONTEND_CLOUDFLARED_PID=$!
+    cloudflared tunnel --config /dev/null --no-autoupdate --url "http://localhost:$OVERLAY_PORT" > "$OVERLAY_PIPE" 2>&1 &
+    OVERLAY_CLOUDFLARED_PID=$!
+
+    parse_tunnel_output frontend "$FRONTEND_PIPE" &
+    FRONTEND_PARSER_PID=$!
+    parse_tunnel_output overlay "$OVERLAY_PIPE" &
+    OVERLAY_PARSER_PID=$!
+}
+
+restart_tunnel_pair() {
+    local reason="${1:-network_change}"
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] RESTART: quicktunnel ($reason) — odświeżam linki" >> "$LOG_FILE"
+    LAST_ERROR='"network_changed"'
+    FRONTEND_URL=""
+    OVERLAY_URL=""
+    sync_runtime_state false "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    stop_tunnel_pair
+    start_tunnel_pair
+    NETWORK_SIGNATURE="$(detect_network_signature)"
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] RESTART: quicktunnel uruchomiony ponownie po zmianie sieci" >> "$LOG_FILE"
+}
+
 cleanup() {
     FRONTEND_URL=""
     OVERLAY_URL=""
     LAST_ERROR='null'
     sync_runtime_state false "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] STOP: quicktunnel zakończony" >> "$LOG_FILE"
-    for pid in "$FRONTEND_PARSER_PID" "$OVERLAY_PARSER_PID" "$FRONTEND_CLOUDFLARED_PID" "$OVERLAY_CLOUDFLARED_PID"; do
-        if [[ -n "${pid:-}" ]] && kill -0 "$pid" 2>/dev/null; then
-            kill "$pid" 2>/dev/null || true
-            wait "$pid" 2>/dev/null || true
-        fi
-    done
+    stop_tunnel_pair
 }
 
 trap cleanup EXIT SIGTERM SIGINT
@@ -102,19 +171,22 @@ trap cleanup EXIT SIGTERM SIGINT
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] START: uruchamiam cloudflared quick tunnel -> localhost:$FRONTEND_PORT oraz overlay:$OVERLAY_PORT" >> "$LOG_FILE"
 sync_runtime_state false ""
 
-FRONTEND_PIPE="$(mktemp -u /tmp/rldc-quicktunnel.frontend.XXXXXX)"
-OVERLAY_PIPE="$(mktemp -u /tmp/rldc-quicktunnel.overlay.XXXXXX)"
-mkfifo "$FRONTEND_PIPE" "$OVERLAY_PIPE"
+start_tunnel_pair
+NETWORK_SIGNATURE="$(detect_network_signature)"
+echo "[$(date '+%Y-%m-%d %H:%M:%S')] NETWORK: fingerprint=$NETWORK_SIGNATURE" >> "$LOG_FILE"
 
-cloudflared tunnel --config /dev/null --no-autoupdate --url "http://localhost:$FRONTEND_PORT" > "$FRONTEND_PIPE" 2>&1 &
-FRONTEND_CLOUDFLARED_PID=$!
-cloudflared tunnel --config /dev/null --no-autoupdate --url "http://localhost:$OVERLAY_PORT" > "$OVERLAY_PIPE" 2>&1 &
-OVERLAY_CLOUDFLARED_PID=$!
+while true; do
+    sleep "$NETWORK_MONITOR_INTERVAL_SECONDS"
 
-parse_tunnel_output frontend "$FRONTEND_PIPE" &
-FRONTEND_PARSER_PID=$!
-parse_tunnel_output overlay "$OVERLAY_PIPE" &
-OVERLAY_PARSER_PID=$!
+    current_signature="$(detect_network_signature)"
+    if [[ -n "$NETWORK_SIGNATURE" && "$current_signature" != "$NETWORK_SIGNATURE" ]]; then
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] NETWORK_CHANGE: wykryto zmianę sieci" >> "$LOG_FILE"
+        restart_tunnel_pair "network_signature_changed"
+        continue
+    fi
 
-wait "$FRONTEND_CLOUDFLARED_PID" "$OVERLAY_CLOUDFLARED_PID"
-rm -f "$FRONTEND_PIPE" "$OVERLAY_PIPE"
+    if ! kill -0 "$FRONTEND_CLOUDFLARED_PID" 2>/dev/null || ! kill -0 "$OVERLAY_CLOUDFLARED_PID" 2>/dev/null; then
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] RESTART: quicktunnel proces padł — odtwarzam linki" >> "$LOG_FILE"
+        restart_tunnel_pair "cloudflared_process_exit"
+    fi
+done

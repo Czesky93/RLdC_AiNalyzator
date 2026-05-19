@@ -121,6 +121,38 @@ EXECUTABLE_PENDING_STATUSES = {"PENDING_CONFIRMED", "CONFIRMED"}
 TRADE_PLAN_REASON_PREFIX = "RLDC_TRADE_PLAN="
 
 
+def is_dynamic_grid_position(position: Optional[Position]) -> bool:
+    """
+    Sprawdź czy pozycja należy do dynamic_grid strategy.
+    
+    Logika fallback:
+    1. Jeśli exit_plan_json zawiera {"strategy": "dynamic_grid"} → True
+    2. Jeśli entry_reason_code zawiera "dynamic_grid" → True
+    3. Inaczej → False
+    
+    T-158.1: Legacy exit guard relies on this to skip SL/TP/trailing for grid positions.
+    """
+    if not position:
+        return False
+
+    # Sprawdzenie exit_plan_json
+    raw_plan = getattr(position, "exit_plan_json", None)
+    if raw_plan:
+        try:
+            plan_data = json.loads(raw_plan) if isinstance(raw_plan, str) else raw_plan
+            if isinstance(plan_data, dict) and plan_data.get("strategy") == "dynamic_grid":
+                return True
+        except Exception:
+            pass
+
+    # Fallback: sprawdzenie entry_reason_code
+    reason = getattr(position, "entry_reason_code", None) or ""
+    if "dynamic_grid" in str(reason).lower():
+        return True
+
+    return False
+
+
 def _load_timeframe_indicators(
     db: Session,
     symbol: str,
@@ -4762,6 +4794,14 @@ class DataCollector:
 
             # ━━━ WARSTWA 1: HARD EXIT — Stop Loss ━━━━━━━━━━━━━━━━━━━━━━━━━
             if price <= stop_loss:
+                # LEGACY EXIT GUARD: skip SL for dynamic_grid positions
+                if config.get("trading_system") == "dynamic_grid" and is_dynamic_grid_position(pos):
+                    logger.info(
+                        "LEGACY_EXIT_GUARD: SL skipped for dynamic_grid position %s @ %.6f (SL=%.6f) — grid manages exits",
+                        sym, price, stop_loss,
+                    )
+                    continue
+
                 reason_code = "stop_loss_hit"
                 # Sprawdź Binance rejection cooldown — jeśli ostatnie zlecenie SELL
                 # było odrzucone przez Binance, nie twórz nowego przez N sekund.
@@ -4867,6 +4907,14 @@ class DataCollector:
 
             # ━━━ WARSTWA 2: TRAILING STOP ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
             if trailing_active and trailing_stop and price <= trailing_stop:
+                # LEGACY EXIT GUARD: skip trailing for dynamic_grid positions
+                if config.get("trading_system") == "dynamic_grid" and is_dynamic_grid_position(pos):
+                    logger.info(
+                        "LEGACY_EXIT_GUARD: Trailing stop skipped for dynamic_grid position %s @ %.6f (trail=%.6f) — grid manages exits",
+                        sym, price, trailing_stop,
+                    )
+                    continue
+
                 reason_code = "trailing_lock_profit"
                 # Rejection cooldown check
                 _rej_cd_key = f"{_mode}:{sym}:SELL"
@@ -4950,6 +4998,14 @@ class DataCollector:
 
             # ━━━ WARSTWA 3: TAKE PROFIT (częściowy lub pełny) ━━━━━━━━━━━━━
             if price >= take_profit:
+                # LEGACY EXIT GUARD: skip TP for dynamic_grid positions
+                if config.get("trading_system") == "dynamic_grid" and is_dynamic_grid_position(pos):
+                    logger.info(
+                        "LEGACY_EXIT_GUARD: TP skipped for dynamic_grid position %s @ %.6f (TP=%.6f) — grid manages exits",
+                        sym, price, take_profit,
+                    )
+                    continue
+
                 # Rejection cooldown check (dla TP też — ten sam SELL)
                 _rej_cd_key = f"{_mode}:{sym}:SELL"
                 _rej_last = self._binance_rejection_cooldown.get(_rej_cd_key)
