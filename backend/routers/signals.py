@@ -1469,6 +1469,7 @@ _REASON_PL = {
     "tier_daily_trade_limit":            "❌ Dzienny limit transakcji dla tego tieru osiągnięty",
     "daily_loss_brake_active":           "🛑 Dzienny limit strat — bot wstrzymał handel",
     "risk_evaluation_failed":            "❌ Ocena ryzyka negatywna",
+    "inconsistent_portfolio_sync":       "🛑 LIVE zablokowany — niespójny sync pozycji Binance ↔ lokalna baza",
     "no_trace":                          "ℹ️ Brak decyzji w tym oknie — czeka na następny cykl collectora",
 }
 
@@ -1805,4 +1806,3 @@ def get_entry_readiness(
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Błąd entry-readiness: {str(e)}")
-

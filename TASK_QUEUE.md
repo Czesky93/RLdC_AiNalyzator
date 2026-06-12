@@ -8,9 +8,7 @@
 
 ### HIGH
 
-| ID | Zadanie | Plik/Moduł | Wpływ | Status |
-|----|---------|------------|-------|--------|
-| T-14 | Dodać hard gate LIVE: blokada nowych wejść gdy `sync_stability` jest `inconsistent` | `backend/collector.py`, `backend/reporting.py` | Ryzyko niespójnych pozycji i błędnych decyzji | DO ZROBIENIA |
+*Brak otwartych zadań wysokiego priorytetu.*
 
 ### MEDIUM
 
@@ -38,6 +36,7 @@
 | T-11 | Audyt widżetów WWW i endpointów (status + krytyczność) | 12.06 sesja 3 | bieżący |
 | T-12 | Przywrócenie helpera API (`getApiBase`, `withAdminToken`, `getAdminToken`) | 12.06 sesja 3 | bieżący |
 | T-13 | Endpoint `GET /api/account/analytics/best-bot-kpi` + metryki overtrading/sync | 12.06 sesja 3 | bieżący |
+| T-14 | Hard gate LIVE: blokada nowych wejść przy `sync_stability=inconsistent` + `reason_code=inconsistent_portfolio_sync` | 12.06 sesja 4 | bieżący |
 
 ---
 

@@ -4,6 +4,23 @@
 
 ---
 
+## SESJA 2026-06-12 (Sesja 4 — LIVE sync hard gate)
+
+| Plik | Zmiana | Status |
+|------|--------|--------|
+| `backend/collector.py` | Dodano hard gate LIVE: `_screen_entry_candidates` blokuje nowe wejścia przy `sync_stability.status=inconsistent`; zapisuje `reason_code=inconsistent_portfolio_sync` z detalami mismatch do `DecisionTrace` | ✅ GOTOWE |
+| `backend/routers/signals.py` | Dodano mapowanie `inconsistent_portfolio_sync` → czytelny `reason_pl` w execution-trace | ✅ GOTOWE |
+| `tests/test_smoke.py` | Dodano test `test_live_sync_inconsistent_blocks_new_entries` (weryfikacja blokady LIVE) | ✅ GOTOWE |
+| `PROJECT_AUDIT_MASTER.md` | Aktualizacja statusu audytu i zamknięcie HIGH-3/TASK-14 | ✅ GOTOWE |
+| `TASK_QUEUE.md` | Przeniesiono T-14 do DONE, sekcja HIGH wyczyszczona | ✅ GOTOWE |
+
+### Testy sesji
+- `DISABLE_COLLECTOR=true .venv/bin/pytest tests/test_smoke.py --tb=short -q` → **182/182 ✅**
+- `npm run lint` (web_portal) → ✅
+- `npm run build` (web_portal) → ✅
+
+---
+
 ## SESJA 2026-03-26 (Sesja A — Setup, Audyt backendowy, Pierwsze poprawki)
 
 ### [2026-03-26] — Audyt i pierwsze naprawki backendu

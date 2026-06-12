@@ -1,8 +1,8 @@
 # PROJECT_AUDIT_MASTER.md — RLdC Trading BOT
 
-**Data audytu:** 12 czerwca 2026 (aktualizacja: sesja 3)
+**Data audytu:** 12 czerwca 2026 (aktualizacja: sesja 4)
 **Wersja:** v0.7 beta
-**Testy:** 181/181 PASSED
+**Testy:** 182/182 PASSED
 **TypeScript:** PASS (po naprawie `web_portal/src/lib/api.ts`)
 **Tryb:** TRADING_MODE=live, ALLOW_LIVE_TRADING=true, AI_PROVIDER=heuristic
 
@@ -117,7 +117,7 @@ Wszystkie 4 piony (A-D) są w znacznym stopniu domknięte.
 
 | Plik | Testy | Stan |
 |------|-------|------|
-| `test_smoke.py` | 181 testów (175 smoke + 6 akceptacyjnych v0.7) | ✅ WSZYSTKIE PRZECHODZĄ |
+| `test_smoke.py` | 182 testy (176 smoke + 6 akceptacyjnych v0.7) | ✅ WSZYSTKIE PRZECHODZĄ |
 
 ### Inne
 
@@ -167,6 +167,11 @@ Aktualna sesja nie wykazała nowego krytycznego błędu logiki tradingowej.
 - **Status:** ✅ NAPRAWIONE
 - **Fix:** przywrócono centralny helper `getApiBase`, `getAdminToken`, `withAdminToken`.
 
+### HIGH-3: Brak hard gate LIVE przy niespójnym sync pozycji (zamknięte w sesji 4)
+- **Plik:** `backend/collector.py`, `backend/routers/signals.py`
+- **Status:** ✅ NAPRAWIONE
+- **Fix:** dodano blokadę nowych wejść LIVE przy `sync_stability.status=inconsistent` z `reason_code=inconsistent_portfolio_sync` i diagnostyką w `DecisionTrace`.
+
 ---
 
 ## 5. Długi techniczne
@@ -212,6 +217,7 @@ Aktualna sesja nie wykazała nowego krytycznego błędu logiki tradingowej.
 | TASK-11 | Audyt widżetów WWW i endpointów (krytyczność + status) | HIGH | `PROJECT_AUDIT_MASTER.md` | ✅ DONE (sesja 3) |
 | TASK-12 | Przywrócenie `web_portal/src/lib/api.ts` + naprawa builda WWW | HIGH | `web_portal/src/lib/api.ts` | ✅ DONE (sesja 3) |
 | TASK-13 | Twardy endpoint KPI `best-bot-kpi` + overtrading/sync stability | HIGH | `backend/reporting.py`, `backend/routers/account.py` | ✅ DONE (sesja 3) |
+| TASK-14 | Hard gate LIVE: blokada nowych wejść gdy `sync_stability` jest `inconsistent` | HIGH | `backend/collector.py`, `backend/routers/signals.py` | ✅ DONE (sesja 4) |
 | ~~TASK-03~~ | ~~Telegram /confirm i /reject~~ | ~~HIGH~~ | `telegram_bot/bot.py` | ✅ już zaimplementowane (false positive) |
 | ~~TASK-04~~ | ~~Qty sizing: odejmij prowizję~~ | ~~MEDIUM~~ | `collector.py` | ✅ DONE (sesja 2) |
 | ~~TASK-05~~ | ~~CORS allow_origins → proper domains~~ | ~~LOW~~ | `app.py` | ✅ DONE (sesja 12.06) |
@@ -234,6 +240,7 @@ Aktualna sesja nie wykazała nowego krytycznego błędu logiki tradingowej.
 | 01.04 iter5 | Portfolio wealth + equity curve + forecast | ✅ |
 | 01.04 iter4 | ATR multipliers, SL cooldown, soft RSI | ✅ |
 | 31.03 iter3 | WAL mode, async fix, 181 testów | ✅ |
+| 12.06 sesja 4 | LIVE hard gate `inconsistent_portfolio_sync` + smoke test | ✅ |
 
 ---
 
@@ -251,20 +258,20 @@ Aktualna sesja nie wykazała nowego krytycznego błędu logiki tradingowej.
 
 ---
 
-## 11. Ostatnia sesja — 12 czerwca 2026 (sesja 3)
+## 11. Ostatnia sesja — 12 czerwca 2026 (sesja 4)
 
 ### Co zmieniono
-- Zweryfikowano pełny przepływ widżetów WWW i ich endpointów oraz dodano tabelę audytową (krytyczność + status działania)
-- Przywrócono brakujący moduł `web_portal/src/lib/api.ts` (getApiBase, withAdminToken, getAdminToken), który blokował build
-- Dodano twardy endpoint KPI: `GET /api/account/analytics/best-bot-kpi`
-- Rozszerzono `performance_overview` o metryki: `overtrading_score`, `trades_24h`, `target_trades_24h`, `activity_blocks_24h`, `sync_stability`
+- Dodano hard gate LIVE w `collector._screen_entry_candidates`: brak nowych wejść, gdy `sync_stability=inconsistent`
+- Dodano `reason_code=inconsistent_portfolio_sync` z detalami mismatch do `DecisionTrace`
+- Uzupełniono mapowanie `reason_code -> reason_pl` w `backend/routers/signals.py`
+- Dodano test smoke `test_live_sync_inconsistent_blocks_new_entries`
 
 ### Co przetestowano
-- `DISABLE_COLLECTOR=true python -m pytest tests/test_smoke.py -q` → 181/181 ✅
+- `DISABLE_COLLECTOR=true .venv/bin/pytest tests/test_smoke.py -q` → 182/182 ✅
 - `npm run lint` (web_portal) ✅
 - `npm run build` (web_portal) ✅
 
 ### Co zostało
 - DEBT-5: LIMIT orders w LIVE (LOW)
 - DEBT-6: AccountSummary widget cleanup (LOW)
-- Utrzymać monitoring metryki `sync_stability` w trybie LIVE (operacyjnie)
+- Monitoring `sync_stability` w LIVE nadal wymagany operacyjnie (gate już aktywny)

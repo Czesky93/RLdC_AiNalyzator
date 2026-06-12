@@ -46,6 +46,7 @@ from backend.database import utc_now_naive
 from backend.experiments import compare_snapshots_for_experiment
 from backend.recommendations import evaluate_recommendation
 from backend.runtime_settings import apply_runtime_updates, build_runtime_state
+from backend.collector import DataCollector
 
 
 import pytest
@@ -639,6 +640,75 @@ def test_account_analytics_risk_effectiveness_endpoint(client):
     assert int(blocked.get("loss_streak_gate") or 0) >= 1
     assert int(blocked.get("kill_switch_gate") or 0) >= 1
     assert int(data.get("kill_switch_activations") or 0) >= 1
+
+
+def test_live_sync_inconsistent_blocks_new_entries(monkeypatch):
+    collector = DataCollector.__new__(DataCollector)
+    collector.watchlist = ["BTCEUR", "ETHEUR", "BTCUSDC"]
+    collector._active_mode = "live"
+    traces = []
+    collector._trace_decision = lambda _db, **kwargs: traces.append(kwargs)
+
+    from backend import reporting as reporting_module
+
+    monkeypatch.setattr(
+        reporting_module,
+        "_live_sync_stability",
+        lambda _db, mode: {
+            "status": "inconsistent",
+            "score": 0.4,
+            "in_binance_not_local": ["BTCEUR"],
+            "in_local_not_binance": ["ETHEUR"],
+            "mismatch_count": 2,
+        },
+    )
+
+    tc = {
+        "now": utc_now_naive(),
+        "config": {},
+        "runtime_ctx": {"snapshot_id": "sync-gate-test"},
+        "demo_quote_ccy": "EUR",
+        "equity": 1000.0,
+        "base_qty": 0.01,
+        "base_min_confidence": 0.55,
+        "max_signal_age": 3600,
+        "min_klines": 60,
+        "atr_stop_mult": 2.0,
+        "atr_take_mult": 3.5,
+        "base_risk_per_trade": 0.01,
+        "base_cooldown": 60,
+        "crash_window_minutes": 60,
+        "crash_drop_pct": 6.0,
+        "crash_cooldown_seconds": 7200,
+        "extreme_margin_pct": 0.02,
+        "extreme_min_conf": 0.9,
+        "extreme_min_rating": 4,
+        "max_qty": 1.0,
+        "min_qty": 0.001,
+        "pending_cooldown_seconds": 300,
+        "range_map": {},
+        "maker_fee_rate": 0.001,
+        "taker_fee_rate": 0.001,
+        "slippage_bps": 5.0,
+        "spread_buffer_bps": 3.0,
+        "min_edge_multiplier": 2.5,
+        "min_expected_rr": 1.5,
+        "min_order_notional": 25.0,
+        "_has_active_pending": lambda _sym: False,
+        "_pending_in_cooldown": lambda _sym: False,
+        "available_cash": 1000.0,
+        "mode": "live",
+        "positions": [],
+    }
+
+    db = SessionLocal()
+    try:
+        created = collector._screen_entry_candidates(db, tc)
+        assert created == 0
+        assert len(traces) == 2
+        assert {t.get("reason_code") for t in traces} == {"inconsistent_portfolio_sync"}
+    finally:
+        db.close()
 
 
 def test_portfolio_summary_uses_accounting_fields(client):
