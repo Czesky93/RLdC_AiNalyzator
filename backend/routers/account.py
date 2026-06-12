@@ -11,6 +11,7 @@ import os
 import re
 import requests
 import hashlib
+import logging
 
 from backend.database import get_db, AccountSnapshot, Position, SystemLog, MarketData, Order, CostLedger, PendingOrder, RuntimeSetting, DecisionTrace, reset_database, utc_now_naive
 from backend.binance_client import get_binance_client
@@ -104,6 +105,7 @@ from backend.candidate_validation import generate_experiment_feed, experiment_fe
 from backend.runtime_settings import RuntimeSettingsError
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 _openai_status_cache: dict = {"ts": None, "data": None}
 _demo_state_cache: dict = {"ts": None, "data": None}
@@ -700,8 +702,37 @@ def get_analytics_overview(
             "mode": mode,
             "data": performance_overview(db, mode=mode),
         }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error getting analytics overview: {str(e)}")
+    except Exception:
+        logger.exception("analytics_overview_error")
+        raise HTTPException(status_code=500, detail="Error getting analytics overview")
+
+
+@router.get("/analytics/best-bot-kpi")
+def get_best_bot_kpi(
+    mode: str = Query("demo", description="Tryb: demo lub live"),
+    db: Session = Depends(get_db),
+):
+    """
+    Twarde KPI „best bot”:
+    net PnL po kosztach, max drawdown, profit factor, overtrading, stabilność sync.
+    """
+    try:
+        overview = performance_overview(db, mode=mode)
+        data = {
+            "net_pnl_after_costs": overview.get("net_pnl"),
+            "max_drawdown_net": overview.get("drawdown_net"),
+            "profit_factor_net": overview.get("profit_factor_net"),
+            "overtrading_score": overview.get("overtrading_score"),
+            "sync_stability": overview.get("sync_stability"),
+            "trades_24h": overview.get("trades_24h"),
+            "target_trades_24h": overview.get("target_trades_24h"),
+            "activity_blocks_24h": overview.get("activity_blocks_24h"),
+            "cost_leakage_ratio": overview.get("cost_leakage_ratio"),
+        }
+        return {"success": True, "mode": mode, "data": data}
+    except Exception:
+        logger.exception("best_bot_kpi_error")
+        raise HTTPException(status_code=500, detail="Error getting best-bot KPI")
 
 
 @router.get("/analytics/risk-effectiveness")
@@ -718,8 +749,9 @@ def get_risk_effectiveness(
             "mode": mode,
             "data": risk_effectiveness_report(db, mode=mode),
         }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error getting risk effectiveness analytics: {str(e)}")
+    except Exception:
+        logger.exception("risk_effectiveness_error")
+        raise HTTPException(status_code=500, detail="Error getting risk effectiveness analytics")
 
 
 @router.get("/analytics")
@@ -736,8 +768,9 @@ def get_analytics_bundle(
             "mode": mode,
             "data": analytics_bundle(db, mode=mode),
         }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error getting analytics bundle: {str(e)}")
+    except Exception:
+        logger.exception("analytics_bundle_error")
+        raise HTTPException(status_code=500, detail="Error getting analytics bundle")
 
 
 @router.get("/analytics/config-snapshots/compare")

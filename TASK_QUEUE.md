@@ -8,7 +8,7 @@
 
 ### HIGH
 
-*Brak otwartych zadań o wysokim priorytecie.*
+*Brak otwartych zadań wysokiego priorytetu.*
 
 ### MEDIUM
 
@@ -18,10 +18,9 @@
 
 | ID | Zadanie | Plik/Moduł | Wpływ | Status |
 |----|---------|------------|-------|--------|
-| T-05 | CORS allow_origins=["*"] → domeny produkcyjne | `app.py` | Bezpieczeństwo, OWASP | DO ZROBIENIA |
 | T-07 | Usunięcie nieużywanego widgetu AccountSummary | `widgets/AccountSummary.tsx` | Czystość kodu | DO ZROBIENIA |
 
-### DONE (zamknięte w sesji 2)
+### DONE (zamknięte)
 
 | ID | Zadanie | Zamknięte | Commit |
 |----|---------|----------|--------|
@@ -30,6 +29,14 @@
 | T-03 | Telegram /confirm /reject | — | Już było zaimplementowane (false positive) |
 | T-04 | Qty sizing: prowizja w alokacji | 02.04 sesja 2 | bieżący |
 | T-06 | Telegram governance stubs | — | Już było zaimplementowane (false positive) |
+| T-05 | CORS allow_origins=["*"] → konfiguracja z ENV | 12.06 sesja 1 | bieżący |
+| T-08 | Przywrócenie `web_portal/src/lib/api.ts` (build fix) | 12.06 sesja 1 | bieżący |
+| T-09 | Stabilizacja Binance init offline (`ping=False`) | 12.06 sesja 2 | bieżący |
+| T-10 | Naprawa skryptu `npm run lint` (TS check) | 12.06 sesja 2 | bieżący |
+| T-11 | Audyt widżetów WWW i endpointów (status + krytyczność) | 12.06 sesja 3 | bieżący |
+| T-12 | Przywrócenie helpera API (`getApiBase`, `withAdminToken`, `getAdminToken`) | 12.06 sesja 3 | bieżący |
+| T-13 | Endpoint `GET /api/account/analytics/best-bot-kpi` + metryki overtrading/sync | 12.06 sesja 3 | bieżący |
+| T-14 | Hard gate LIVE: blokada nowych wejść przy `sync_stability=inconsistent` + `reason_code=inconsistent_portfolio_sync` | 12.06 sesja 4 | bieżący |
 
 ---
 
@@ -187,5 +194,3 @@ Otwórz `http://192.168.0.109:3000` i sprawdź: **Ryzyko, Rynki, Portfel, Strate
 1. Dopracować widok `PositionAnalysisView` — WLFI ma 0.01 szt; podsumowanie portfela powinno uwzględniać REAL (3260 szt WLFI).
 2. Dodać nową demo-pozycję BTCEUR z aktualną ceną zakupu i sprawdzić, czy analiza sugeruje decyzję poprawnie.
 3. Poprawić DashboardV2View — tabela "Positions" ma angielskie nagłówki (`Symbol`, `Side`, `Qty`).
-
-

@@ -2002,6 +2002,48 @@ class DataCollector:
 
         available_cash = tc["available_cash"]
         _mode_label = str(tc.get("mode") or "demo").upper()
+        current_mode = str(tc.get("mode") or "demo").lower()
+
+        # HARD GATE LIVE: gdy sync Binance↔lokalna tabela pozycji jest niespójny,
+        # nie otwieraj nowych wejść do czasu diagnostyki.
+        if current_mode == "live":
+            try:
+                from backend.reporting import _live_sync_stability
+
+                sync_stability = _live_sync_stability(db, mode="live")
+            except Exception:
+                sync_stability = {"status": "unavailable", "score": None, "mismatch_count": 0}
+            sync_status = str(sync_stability.get("status") or "").lower()
+            if sync_status == "inconsistent":
+                mismatch_symbols = sorted(
+                    set(sync_stability.get("in_binance_not_local") or [])
+                    | set(sync_stability.get("in_local_not_binance") or [])
+                )
+                for symbol in self.watchlist:
+                    sym_norm = (symbol or "").strip().upper().replace("/", "").replace("-", "")
+                    if not sym_norm.endswith(demo_quote_ccy):
+                        continue
+                    self._trace_decision(
+                        db,
+                        symbol=symbol,
+                        action="SKIP",
+                        reason_code="inconsistent_portfolio_sync",
+                        runtime_ctx=runtime_ctx,
+                        mode=current_mode,
+                        risk_check={"sync_stability": sync_stability},
+                        execution_check={"eligible": False},
+                        details={
+                            "sync_stability": sync_stability,
+                            "mismatch_symbols": mismatch_symbols,
+                        },
+                    )
+                log_to_db(
+                    "WARNING",
+                    "screen_candidates",
+                    f"[LIVE] Blokada nowych wejść: sync_stability=inconsistent (mismatch_count={int(sync_stability.get('mismatch_count') or 0)}).",
+                    db=db,
+                )
+                return 0
 
         # Diagnostyka: ostrzeż gdy brak gotówki na nowe pozycje (rotacja kapitału nie pomogła)
         if available_cash < min_order_notional:
@@ -2011,7 +2053,7 @@ class DataCollector:
                 f"— pomijam screening. Jeśli LIVE: uzupełnij saldo Binance; jeśli DEMO: sprawdź reset balansu.",
                 db=db,
             )
-            return
+            return 0
 
         # Zbieramy kandydatów, sortujemy po expected value netto, potem tworzymy pending
         candidates: list[dict] = []

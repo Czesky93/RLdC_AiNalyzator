@@ -146,6 +146,7 @@ Komendy bota:
 | `GET /api/market/scanner` | Top 5 par do handlu |
 | `POST /api/control/state` | Zmiana parametrów, start/stop |
 | `GET /api/reporting/analytics` | Pełny raport analityczny |
+| `GET /api/account/analytics/best-bot-kpi` | Twarde KPI: net PnL, drawdown, profit factor, overtrading, sync |
 
 ## Design System
 

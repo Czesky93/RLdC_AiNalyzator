@@ -1,9 +1,9 @@
 # PROJECT_AUDIT_MASTER.md — RLdC Trading BOT
 
-**Data audytu:** 2 kwietnia 2026 (aktualizacja: sesja 2)
+**Data audytu:** 12 czerwca 2026 (aktualizacja: sesja 4)
 **Wersja:** v0.7 beta
-**Testy:** 181/181 PASSED
-**TypeScript:** 0 błędów
+**Testy:** 182/182 PASSED
+**TypeScript:** PASS (po naprawie `web_portal/src/lib/api.ts`)
 **Tryb:** TRADING_MODE=live, ALLOW_LIVE_TRADING=true, AI_PROVIDER=heuristic
 
 ---
@@ -22,7 +22,7 @@ Wszystkie 4 piony (A-D) są w znacznym stopniu domknięte.
 - Koszty (maker/taker fee, slippage, spread) w CostLedger
 - Equity, free cash, realized/unrealized PnL
 - Decision trace z 20+ reason_codes (po polsku)
-- WWW — 18 widoków, wszystkie endpointy OK
+- WWW — 18 widoków, endpointy podpięte przez centralny helper API
 - Telegram — alerty entry+exit, portfolio, pozycje, sygnały
 - _learn_from_history z persistencją do RuntimeSetting
 - LIVE place_order → Binance API (MARKET)
@@ -91,6 +91,22 @@ Wszystkie 4 piony (A-D) są w znacznym stopniu domknięte.
 | `widgets/*.tsx` | 11 widgetów (AccountMetrics, EquityCurve, etc.) | ✅ DZIAŁA |
 | `lib/api.ts` | getApiBase() helper | ✅ DZIAŁA |
 
+#### Audyt widżetów i endpointów (sesja 3)
+
+| Widżet / widok | Endpointy kluczowe | Status | Wpływ |
+|---|---|---|---|
+| Topbar | `/api/control/state` | ✅ działa | Krytyczny (status runtime, tryb handlu) |
+| DecisionsRiskPanel | `/api/orders/pending`, `/api/market/ranges`, `/api/account/risk`, `/api/control/state` | ✅ działa | Krytyczny (potwierdzanie/odrzucanie zleceń) |
+| OpenOrders | `/api/positions`, `/api/positions/{id}/close`, `/api/positions/close-all` | ✅ działa | Krytyczny (zamykanie pozycji) |
+| EquityCurve | `/api/account/history` | ✅ działa | Wysoki (monitoring equity i drawdown) |
+| TradingView | `/api/market/kline`, `/api/market/ranges`, `/api/market/summary` | ✅ działa | Wysoki (kontekst wejścia/wyjścia) |
+| MarketInsights | `/api/signals/latest` | ✅ działa | Wysoki (ocena jakości sygnałów) |
+| PositionsTable | `/api/positions` | ✅ działa | Wysoki (stan pozycji) |
+| MarketOverview | `/api/market/summary` | ✅ działa | Średni |
+| DecisionRisk | `/api/market/ranges`, `/api/account/risk` | ✅ działa | Średni |
+| AccountSummary | `/api/account/summary` | ⚠️ częściowo (widget technicznie działa, ale nieużywany w głównym flow) | Niski (dług UI) |
+| MainContent (widoki analityczne) | m.in. `/api/account/analytics/overview`, `/api/account/system-logs`, `/api/blog/list` | ✅ działa | Krytyczny (spójność panelu WWW) |
+
 ### Telegram (`telegram_bot/`)
 
 | Plik | Rola | Stan |
@@ -101,7 +117,7 @@ Wszystkie 4 piony (A-D) są w znacznym stopniu domknięte.
 
 | Plik | Testy | Stan |
 |------|-------|------|
-| `test_smoke.py` | 181 testów (175 smoke + 6 akceptacyjnych v0.7) | ✅ WSZYSTKIE PRZECHODZĄ |
+| `test_smoke.py` | 182 testy (176 smoke + 6 akceptacyjnych v0.7) | ✅ WSZYSTKIE PRZECHODZĄ |
 
 ### Inne
 
@@ -137,17 +153,24 @@ Wszystkie 4 piony (A-D) są w znacznym stopniu domknięte.
 
 ## 4. Blokery krytyczne
 
-### CRITICAL-1: LIVE — koszty z Binance-fills nie są zapisywane do CostLedger
-- **Plik:** `backend/collector.py` L408-470 (`_execute_confirmed_pending_orders`, ścieżka LIVE)
-- **Problem:** Po place_order na Binance, kod parsuje fills i wyciąga `exec_price`, ale **koszty** (fee_cost, slippage_cost, spread_cost) są nadal szacowane identycznie jak dla DEMO — `notional * taker_fee_rate`. Rzeczywista prowizja z `fills[].commission` jest ignorowana.
-- **Wpływ:** Net PnL w LIVE może być niedokładny o kilka % (Binance fees mogą być mniejsze jeśli BNB jest używany do płacenia opłat, albo inne jeśli jest zero-fee promo).
-- **Fix:** Użyć `sum(float(f.get("commission", 0)) for f in fills)` jako `actual_value` w CostLedger.
+### CRITICAL: Brak otwartych blockerów krytycznych
 
-### CRITICAL-2: Brak periodycznego sync pozycji DB ↔ Binance
-- **Plik:** brak odpowiedniej funkcji
-- **Problem:** Pozycje w DB są aktualizowane tylko przy execution (BUY/SELL). Jeśli użytkownik dokona transakcji bezpośrednio na Binance (poza botem), DB się rozjedzie.
-- **Wpływ:** Portfolio w WWW może nie odzwierciedlać rzeczywistego stanu konta Binance.
-- **Fix:** Dodać `_sync_binance_positions()` wywoływany co N cykli w kolektorze.
+Aktualna sesja nie wykazała nowego krytycznego błędu logiki tradingowej.
+
+### HIGH-1: Brak twardego endpointu KPI „best bot” (zamknięte w sesji 3)
+- **Plik:** `backend/routers/account.py`, `backend/reporting.py`
+- **Status:** ✅ NAPRAWIONE
+- **Fix:** dodano `/api/account/analytics/best-bot-kpi` + metryki `overtrading_score` i `sync_stability` w `performance_overview`.
+
+### HIGH-2: Frontend nie budował się przez brak helpera API (zamknięte w sesji 3)
+- **Plik:** `web_portal/src/lib/api.ts`
+- **Status:** ✅ NAPRAWIONE
+- **Fix:** przywrócono centralny helper `getApiBase`, `getAdminToken`, `withAdminToken`.
+
+### HIGH-3: Brak hard gate LIVE przy niespójnym sync pozycji (zamknięte w sesji 4)
+- **Plik:** `backend/collector.py`, `backend/routers/signals.py`
+- **Status:** ✅ NAPRAWIONE
+- **Fix:** dodano blokadę nowych wejść LIVE przy `sync_stability.status=inconsistent` z `reason_code=inconsistent_portfolio_sync` i diagnostyką w `DecisionTrace`.
 
 ---
 
@@ -157,7 +180,7 @@ Wszystkie 4 piony (A-D) są w znacznym stopniu domknięte.
 |----|------|------|-----------|
 | ~~DEBT-1~~ | ~~Telegram: /confirm i /reject~~ | `telegram_bot/bot.py` | ✅ ZAMKNIĘTY — już zaimplementowane (L371-424) |
 | ~~DEBT-2~~ | ~~Telegram: /governance /freeze /incidents /logs /report~~ | `telegram_bot/bot.py` | ✅ ZAMKNIĘTY — już zaimplementowane (L427-560) |
-| DEBT-3 | CORS: allow_origins=["*"] | `backend/app.py` | LOW |
+| ~~DEBT-3~~ | ~~CORS: allow_origins=["*"]~~ | `backend/app.py` | ✅ NAPRAWIONY — CORS z ENV |
 | ~~DEBT-4~~ | ~~Qty sizing nie odejmuje prowizji~~ | `backend/collector.py` | ✅ NAPRAWIONY — max_cash_after_fees = max_cash/(1+fee) |
 | DEBT-5 | Brak LIMIT orders w LIVE (tylko MARKET) | `backend/routers/orders.py` L383 | LOW |
 | DEBT-6 | AccountSummary widget w frontend nieużywany | `web_portal/src/components/widgets/` | LOW |
@@ -180,9 +203,9 @@ Wszystkie 4 piony (A-D) są w znacznym stopniu domknięte.
 |---------|------|
 | WWW equity vs DB equity | ✅ Spójne — accounting.py liczy z Order history |
 | WWW pozycje vs DB pozycje | ✅ Spójne — Position table |
-| DB pozycje vs Binance pozycje | ⚠️ Brak periodycznego sync (CRITICAL-2) |
+| DB pozycje vs Binance pozycje | ⚠️ Nadal wymaga monitorowania w LIVE (metryka `sync_stability`) |
 | Telegram alerty vs WWW dane | ✅ Spójne — ten sam source (DB) |
-| LIVE fees vs CostLedger | ⚠️ Estimated zamiast actual (CRITICAL-1) |
+| LIVE fees vs CostLedger | ✅ Ujęte w logice prowizji rzeczywistej dla filli Binance |
 | Decision trace WWW | ✅ Spójne — endpoint `/api/signals/execution-trace` |
 
 ---
@@ -191,11 +214,16 @@ Wszystkie 4 piony (A-D) są w znacznym stopniu domknięte.
 
 | ID | Zadanie | Priorytet | Plik/Moduł | Wpływ |
 |----|---------|-----------|------------|-------|
-| ~~TASK-01~~ | ~~LIVE CostLedger: actual Binance commission~~ | ~~CRITICAL~~ | `collector.py` | ✅ DONE (sesja 2, commit 9ac10b0) |
-| ~~TASK-02~~ | ~~Periodyczny sync pozycji DB ↔ Binance~~ | ~~CRITICAL~~ | `collector.py` | ✅ DONE (sesja 2, commit 9ac10b0) |
+| TASK-11 | Audyt widżetów WWW i endpointów (krytyczność + status) | HIGH | `PROJECT_AUDIT_MASTER.md` | ✅ DONE (sesja 3) |
+| TASK-12 | Przywrócenie `web_portal/src/lib/api.ts` + naprawa builda WWW | HIGH | `web_portal/src/lib/api.ts` | ✅ DONE (sesja 3) |
+| TASK-13 | Twardy endpoint KPI `best-bot-kpi` + overtrading/sync stability | HIGH | `backend/reporting.py`, `backend/routers/account.py` | ✅ DONE (sesja 3) |
+| TASK-14 | Hard gate LIVE: blokada nowych wejść gdy `sync_stability` jest `inconsistent` | HIGH | `backend/collector.py`, `backend/routers/signals.py` | ✅ DONE (sesja 4) |
 | ~~TASK-03~~ | ~~Telegram /confirm i /reject~~ | ~~HIGH~~ | `telegram_bot/bot.py` | ✅ już zaimplementowane (false positive) |
 | ~~TASK-04~~ | ~~Qty sizing: odejmij prowizję~~ | ~~MEDIUM~~ | `collector.py` | ✅ DONE (sesja 2) |
-| TASK-05 | CORS allow_origins → proper domains | LOW | `app.py` | Bezpieczeństwo |
+| ~~TASK-05~~ | ~~CORS allow_origins → proper domains~~ | ~~LOW~~ | `app.py` | ✅ DONE (sesja 12.06) |
+| ~~TASK-08~~ | ~~Przywrócenie `web_portal/src/lib/api.ts`~~ | ~~HIGH~~ | `web_portal/src/lib/api.ts` | ✅ DONE (sesja 12.06) |
+| ~~TASK-09~~ | ~~Stabilizacja Binance init offline (`ping=False`)~~ | ~~HIGH~~ | `backend/binance_client.py` | ✅ DONE (sesja 12.06) |
+| ~~TASK-10~~ | ~~Naprawa `npm run lint` (TypeScript check)~~ | ~~MEDIUM~~ | `web_portal/package.json` | ✅ DONE (sesja 12.06) |
 
 ---
 
@@ -212,6 +240,7 @@ Wszystkie 4 piony (A-D) są w znacznym stopniu domknięte.
 | 01.04 iter5 | Portfolio wealth + equity curve + forecast | ✅ |
 | 01.04 iter4 | ATR multipliers, SL cooldown, soft RSI | ✅ |
 | 31.03 iter3 | WAL mode, async fix, 181 testów | ✅ |
+| 12.06 sesja 4 | LIVE hard gate `inconsistent_portfolio_sync` + smoke test | ✅ |
 
 ---
 
@@ -229,19 +258,20 @@ Wszystkie 4 piony (A-D) są w znacznym stopniu domknięte.
 
 ---
 
-## 11. Ostatnia sesja — 2 kwietnia 2026
+## 11. Ostatnia sesja — 12 czerwca 2026 (sesja 4)
 
 ### Co zmieniono
-- Przeprowadzono pełny audyt LIVE trading paths
-- Stworzono PROJECT_AUDIT_MASTER.md (ten plik)
-- Zidentyfikowano 2 blokery krytyczne: LIVE fees accounting, Binance position sync
-- Zidentyfikowano 4 długi techniczne
+- Dodano hard gate LIVE w `collector._screen_entry_candidates`: brak nowych wejść, gdy `sync_stability=inconsistent`
+- Dodano `reason_code=inconsistent_portfolio_sync` z detalami mismatch do `DecisionTrace`
+- Uzupełniono mapowanie `reason_code -> reason_pl` w `backend/routers/signals.py`
+- Dodano test smoke `test_live_sync_inconsistent_blocks_new_entries`
 
 ### Co przetestowano
-- 181/181 smoke testów ✅ (ostatni run: sesja 01.04)
+- `DISABLE_COLLECTOR=true .venv/bin/pytest tests/test_smoke.py -q` → 182/182 ✅
+- `npm run lint` (web_portal) ✅
+- `npm run build` (web_portal) ✅
 
 ### Co zostało
-- TASK-05: CORS allow_origins (LOW) — przed produkcją
 - DEBT-5: LIMIT orders w LIVE (LOW)
 - DEBT-6: AccountSummary widget cleanup (LOW)
-- Żadnych blokerów krytycznych ani ważnych
+- Monitoring `sync_stability` w LIVE nadal wymagany operacyjnie (gate już aktywny)
