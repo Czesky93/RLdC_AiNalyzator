@@ -1,8 +1,8 @@
 # PROJECT_AUDIT_MASTER.md — RLdC Trading BOT
 
-**Data audytu:** 2 kwietnia 2026 (aktualizacja: sesja 2)
+**Data audytu:** 12 czerwca 2026 (aktualizacja: sesja 1)
 **Wersja:** v0.7 beta
-**Testy:** 181/181 PASSED
+**Testy:** 179/181 PASSED (2 znane błędy smoke)
 **TypeScript:** 0 błędów
 **Tryb:** TRADING_MODE=live, ALLOW_LIVE_TRADING=true, AI_PROVIDER=heuristic
 
@@ -195,7 +195,8 @@ Wszystkie 4 piony (A-D) są w znacznym stopniu domknięte.
 | ~~TASK-02~~ | ~~Periodyczny sync pozycji DB ↔ Binance~~ | ~~CRITICAL~~ | `collector.py` | ✅ DONE (sesja 2, commit 9ac10b0) |
 | ~~TASK-03~~ | ~~Telegram /confirm i /reject~~ | ~~HIGH~~ | `telegram_bot/bot.py` | ✅ już zaimplementowane (false positive) |
 | ~~TASK-04~~ | ~~Qty sizing: odejmij prowizję~~ | ~~MEDIUM~~ | `collector.py` | ✅ DONE (sesja 2) |
-| TASK-05 | CORS allow_origins → proper domains | LOW | `app.py` | Bezpieczeństwo |
+| ~~TASK-05~~ | ~~CORS allow_origins → proper domains~~ | ~~LOW~~ | `app.py` | ✅ DONE (sesja 12.06) |
+| ~~TASK-08~~ | ~~Przywrócenie `web_portal/src/lib/api.ts`~~ | ~~HIGH~~ | `web_portal/src/lib/api.ts` | ✅ DONE (sesja 12.06) |
 
 ---
 
@@ -229,19 +230,19 @@ Wszystkie 4 piony (A-D) są w znacznym stopniu domknięte.
 
 ---
 
-## 11. Ostatnia sesja — 2 kwietnia 2026
+## 11. Ostatnia sesja — 12 czerwca 2026
 
 ### Co zmieniono
-- Przeprowadzono pełny audyt LIVE trading paths
-- Stworzono PROJECT_AUDIT_MASTER.md (ten plik)
-- Zidentyfikowano 2 blokery krytyczne: LIVE fees accounting, Binance position sync
-- Zidentyfikowano 4 długi techniczne
+- Przywrócono brakujący moduł `web_portal/src/lib/api.ts` (getApiBase, withAdminToken, getAdminToken)
+- Naprawiono build frontendu (Next.js), który wcześniej kończył się błędem `Module not found: ../lib/api`
+- Zastąpiono `allow_origins=["*"]` konfiguracją CORS opartą o `CORS_ALLOW_ORIGINS` (z bezpiecznym domyślnym localhost)
 
 ### Co przetestowano
-- 181/181 smoke testów ✅ (ostatni run: sesja 01.04)
+- `npm run build` (web_portal) ✅
+- `DISABLE_COLLECTOR=true python -m pytest tests/test_smoke.py -q` → 179/181 (2 znane fail: `test_market_summary`, `test_acceptance_live_positions_returns_source_field`)
 
 ### Co zostało
-- TASK-05: CORS allow_origins (LOW) — przed produkcją
+- Diagnostyka i naprawa dwóch istniejących faili smoke (`test_market_summary`, `test_acceptance_live_positions_returns_source_field`)
 - DEBT-5: LIMIT orders w LIVE (LOW)
 - DEBT-6: AccountSummary widget cleanup (LOW)
 - Żadnych blokerów krytycznych ani ważnych

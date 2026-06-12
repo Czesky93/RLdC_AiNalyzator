@@ -26,6 +26,19 @@ from backend.reevaluation_worker import start_worker, stop_worker
 _ENV_PATH = os.path.join(os.path.dirname(__file__), "..", ".env")
 load_dotenv(dotenv_path=_ENV_PATH, override=False)
 
+_DEFAULT_CORS_ORIGINS = [
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+]
+
+
+def _parse_cors_origins() -> list[str]:
+    raw = os.getenv("CORS_ALLOW_ORIGINS", "")
+    if not raw.strip():
+        return _DEFAULT_CORS_ORIGINS
+    parts = [part.strip() for part in raw.split(",") if part.strip()]
+    return parts or _DEFAULT_CORS_ORIGINS
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -73,7 +86,7 @@ app = FastAPI(
 # CORS middleware - pozwala na łączenie z frontendem
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=_parse_cors_origins(),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
