@@ -1,8 +1,8 @@
 # PROJECT_AUDIT_MASTER.md — RLdC Trading BOT
 
-**Data audytu:** 12 czerwca 2026 (aktualizacja: sesja 1)
+**Data audytu:** 12 czerwca 2026 (aktualizacja: sesja 2)
 **Wersja:** v0.7 beta
-**Testy:** 179/181 PASSED (2 znane błędy smoke)
+**Testy:** 181/181 PASSED
 **TypeScript:** 0 błędów
 **Tryb:** TRADING_MODE=live, ALLOW_LIVE_TRADING=true, AI_PROVIDER=heuristic
 
@@ -157,7 +157,7 @@ Wszystkie 4 piony (A-D) są w znacznym stopniu domknięte.
 |----|------|------|-----------|
 | ~~DEBT-1~~ | ~~Telegram: /confirm i /reject~~ | `telegram_bot/bot.py` | ✅ ZAMKNIĘTY — już zaimplementowane (L371-424) |
 | ~~DEBT-2~~ | ~~Telegram: /governance /freeze /incidents /logs /report~~ | `telegram_bot/bot.py` | ✅ ZAMKNIĘTY — już zaimplementowane (L427-560) |
-| DEBT-3 | CORS: allow_origins=["*"] | `backend/app.py` | LOW |
+| ~~DEBT-3~~ | ~~CORS: allow_origins=["*"]~~ | `backend/app.py` | ✅ NAPRAWIONY — CORS z ENV |
 | ~~DEBT-4~~ | ~~Qty sizing nie odejmuje prowizji~~ | `backend/collector.py` | ✅ NAPRAWIONY — max_cash_after_fees = max_cash/(1+fee) |
 | DEBT-5 | Brak LIMIT orders w LIVE (tylko MARKET) | `backend/routers/orders.py` L383 | LOW |
 | DEBT-6 | AccountSummary widget w frontend nieużywany | `web_portal/src/components/widgets/` | LOW |
@@ -197,6 +197,8 @@ Wszystkie 4 piony (A-D) są w znacznym stopniu domknięte.
 | ~~TASK-04~~ | ~~Qty sizing: odejmij prowizję~~ | ~~MEDIUM~~ | `collector.py` | ✅ DONE (sesja 2) |
 | ~~TASK-05~~ | ~~CORS allow_origins → proper domains~~ | ~~LOW~~ | `app.py` | ✅ DONE (sesja 12.06) |
 | ~~TASK-08~~ | ~~Przywrócenie `web_portal/src/lib/api.ts`~~ | ~~HIGH~~ | `web_portal/src/lib/api.ts` | ✅ DONE (sesja 12.06) |
+| ~~TASK-09~~ | ~~Stabilizacja Binance init offline (`ping=False`)~~ | ~~HIGH~~ | `backend/binance_client.py` | ✅ DONE (sesja 12.06) |
+| ~~TASK-10~~ | ~~Naprawa `npm run lint` (TypeScript check)~~ | ~~MEDIUM~~ | `web_portal/package.json` | ✅ DONE (sesja 12.06) |
 
 ---
 
@@ -234,15 +236,17 @@ Wszystkie 4 piony (A-D) są w znacznym stopniu domknięte.
 
 ### Co zmieniono
 - Przywrócono brakujący moduł `web_portal/src/lib/api.ts` (getApiBase, withAdminToken, getAdminToken)
-- Naprawiono build frontendu (Next.js), który wcześniej kończył się błędem `Module not found: ../lib/api`
+- Naprawiono build frontendu (Next.js), który kończył się błędem `Module not found: ../lib/api`
 - Zastąpiono `allow_origins=["*"]` konfiguracją CORS opartą o `CORS_ALLOW_ORIGINS` (z bezpiecznym domyślnym localhost)
+- Ustabilizowano inicjalizację Binance klienta (`ping=False`) — brak zależności od dostępności sieci/Binance przy starcie
+- Naprawiono skrypt `npm run lint` (teraz `tsc --noEmit`)
 
 ### Co przetestowano
+- `DISABLE_COLLECTOR=true python -m pytest tests/test_smoke.py -q` → 181/181 ✅
+- `npm run lint` (web_portal) ✅
 - `npm run build` (web_portal) ✅
-- `DISABLE_COLLECTOR=true python -m pytest tests/test_smoke.py -q` → 179/181 (2 znane fail: `test_market_summary`, `test_acceptance_live_positions_returns_source_field`)
 
 ### Co zostało
-- Diagnostyka i naprawa dwóch istniejących faili smoke (`test_market_summary`, `test_acceptance_live_positions_returns_source_field`)
 - DEBT-5: LIMIT orders w LIVE (LOW)
 - DEBT-6: AccountSummary widget cleanup (LOW)
 - Żadnych blokerów krytycznych ani ważnych

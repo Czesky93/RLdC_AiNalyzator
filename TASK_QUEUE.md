@@ -20,7 +20,7 @@
 |----|---------|------------|-------|--------|
 | T-07 | Usunięcie nieużywanego widgetu AccountSummary | `widgets/AccountSummary.tsx` | Czystość kodu | DO ZROBIENIA |
 
-### DONE (zamknięte w sesji 2)
+### DONE (zamknięte)
 
 | ID | Zadanie | Zamknięte | Commit |
 |----|---------|----------|--------|
@@ -31,6 +31,8 @@
 | T-06 | Telegram governance stubs | — | Już było zaimplementowane (false positive) |
 | T-05 | CORS allow_origins=["*"] → konfiguracja z ENV | 12.06 sesja 1 | bieżący |
 | T-08 | Przywrócenie `web_portal/src/lib/api.ts` (build fix) | 12.06 sesja 1 | bieżący |
+| T-09 | Stabilizacja Binance init offline (`ping=False`) | 12.06 sesja 2 | bieżący |
+| T-10 | Naprawa skryptu `npm run lint` (TS check) | 12.06 sesja 2 | bieżący |
 
 ---
 
@@ -188,4 +190,3 @@ Otwórz `http://192.168.0.109:3000` i sprawdź: **Ryzyko, Rynki, Portfel, Strate
 1. Dopracować widok `PositionAnalysisView` — WLFI ma 0.01 szt; podsumowanie portfela powinno uwzględniać REAL (3260 szt WLFI).
 2. Dodać nową demo-pozycję BTCEUR z aktualną ceną zakupu i sprawdzić, czy analiza sugeruje decyzję poprawnie.
 3. Poprawić DashboardV2View — tabela "Positions" ma angielskie nagłówki (`Symbol`, `Side`, `Qty`).
-
