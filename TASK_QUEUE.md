@@ -8,7 +8,9 @@
 
 ### HIGH
 
-*Brak otwartych zadań o wysokim priorytecie.*
+| ID | Zadanie | Plik/Moduł | Wpływ | Status |
+|----|---------|------------|-------|--------|
+| T-14 | Dodać hard gate LIVE: blokada nowych wejść gdy `sync_stability` jest `inconsistent` | `backend/collector.py`, `backend/reporting.py` | Ryzyko niespójnych pozycji i błędnych decyzji | DO ZROBIENIA |
 
 ### MEDIUM
 
@@ -33,6 +35,9 @@
 | T-08 | Przywrócenie `web_portal/src/lib/api.ts` (build fix) | 12.06 sesja 1 | bieżący |
 | T-09 | Stabilizacja Binance init offline (`ping=False`) | 12.06 sesja 2 | bieżący |
 | T-10 | Naprawa skryptu `npm run lint` (TS check) | 12.06 sesja 2 | bieżący |
+| T-11 | Audyt widżetów WWW i endpointów (status + krytyczność) | 12.06 sesja 3 | bieżący |
+| T-12 | Przywrócenie helpera API (`getApiBase`, `withAdminToken`, `getAdminToken`) | 12.06 sesja 3 | bieżący |
+| T-13 | Endpoint `GET /api/account/analytics/best-bot-kpi` + metryki overtrading/sync | 12.06 sesja 3 | bieżący |
 
 ---
 

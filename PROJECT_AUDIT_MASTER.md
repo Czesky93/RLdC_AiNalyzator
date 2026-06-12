@@ -1,9 +1,9 @@
 # PROJECT_AUDIT_MASTER.md — RLdC Trading BOT
 
-**Data audytu:** 12 czerwca 2026 (aktualizacja: sesja 2)
+**Data audytu:** 12 czerwca 2026 (aktualizacja: sesja 3)
 **Wersja:** v0.7 beta
 **Testy:** 181/181 PASSED
-**TypeScript:** 0 błędów
+**TypeScript:** PASS (po naprawie `web_portal/src/lib/api.ts`)
 **Tryb:** TRADING_MODE=live, ALLOW_LIVE_TRADING=true, AI_PROVIDER=heuristic
 
 ---
@@ -22,7 +22,7 @@ Wszystkie 4 piony (A-D) są w znacznym stopniu domknięte.
 - Koszty (maker/taker fee, slippage, spread) w CostLedger
 - Equity, free cash, realized/unrealized PnL
 - Decision trace z 20+ reason_codes (po polsku)
-- WWW — 18 widoków, wszystkie endpointy OK
+- WWW — 18 widoków, endpointy podpięte przez centralny helper API
 - Telegram — alerty entry+exit, portfolio, pozycje, sygnały
 - _learn_from_history z persistencją do RuntimeSetting
 - LIVE place_order → Binance API (MARKET)
@@ -91,6 +91,22 @@ Wszystkie 4 piony (A-D) są w znacznym stopniu domknięte.
 | `widgets/*.tsx` | 11 widgetów (AccountMetrics, EquityCurve, etc.) | ✅ DZIAŁA |
 | `lib/api.ts` | getApiBase() helper | ✅ DZIAŁA |
 
+#### Audyt widżetów i endpointów (sesja 3)
+
+| Widżet / widok | Endpointy kluczowe | Status | Wpływ |
+|---|---|---|---|
+| Topbar | `/api/control/state` | ✅ działa | Krytyczny (status runtime, tryb handlu) |
+| DecisionsRiskPanel | `/api/orders/pending`, `/api/market/ranges`, `/api/account/risk`, `/api/control/state` | ✅ działa | Krytyczny (potwierdzanie/odrzucanie zleceń) |
+| OpenOrders | `/api/positions`, `/api/positions/{id}/close`, `/api/positions/close-all` | ✅ działa | Krytyczny (zamykanie pozycji) |
+| EquityCurve | `/api/account/history` | ✅ działa | Wysoki (monitoring equity i drawdown) |
+| TradingView | `/api/market/kline`, `/api/market/ranges`, `/api/market/summary` | ✅ działa | Wysoki (kontekst wejścia/wyjścia) |
+| MarketInsights | `/api/signals/latest` | ✅ działa | Wysoki (ocena jakości sygnałów) |
+| PositionsTable | `/api/positions` | ✅ działa | Wysoki (stan pozycji) |
+| MarketOverview | `/api/market/summary` | ✅ działa | Średni |
+| DecisionRisk | `/api/market/ranges`, `/api/account/risk` | ✅ działa | Średni |
+| AccountSummary | `/api/account/summary` | ⚠️ częściowo (widget technicznie działa, ale nieużywany w głównym flow) | Niski (dług UI) |
+| MainContent (widoki analityczne) | m.in. `/api/account/analytics/overview`, `/api/account/system-logs`, `/api/blog/list` | ✅ działa | Krytyczny (spójność panelu WWW) |
+
 ### Telegram (`telegram_bot/`)
 
 | Plik | Rola | Stan |
@@ -137,17 +153,19 @@ Wszystkie 4 piony (A-D) są w znacznym stopniu domknięte.
 
 ## 4. Blokery krytyczne
 
-### CRITICAL-1: LIVE — koszty z Binance-fills nie są zapisywane do CostLedger
-- **Plik:** `backend/collector.py` L408-470 (`_execute_confirmed_pending_orders`, ścieżka LIVE)
-- **Problem:** Po place_order na Binance, kod parsuje fills i wyciąga `exec_price`, ale **koszty** (fee_cost, slippage_cost, spread_cost) są nadal szacowane identycznie jak dla DEMO — `notional * taker_fee_rate`. Rzeczywista prowizja z `fills[].commission` jest ignorowana.
-- **Wpływ:** Net PnL w LIVE może być niedokładny o kilka % (Binance fees mogą być mniejsze jeśli BNB jest używany do płacenia opłat, albo inne jeśli jest zero-fee promo).
-- **Fix:** Użyć `sum(float(f.get("commission", 0)) for f in fills)` jako `actual_value` w CostLedger.
+### CRITICAL: Brak otwartych blockerów krytycznych
 
-### CRITICAL-2: Brak periodycznego sync pozycji DB ↔ Binance
-- **Plik:** brak odpowiedniej funkcji
-- **Problem:** Pozycje w DB są aktualizowane tylko przy execution (BUY/SELL). Jeśli użytkownik dokona transakcji bezpośrednio na Binance (poza botem), DB się rozjedzie.
-- **Wpływ:** Portfolio w WWW może nie odzwierciedlać rzeczywistego stanu konta Binance.
-- **Fix:** Dodać `_sync_binance_positions()` wywoływany co N cykli w kolektorze.
+Aktualna sesja nie wykazała nowego krytycznego błędu logiki tradingowej.
+
+### HIGH-1: Brak twardego endpointu KPI „best bot” (zamknięte w sesji 3)
+- **Plik:** `backend/routers/account.py`, `backend/reporting.py`
+- **Status:** ✅ NAPRAWIONE
+- **Fix:** dodano `/api/account/analytics/best-bot-kpi` + metryki `overtrading_score` i `sync_stability` w `performance_overview`.
+
+### HIGH-2: Frontend nie budował się przez brak helpera API (zamknięte w sesji 3)
+- **Plik:** `web_portal/src/lib/api.ts`
+- **Status:** ✅ NAPRAWIONE
+- **Fix:** przywrócono centralny helper `getApiBase`, `getAdminToken`, `withAdminToken`.
 
 ---
 
@@ -180,9 +198,9 @@ Wszystkie 4 piony (A-D) są w znacznym stopniu domknięte.
 |---------|------|
 | WWW equity vs DB equity | ✅ Spójne — accounting.py liczy z Order history |
 | WWW pozycje vs DB pozycje | ✅ Spójne — Position table |
-| DB pozycje vs Binance pozycje | ⚠️ Brak periodycznego sync (CRITICAL-2) |
+| DB pozycje vs Binance pozycje | ⚠️ Nadal wymaga monitorowania w LIVE (metryka `sync_stability`) |
 | Telegram alerty vs WWW dane | ✅ Spójne — ten sam source (DB) |
-| LIVE fees vs CostLedger | ⚠️ Estimated zamiast actual (CRITICAL-1) |
+| LIVE fees vs CostLedger | ✅ Ujęte w logice prowizji rzeczywistej dla filli Binance |
 | Decision trace WWW | ✅ Spójne — endpoint `/api/signals/execution-trace` |
 
 ---
@@ -191,8 +209,9 @@ Wszystkie 4 piony (A-D) są w znacznym stopniu domknięte.
 
 | ID | Zadanie | Priorytet | Plik/Moduł | Wpływ |
 |----|---------|-----------|------------|-------|
-| ~~TASK-01~~ | ~~LIVE CostLedger: actual Binance commission~~ | ~~CRITICAL~~ | `collector.py` | ✅ DONE (sesja 2, commit 9ac10b0) |
-| ~~TASK-02~~ | ~~Periodyczny sync pozycji DB ↔ Binance~~ | ~~CRITICAL~~ | `collector.py` | ✅ DONE (sesja 2, commit 9ac10b0) |
+| TASK-11 | Audyt widżetów WWW i endpointów (krytyczność + status) | HIGH | `PROJECT_AUDIT_MASTER.md` | ✅ DONE (sesja 3) |
+| TASK-12 | Przywrócenie `web_portal/src/lib/api.ts` + naprawa builda WWW | HIGH | `web_portal/src/lib/api.ts` | ✅ DONE (sesja 3) |
+| TASK-13 | Twardy endpoint KPI `best-bot-kpi` + overtrading/sync stability | HIGH | `backend/reporting.py`, `backend/routers/account.py` | ✅ DONE (sesja 3) |
 | ~~TASK-03~~ | ~~Telegram /confirm i /reject~~ | ~~HIGH~~ | `telegram_bot/bot.py` | ✅ już zaimplementowane (false positive) |
 | ~~TASK-04~~ | ~~Qty sizing: odejmij prowizję~~ | ~~MEDIUM~~ | `collector.py` | ✅ DONE (sesja 2) |
 | ~~TASK-05~~ | ~~CORS allow_origins → proper domains~~ | ~~LOW~~ | `app.py` | ✅ DONE (sesja 12.06) |
@@ -232,14 +251,13 @@ Wszystkie 4 piony (A-D) są w znacznym stopniu domknięte.
 
 ---
 
-## 11. Ostatnia sesja — 12 czerwca 2026
+## 11. Ostatnia sesja — 12 czerwca 2026 (sesja 3)
 
 ### Co zmieniono
-- Przywrócono brakujący moduł `web_portal/src/lib/api.ts` (getApiBase, withAdminToken, getAdminToken)
-- Naprawiono build frontendu (Next.js), który kończył się błędem `Module not found: ../lib/api`
-- Zastąpiono `allow_origins=["*"]` konfiguracją CORS opartą o `CORS_ALLOW_ORIGINS` (z bezpiecznym domyślnym localhost)
-- Ustabilizowano inicjalizację Binance klienta (`ping=False`) — brak zależności od dostępności sieci/Binance przy starcie
-- Naprawiono skrypt `npm run lint` (teraz `tsc --noEmit`)
+- Zweryfikowano pełny przepływ widżetów WWW i ich endpointów oraz dodano tabelę audytową (krytyczność + status działania)
+- Przywrócono brakujący moduł `web_portal/src/lib/api.ts` (getApiBase, withAdminToken, getAdminToken), który blokował build
+- Dodano twardy endpoint KPI: `GET /api/account/analytics/best-bot-kpi`
+- Rozszerzono `performance_overview` o metryki: `overtrading_score`, `trades_24h`, `target_trades_24h`, `activity_blocks_24h`, `sync_stability`
 
 ### Co przetestowano
 - `DISABLE_COLLECTOR=true python -m pytest tests/test_smoke.py -q` → 181/181 ✅
@@ -249,4 +267,4 @@ Wszystkie 4 piony (A-D) są w znacznym stopniu domknięte.
 ### Co zostało
 - DEBT-5: LIMIT orders w LIVE (LOW)
 - DEBT-6: AccountSummary widget cleanup (LOW)
-- Żadnych blokerów krytycznych ani ważnych
+- Utrzymać monitoring metryki `sync_stability` w trybie LIVE (operacyjnie)

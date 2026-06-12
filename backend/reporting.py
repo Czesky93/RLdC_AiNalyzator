@@ -5,7 +5,7 @@ Reporting and analytics layer built on top of accounting and risk.
 from __future__ import annotations
 
 from collections import defaultdict
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Dict, List
 
 from sqlalchemy.orm import Session
@@ -33,12 +33,63 @@ from backend.database import (
 )
 
 
+def _live_sync_stability(db: Session, mode: str) -> Dict[str, object]:
+    if mode != "live":
+        return {
+            "status": "not_applicable",
+            "score": None,
+            "in_binance_not_local": [],
+            "in_local_not_binance": [],
+            "mismatch_count": 0,
+        }
+    try:
+        from backend.routers.positions import _get_live_spot_positions
+
+        live_spot = _get_live_spot_positions(db)
+        live_symbols = {str(p.get("symbol", "")).upper() for p in live_spot if p.get("symbol")}
+        local_symbols = {
+            str(p.symbol).upper()
+            for p in db.query(Position).filter(Position.mode == "live").all()
+            if p.symbol
+        }
+        in_binance_not_local = sorted(live_symbols - local_symbols)
+        in_local_not_binance = sorted(local_symbols - live_symbols)
+        mismatch_count = len(in_binance_not_local) + len(in_local_not_binance)
+        universe = max(1, len(live_symbols | local_symbols))
+        score = max(0.0, 1.0 - (mismatch_count / universe))
+        if mismatch_count == 0:
+            status = "stable"
+        elif score >= 0.7:
+            status = "warning"
+        else:
+            status = "inconsistent"
+        return {
+            "status": status,
+            "score": round(score, 4),
+            "in_binance_not_local": in_binance_not_local,
+            "in_local_not_binance": in_local_not_binance,
+            "mismatch_count": mismatch_count,
+        }
+    except Exception as exc:
+        _ = exc  # celowo bez ekspozycji szczegółu wyjątku do API
+        return {
+            "status": "unavailable",
+            "score": None,
+            "in_binance_not_local": [],
+            "in_local_not_binance": [],
+            "mismatch_count": 0,
+            "error": "sync_check_unavailable",
+        }
+
+
 def performance_overview(db: Session, mode: str = "demo") -> Dict[str, object]:
     orders = db.query(Order).filter(Order.mode == mode, Order.status == "FILLED").all()
     summary = summarize_orders(orders, db=db, label="overview")
     risk = compute_risk_snapshot(db, mode=mode)
     blocked = blocked_decisions_summary(db, mode=mode)
     state = compute_demo_account_state(db) if mode == "demo" else None
+    now = utc_now_naive()
+    day_ago = now - timedelta(hours=24)
 
     cooldown_count = (
         db.query(DecisionTrace)
@@ -50,6 +101,32 @@ def performance_overview(db: Session, mode: str = "demo") -> Dict[str, object]:
         .filter(DecisionTrace.mode == mode, DecisionTrace.reason_code == "kill_switch_gate")
         .count()
     )
+    filled_24h = [
+        o for o in orders
+        if (o.timestamp or utc_now_naive()) >= day_ago
+    ]
+    trades_24h = len(filled_24h)
+    active_symbols_24h = len({str(o.symbol).upper() for o in filled_24h if o.symbol})
+    target_trades_24h = max(6, active_symbols_24h * 3)
+    activity_reasons = [
+        "activity_gate_day",
+        "activity_gate_symbol_hour",
+        "pending_cooldown_active",
+        "symbol_cooldown_active",
+    ]
+    activity_blocks_24h = (
+        db.query(DecisionTrace)
+        .filter(
+            DecisionTrace.mode == mode,
+            DecisionTrace.timestamp >= day_ago,
+            DecisionTrace.reason_code.in_(activity_reasons),
+        )
+        .count()
+    )
+    excess_ratio = max(0.0, (trades_24h - target_trades_24h) / max(target_trades_24h, 1))
+    block_pressure = min(1.0, activity_blocks_24h / max(trades_24h, 1))
+    overtrading_score = min(1.0, (excess_ratio * 0.7) + (block_pressure * 0.3))
+    sync_stability = _live_sync_stability(db, mode)
     return {
         "mode": mode,
         "gross_pnl": summary["gross_pnl"],
@@ -66,6 +143,11 @@ def performance_overview(db: Session, mode: str = "demo") -> Dict[str, object]:
         "cooldown_activations": cooldown_count,
         "kill_switch_activations": kill_switch_count,
         "cost_leakage_ratio": summary["cost_leakage_ratio"],
+        "trades_24h": trades_24h,
+        "target_trades_24h": target_trades_24h,
+        "activity_blocks_24h": activity_blocks_24h,
+        "overtrading_score": round(overtrading_score, 4),
+        "sync_stability": sync_stability,
         "risk_snapshot": risk,
         "account_state": state,
     }
